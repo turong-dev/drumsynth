@@ -1,0 +1,20 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Host-side renderer. Auditions the engine without any hardware."
+
+[dependencies]
+drum-engine = { workspace = true, features = ["debug-params"] }
+hound = "3.5"
+clap = { version = "4", features = ["derive"] }
+
+# Live playback. Optional because it drags in an OS audio stack, and on a
+# headless CI box you only want the WAV path.
+cpal = { version = "0.15", optional = true }
+
+[features]
+default = []
+# cargo run --features live -- play
+live = ["dep:cpal"]

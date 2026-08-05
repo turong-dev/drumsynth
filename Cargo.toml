@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+
+# `firmware` is deliberately NOT a workspace member.
+#
+# It builds for thumbv7em-none-eabihf with a different linker script and
+# runtime, and mixing that into a workspace that also builds host binaries
+# means fighting over `.cargo/config.toml` and feature unification. Keeping
+# it out means `cargo test` at the root Just Works.
+#
+# Build it explicitly:  cd firmware && cargo build --release
+members = ["engine", "render"]
+exclude = ["firmware"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+drum-engine = { path = "engine" }
+
+# Release profile for host rendering. The firmware crate has its own.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

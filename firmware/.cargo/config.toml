@@ -1,0 +1,26 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    # teensy4-bsp's runtime feature supplies this. It places code in ITCM and
+    # data in DTCM, which is what gets you the full 600MHz without stalling on
+    # flash reads. If your cycle counts look implausibly bad, check this is
+    # actually being applied.
+    "-C", "link-arg=-Tt4link.x",
+]
+
+# There is no `cargo run` story here by default: the Teensy bootloader wants a
+# HEX file, not an ELF, and flashing goes through teensy_loader_cli or the
+# Teensy Loader GUI.
+#
+# Once you have cargo-binutils installed (`cargo install cargo-binutils` plus
+# `rustup component add llvm-tools-preview`), the loop is:
+#
+#     cargo build --release --bin bench
+#     rust-objcopy -O ihex target/thumbv7em-none-eabihf/release/bench bench.hex
+#     teensy_loader_cli --mcu=TEENSY41 -w -v bench.hex
+#
+# See flash.sh in this directory, which wraps that up.
+[alias]
+bench-build = "build --release --bin bench"

@@ -1,0 +1,60 @@
+[package]
+name = "firmware"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Teensy 4.1 target for drum-engine."
+
+# NOTE ON VERSIONS
+#
+# Nothing below has been compiled. Run `cargo add` for each and take whatever
+# is current rather than trusting these numbers.
+#
+# The one that matters: the SAI driver landed in imxrt-hal 0.6.0 (26 July
+# 2026). teensy4-bsp bundles its own imxrt-hal, so before you plan any audio
+# work, check what it pins:
+#
+#     cargo tree -p firmware | grep imxrt-hal
+#
+# If it is below 0.6, `imxrt_hal::sai` is not reachable through the BSP and
+# you have three options: wait for a bump, open a PR bumping it, or depend on
+# imxrt-hal and imxrt-ral directly and use teensy4-bsp only for the runtime
+# and pin definitions.
+#
+# The bench binary does not care — it needs no audio at all — so you can start
+# measuring today regardless of how that shakes out.
+
+[dependencies]
+drum-engine = { path = "../engine" }
+
+teensy4-bsp = { version = "0.5", features = ["rt"] }
+teensy4-panic = "0.3"
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+
+# Logging over USB serial rather than RTT.
+#
+# The Teensy 4.1 has SWD pads on the underside but no populated header, so
+# probe-rs and defmt-over-RTT are awkward here in a way they are not on a
+# Daisy. USB CDC is the idiomatic Teensy route and needs no extra hardware:
+# flash, then `screen /dev/ttyACM0 115200` or equivalent.
+imxrt-log = { version = "0.1", default-features = false, features = ["log", "usbd"] }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 2          # symbols cost nothing in flash and make disassembly readable
+overflow-checks = false
+panic = "abort"
+
+# Always build the engine optimised, even in a debug firmware build.
+# An unoptimised DSP inner loop on an M7 is slow enough to be misleading —
+# you will conclude you are over budget when you are not.
+[profile.dev.package.drum-engine]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+debug = 2

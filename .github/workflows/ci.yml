@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The engine's tests run on the host at host speed. This is the loop you
+  # live in.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  # The important one.
+  #
+  # This cross-compiles the engine for the Teensy's target without needing a
+  # Teensy, or even the firmware crate. It is what catches std leaking in
+  # through a dependency, a missing math intrinsic, or an accidental
+  # allocation — on the commit that introduced it rather than the first time
+  # you try to flash.
+  #
+  # Costs about thirty seconds. Worth it every time.
+  cross-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: engine builds for Cortex-M7
+        run: cargo build -p drum-engine --target thumbv7em-none-eabihf --release
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-features -- -D warnings
+      - name: clippy on the target
+        run: cargo clippy -p drum-engine --target thumbv7em-none-eabihf -- -D warnings
+
+  # Not run by default: the firmware crate depends on teensy4-bsp, whose
+  # imxrt-hal version may not yet expose the SAI driver. Enable this once
+  # `cargo tree | grep imxrt-hal` shows 0.6 or later.
+  #
+  # firmware:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         targets: thumbv7em-none-eabihf
+  #     - run: cd firmware && cargo build --release --bin bench
