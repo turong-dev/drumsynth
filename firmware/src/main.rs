@@ -61,23 +61,14 @@
 use teensy4_panic as _;
 
 use drum_engine::{
-    midi::{MidiEvent, MidiParser},
-    DrumEngine, BLOCK, NUM_MACROS, TRACKS,
+    midi::{handle_midi, MidiParser},
+    DrumEngine, BLOCK,
 };
 // The LPUART `read()` is a trait method (embedded-hal 0.2 `serial::Read`),
 // not inherent — bring it into scope or the call won't resolve.
 use embedded_hal::serial::Read as _;
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
-
-/// First CC number reserved for track macros.
-const CC_TRACK_BASE: u8 = 20;
-
-/// CC stride between successive tracks' macro blocks.
-const CC_TRACK_STRIDE: u8 = 10;
-
-/// CC for the master gain. Following MIDI convention.
-const CC_MASTER_GAIN: u8 = 7;
 
 /// Interleaved stereo scratch buffer handed to the DMA.
 ///
@@ -151,6 +142,8 @@ fn main() -> ! {
         // notes cannot delay an audio deadline.
         while let Ok(byte) = midi_uart.read() {
             if let Some(event) = parser.push(byte) {
+                // Shared with the host `device` harness — the Teensy and the
+                // Mac tuning rig interpret the same bytes identically.
                 handle_midi(engine, event);
             }
         }
@@ -184,43 +177,5 @@ fn audio_callback(engine: &mut DrumEngine, left: &mut [f32; BLOCK], right: &mut 
     for i in 0..BLOCK {
         tx[i * 2] = left[i];
         tx[i * 2 + 1] = right[i];
-    }
-}
-
-/// Apply a MIDI event to the engine.
-fn handle_midi(engine: &mut DrumEngine, event: MidiEvent) {
-    match event {
-        MidiEvent::NoteOn { note, velocity } => {
-            // `trigger_note` will route via the engine's note-map; unmapped
-            // notes return `None` and silent ignore is the correct behaviour.
-            engine.trigger_note(note, velocity);
-        }
-        MidiEvent::ControlChange { controller, value } => {
-            apply_cc(engine, controller, value);
-        }
-        MidiEvent::Panic => engine.panic(),
-    }
-}
-
-/// Map CC numbers onto engine parameters — macro/track-grid + master.
-///
-/// `set_macro` recomputes coefficients, which involves `expf` calls — too
-/// expensive for an audio interrupt but entirely fine here in the main loop.
-/// If you later move MIDI handling into an interrupt, this needs to move back
-/// out again, or become a "params are dirty" flag that the main loop acts on.
-fn apply_cc(engine: &mut DrumEngine, controller: u8, value: f32) {
-    if controller == CC_MASTER_GAIN {
-        engine.master_gain = value;
-        return;
-    }
-
-    // Track macro grid: 20..117 covers 8 tracks x 10 stride, 8 macros / track.
-    if controller >= CC_TRACK_BASE {
-        let offset = controller - CC_TRACK_BASE;
-        let track = offset / CC_TRACK_STRIDE;
-        let macro_idx = offset % CC_TRACK_STRIDE;
-        if track < TRACKS as u8 && macro_idx < NUM_MACROS as u8 {
-            engine.tracks[track as usize].set_macro(macro_idx as usize, value);
-        }
     }
 }

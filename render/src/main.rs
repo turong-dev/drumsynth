@@ -25,6 +25,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use drum_engine::machines::MachineId;
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
 
+/// The MIDI-in / audio-out device mode. Behind the `live` feature with the
+/// rest of the host audio stack.
+#[cfg(feature = "live")]
+mod device;
+
 /// The 8-track kit you get from `DrumEngine::new()`.
 #[derive(Parser)]
 #[command(name = "render", about = "Audition the drum engine without hardware")]
@@ -53,16 +58,16 @@ enum Command {
     /// `<macro>` is the macro's name uppercased (`TUNE`, `SWEEP`, `DEC`, ...).
     Sweep {
         /// Machine to sweep a knob of.
-        #[arg(value_enum)]
+        #[arg(value_enum, default_value = "bd-classic")]
         machine: MachineArg,
         /// Macro knob to sweep, by name (case-insensitive).
-        #[arg(value_name = "macro")]
+        #[arg(value_name = "macro", default_value = "DEC")]
         macro_name: String,
         /// Lowest value.
-        #[arg(long)]
+        #[arg(long, default_value_t = 0.0)]
         from: f32,
         /// Highest value.
-        #[arg(long)]
+        #[arg(long, default_value_t = 1.0)]
         to: f32,
         /// How many steps.
         #[arg(long, default_value_t = 8)]
@@ -104,6 +109,25 @@ enum Command {
         /// Tempo in BPM.
         #[arg(short, long, default_value_t = 130.0)]
         bpm: f32,
+    },
+    /// Run the engine as a MIDI-in / audio-out device.
+    ///
+    /// Exposes a virtual CoreMIDI input port (so any DAW or controller can
+    /// sequence it) and renders through the audio device named by `--out` —
+    /// BlackHole, your speakers, or an aggregate device you created. The
+    /// engine is fixed at 48 kHz, so the device must run at that rate.
+    #[cfg(feature = "live")]
+    Device {
+        /// Substring to match against output device names. Defaults to
+        /// "BlackHole" if one is installed, else the system default device.
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Name of the virtual MIDI input port other apps see.
+        #[arg(long, default_value = "Drumkit Engine")]
+        port: String,
+        /// Print available output devices and exit.
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -233,6 +257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         #[cfg(feature = "live")]
         Command::Play { bpm } => play_live(bpm)?,
+
+        #[cfg(feature = "live")]
+        Command::Device { out, port, list } => device::run(&out, &port, list)?,
     }
 
     Ok(())
@@ -275,6 +302,11 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
 #[derive(Default)]
 struct Pattern {
     tracks: [[bool; 16]; TRACKS],
+    /// Per-step semitone offsets, applied via [`Track::retune`] before each
+    /// trigger. 0 = the track's macro pitch; anything else transposes that
+    /// hit. All-zero (the default) is the pitchless kit. Row `i` only means
+    /// anything when `tracks[i][s]` is `true`.
+    notes: [[i8; 16]; TRACKS],
 }
 
 impl Pattern {
@@ -282,6 +314,19 @@ impl Pattern {
     /// tom fill, cowbell accent, and a tonal synth pulse.
     fn demo() -> Self {
         let mut p = Self::default();
+        p.set_melody(
+            7,
+            &[
+                (0, 0),
+                (4, -3),
+                (8, -5),
+                (12, -3),
+                (16, -2),
+                (20, -3),
+                (24, 0),
+                (28, 5),
+            ],
+        );
 
         // 0 — BdClassic (kick): syncopated groove
         p.tracks[0] = [
@@ -333,6 +378,14 @@ impl Pattern {
 
         p
     }
+
+    /// Set a melody lane: `(step, semitones)` pairs. Steps run 0..32 across
+    /// two bars; offsets are clamped into the 16-step row by step % 16.
+    fn set_melody(&mut self, track: usize, notes: &[(usize, i8)]) {
+        for &(step, semis) in notes {
+            self.notes[track][step % 16] = semis;
+        }
+    }
 }
 
 /// Render a pattern, block by block, exactly as the firmware will.
@@ -369,6 +422,12 @@ fn render_pattern(pattern: &Pattern, bpm: f32, bars: usize) -> Vec<f32> {
             while i < TRACKS {
                 if pattern.tracks[i][s] {
                     let vel = default_velocity_for_track(i, s);
+                    // Melodic lane: transpose the track to the step's note
+                    // *before* the trigger so the hit lands in pitch.
+                    let semis = pattern.notes[i][s];
+                    if semis != 0 {
+                        engine.tracks[i].retune(semis as f32);
+                    }
                     engine.trigger(i, vel);
                 }
                 i += 1;
@@ -425,6 +484,10 @@ fn setup_kit_mix(engine: &mut DrumEngine) {
     }
 
     // Macro tweaks — a few beyond the defaults to get more musical results:
+
+    // Kick: Driven with decay
+    engine.tracks[0].set_macro(3, 0.75); // DEC
+    engine.tracks[0].set_macro(4, 0.5); // DRIVE
 
     // Clap: slightly more body, less pure noise (BAL default 0.80 noise-heavy)
     engine.tracks[4].set_macro(6, 0.65); // BAL

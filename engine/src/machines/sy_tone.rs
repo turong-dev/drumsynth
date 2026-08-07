@@ -35,6 +35,9 @@ pub struct SyTone {
     feedback: f32,
     /// Last modulator output, used for feedback.
     mod_last: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -50,6 +53,7 @@ impl SyTone {
             mod_amount: 0.0,
             feedback: 0.0,
             mod_last: 0.0,
+            freq_scale: 1.0,
             level: 0.0,
         };
         m.set_macros(macros);
@@ -68,8 +72,8 @@ impl SyTone {
         let amp_decay_s = 0.05 + 1.95 * macros[5]; // DEC 50..2000 ms
         let level = macros[6]; // LEVEL 0..1
 
-        self.carrier.set_freq(carrier_hz);
-        self.mod_hz = carrier_hz * mod_ratio;
+        self.carrier.set_freq(carrier_hz * self.freq_scale);
+        self.mod_hz = carrier_hz * mod_ratio * self.freq_scale;
         self.modulator.set_freq(self.mod_hz);
         self.mod_amount = mod_amount;
         self.feedback = feedback;
@@ -78,6 +82,20 @@ impl SyTone {
         self.mod_env
             .set_coeff(decay_coeff(mod_decay_s, SAMPLE_RATE));
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales carrier and modulator together so the FM ratio — and with it
+    /// the timbre — survives the transpose. This is the machine that makes
+    /// a channel-mapped track genuinely melodic. Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.carrier.set_freq(self.carrier.freq() * ratio);
+        self.mod_hz *= ratio;
+        self.modulator.set_freq(self.mod_hz);
     }
 
     /// Begin a hit at `velocity` (0.0..=1.0).
@@ -240,5 +258,39 @@ mod tests {
             let v = s.tick();
             assert!(v.is_finite(), "feedback produced NaN: {v}");
         }
+    }
+
+    #[test]
+    fn retune_transposes_an_octave() {
+        let id = MachineId::SyTone;
+        let macros = id.default_macros();
+        let window = (0.03 * SAMPLE_RATE) as usize;
+        let crossings = |semis: f32| {
+            let mut s = SyTone::new(&macros);
+            s.retune(semis);
+            s.trigger(1.0);
+            let mut prev = s.tick();
+            let mut c = 0u32;
+            for _ in 1..window {
+                let v = s.tick();
+                if (prev < 0.0) != (v < 0.0) {
+                    c += 1;
+                }
+                prev = v;
+            }
+            c
+        };
+        let base = crossings(0.0);
+        let octave = crossings(12.0);
+        // +12 semitones = 2x frequency ≈ 2x zero crossings. FM sidebands make
+        // it approximate; demand a clear gap, not exact doubling.
+        assert!(
+            octave > base * 3 / 2,
+            "octave-up should cross clearly more: {base} vs {octave}"
+        );
+        assert!(
+            octave < base * 4,
+            "crossing counts implausible: {base} vs {octave}"
+        );
     }
 }

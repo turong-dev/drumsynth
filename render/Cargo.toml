@@ -11,10 +11,20 @@ hound = "3.5"
 clap = { version = "4", features = ["derive"] }
 
 # Live playback. Optional because it drags in an OS audio stack, and on a
-# headless CI box you only want the WAV path.
+# headless CI box you only want the WAV path. `midir` + `rtrb` power the
+# `device` mode (virtual MIDI input + a real-time queue to the audio thread).
 cpal = { version = "0.15", optional = true }
+midir = { version = "0.11", optional = true }
+rtrb = { version = "0.3", optional = true }
 
 [features]
 default = []
 # cargo run --features live -- play
-live = ["dep:cpal"]
+# cargo run --features live -- device
+live = ["dep:cpal", "dep:midir", "dep:rtrb"]
+
+# The device-mode integration test exercises real CoreMIDI virtual ports, so
+# it needs the live stack.
+[[test]]
+name = "device"
+required-features = ["live"]

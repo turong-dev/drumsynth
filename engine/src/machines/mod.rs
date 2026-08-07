@@ -881,6 +881,29 @@ impl MachineSlot {
         }
     }
 
+    /// Transpose by `semis` semitones relative to the machine's macro pitch.
+    ///
+    /// Scales every oscillator the machine owns so the whole voice — sweep,
+    /// FM ratio, detune — moves in pitch. Noise-only machines (Hat Classic)
+    /// no-op. Control rate, never in the per-sample path. Absolute, not
+    /// incremental: passing the same value twice is a no-op.
+    pub fn retune(&mut self, semis: f32) {
+        match self {
+            Self::BdClassic(m) => m.retune(semis),
+            Self::BdFm(m) => m.retune(semis),
+            Self::Tom(m) => m.retune(semis),
+            Self::SdNatural(m) => m.retune(semis),
+            Self::SdFm(m) => m.retune(semis),
+            Self::Rs(m) => m.retune(semis),
+            Self::Cp(m) => m.retune(semis),
+            Self::HatClassic(m) => m.retune(semis),
+            Self::HhBasic(m) => m.retune(semis),
+            Self::CyMetallic(m) => m.retune(semis),
+            Self::CbClassic(m) => m.retune(semis),
+            Self::SyTone(m) => m.retune(semis),
+        }
+    }
+
     /// Force to silence.
     pub fn reset(&mut self) {
         match self {

@@ -39,6 +39,9 @@ pub struct Cp {
     lp: OnePoleLp,
     body_hz: f32,
     body_ratio: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     body_gain: f32,
     noise_gain: f32,
     level: f32,
@@ -56,6 +59,7 @@ impl Cp {
             lp: OnePoleLp::new(0.0),
             body_hz: 0.0,
             body_ratio: 0.0,
+            freq_scale: 1.0,
             body_gain: 0.0,
             noise_gain: 0.0,
             level: 0.0,
@@ -75,9 +79,9 @@ impl Cp {
         let bal = macros[6].clamp(0.0, 1.0); // BAL noise↔body
         let level = macros[7]; // LEVEL 0..1
 
-        self.body_hz = body_hz;
+        self.body_hz = body_hz * self.freq_scale;
         self.body_ratio = body_ratio;
-        self.body.set_freq(body_hz * body_ratio);
+        self.body.set_freq(self.body_hz * body_ratio);
         self.body_env
             .set_coeff(decay_coeff(body_decay_s, SAMPLE_RATE));
         self.noise_env
@@ -88,6 +92,18 @@ impl Cp {
         self.body_gain = 1.0 - bal;
         self.noise_gain = bal;
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales the FM body; the noise crunch is pitchless and untouched.
+    /// Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.body_hz *= ratio;
+        self.body.set_freq(self.body_hz * self.body_ratio);
     }
 
     /// Hit it.

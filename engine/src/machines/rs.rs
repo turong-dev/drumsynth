@@ -32,6 +32,9 @@ pub struct Rs {
     noise_env: DecayEnv,
     hp: OnePoleHp,
     noise_level: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -46,6 +49,7 @@ impl Rs {
             noise_env: DecayEnv::new(0.0),
             hp: OnePoleHp::new(0.0),
             noise_level: 0.0,
+            freq_scale: 1.0,
             level: 0.0,
         };
         s.set_macros(macros);
@@ -62,8 +66,8 @@ impl Rs {
         let hp_hz = 1000.0 + 5000.0 * macros[5]; // HPF 1..6 kHz
         let level = macros[6]; // LEVEL 0..1
 
-        self.osc_a.set_freq(body_hz);
-        self.osc_b.set_freq(body_hz * detune);
+        self.osc_a.set_freq(body_hz * self.freq_scale);
+        self.osc_b.set_freq(body_hz * detune * self.freq_scale);
         self.body_env
             .set_coeff(decay_coeff(body_decay_s, SAMPLE_RATE));
         self.noise_env
@@ -71,6 +75,18 @@ impl Rs {
         self.hp.set_coeff(cutoff_coeff(hp_hz, SAMPLE_RATE));
         self.noise_level = noise_level;
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales both oscillators, preserving the detune between them. The
+    /// noise tick is pitchless and untouched. Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.osc_a.set_freq(self.osc_a.freq() * ratio);
+        self.osc_b.set_freq(self.osc_b.freq() * ratio);
     }
 
     /// Hit it.

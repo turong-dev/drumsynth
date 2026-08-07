@@ -29,6 +29,9 @@ pub struct CbClassic {
     env: DecayEnv,
     hp: OnePoleHp,
     lp: OnePoleLp,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -43,6 +46,7 @@ impl CbClassic {
             env: DecayEnv::new(0.0),
             hp: OnePoleHp::new(0.0),
             lp: OnePoleLp::new(0.0),
+            freq_scale: 1.0,
             level: 0.0,
         };
         m.set_macros(macros);
@@ -57,12 +61,24 @@ impl CbClassic {
         let bpf_hz = 300.0 + 3700.0 * macros[3]; // BPF 300..4000 Hz
         let level = macros[4]; // LEVEL 0..1
 
-        self.freq_a = base_hz;
-        self.freq_b = base_hz * detune;
+        self.freq_a = base_hz * self.freq_scale;
+        self.freq_b = base_hz * detune * self.freq_scale;
         self.env.set_coeff(decay_coeff(decay_s, SAMPLE_RATE));
         self.hp.set_coeff(cutoff_coeff(bpf_hz * 0.5, SAMPLE_RATE));
         self.lp.set_coeff(cutoff_coeff(bpf_hz * 2.0, SAMPLE_RATE));
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales both oscillators, preserving the fixed ratio between them.
+    /// Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = crate::dsp::fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.freq_a *= ratio;
+        self.freq_b *= ratio;
     }
 
     /// Hit it.

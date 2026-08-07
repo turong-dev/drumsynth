@@ -35,6 +35,9 @@ pub struct BdClassic {
     start_hz: f32,
     end_hz: f32,
     sweep_range: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     drive: f32,
     level: f32,
 }
@@ -49,6 +52,7 @@ impl BdClassic {
             start_hz: 0.0,
             end_hz: 0.0,
             sweep_range: 0.0,
+            freq_scale: 1.0,
             drive: 0.0,
             level: 0.0,
         };
@@ -65,8 +69,8 @@ impl BdClassic {
         let drive = 1.0 + 5.0 * macros[4]; // DRIVE 1..6
         let level = macros[5]; // LEVEL 0..1
 
-        self.start_hz = end_hz * pitch_ratio;
-        self.end_hz = end_hz;
+        self.start_hz = end_hz * pitch_ratio * self.freq_scale;
+        self.end_hz = end_hz * self.freq_scale;
         self.sweep_range = self.start_hz - self.end_hz;
         self.drive = drive;
         self.level = level;
@@ -78,6 +82,20 @@ impl BdClassic {
         // Macros 6 (WAVE) and 7 (TRN) are reserved for Phase 2 expansion
         // (oscillator shape, transient layer). Macros 6/7 default to 0,
         // which is sine-only / no transient — the previous voice's sound.
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales both sweep endpoints, so the whole pitch drop moves with the
+    /// note rather than only the landing pitch. Absolute, not incremental:
+    /// calling it twice with the same value is a no-op.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.start_hz *= ratio;
+        self.end_hz *= ratio;
+        self.sweep_range = self.start_hz - self.end_hz;
     }
 
     /// Begin a hit at `velocity` (0.0..=1.0).
@@ -175,5 +193,37 @@ mod tests {
         }
         let late = count_crossings(&mut k, window);
         assert!(early > late, "pitch did not fall: {early} then {late}");
+    }
+
+    #[test]
+    fn retune_transposes_and_survives_recompute() {
+        let macros = crate::machines::MachineId::BdClassic.default_macros();
+        let window = (0.02 * SAMPLE_RATE) as usize;
+        let crossings = |semis: f32, recompute: bool| {
+            let mut k = BdClassic::new(&macros);
+            k.retune(semis);
+            if recompute {
+                k.set_macros(&macros);
+            }
+            k.trigger(1.0);
+            let mut prev = k.tick();
+            let mut c = 0;
+            for _ in 1..window {
+                let s = k.tick();
+                if (prev < 0.0) != (s < 0.0) {
+                    c += 1;
+                }
+                prev = s;
+            }
+            c
+        };
+        let base = crossings(0.0, false);
+        let up = crossings(12.0, false);
+        let up_recomputed = crossings(12.0, true);
+        assert!(up > base, "octave-up should cross more: {base} vs {up}");
+        assert!(
+            i32::abs(up_recomputed - up) <= 1,
+            "set_macros dropped the retune: {up} vs {up_recomputed}"
+        );
     }
 }

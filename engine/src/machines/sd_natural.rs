@@ -35,6 +35,9 @@ pub struct SdNatural {
     hp: OnePoleHp,
     body_gain: f32,
     noise_gain: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -50,6 +53,7 @@ impl SdNatural {
             hp: OnePoleHp::new(0.0),
             body_gain: 0.0,
             noise_gain: 0.0,
+            freq_scale: 1.0,
             level: 0.0,
         };
         s.set_macros(macros);
@@ -66,8 +70,8 @@ impl SdNatural {
         let noise_mix = macros[5]; // NMIX 0..1
         let level = macros[6]; // LEVEL 0..1
 
-        self.body_a.set_freq(body_hz);
-        self.body_b.set_freq(body_hz * body_ratio);
+        self.body_a.set_freq(body_hz * self.freq_scale);
+        self.body_b.set_freq(body_hz * body_ratio * self.freq_scale);
         self.body_env
             .set_coeff(decay_coeff(body_decay_s, SAMPLE_RATE));
         self.noise_env
@@ -79,6 +83,19 @@ impl SdNatural {
         self.body_gain = 1.0 - noise_mix.clamp(0.0, 1.0);
         self.noise_gain = noise_mix.clamp(0.0, 1.0);
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales both shell tones, preserving the fixed ratio between them.
+    /// The noise rattle is pitchless and untouched. Absolute, not
+    /// incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.body_a.set_freq(self.body_a.freq() * ratio);
+        self.body_b.set_freq(self.body_b.freq() * ratio);
     }
 
     /// Hit it.

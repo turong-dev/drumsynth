@@ -265,6 +265,26 @@ Key decisions:
 - Kit loaded from SDIO into RAM at boot (README's existing suggestion).
 - 16-bit/48kHz mono WAV, ~1MB holds a sensible kit.
 
+### Phase 7 — Note layer (DONE)
+
+- [x] Per-machine `retune(semis)` on all 12 machines: scales every oscillator
+      the voice owns so the sweep, FM ratio, and detune all move together.
+      Noise-only machines (Hat Classic) no-op. Absolute, not incremental.
+- [x] Each machine stores an internal `freq_scale` so `set_macros` re-applies
+      the transpose — a later macro CC recompute keeps the note. Verified by
+      tests on BdClassic and SyTone.
+- [x] `MachineSlot::retune` dispatch + `Track::retune` passthrough — control
+      rate, never in the per-sample path.
+- [x] `dsp::fast::semitone_ratio` (exp2f under the hood, same speed family as
+      the existing `exp2_approx`; control-rate calls are negligible).
+- [x] `SineOsc::freq()` getter added so FM/sweep machines can read the current
+      carrier back for scaling.
+- [x] Renderer: per-step semitone lane on `Pattern` (track 7 bassline), the
+      firmware-style "retune before trigger" discipline.
+- [x] 134 tests green (3 new: BdClassic retune+recompute, SyTone octave
+      transpose, Track-level transpose that survives a macro recompute).
+      Fmt + clippy clean (only pre-existing lfo.rs / sy_tone.rs warnings).
+
 ## Settled decisions
 
 | question | answer |

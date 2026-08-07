@@ -46,6 +46,16 @@ impl SineOsc {
         self.inc = hz * INV_SAMPLE_RATE;
     }
 
+    /// Current frequency in Hz.
+    ///
+    /// Read back when a machine needs to transpose an oscillator that does
+    /// not keep its own base-frequency field — scale the current value and
+    /// hand it back to [`set_freq`](Self::set_freq).
+    #[inline(always)]
+    pub fn freq(&self) -> f32 {
+        self.inc * crate::SAMPLE_RATE
+    }
+
     /// Reset phase to zero.
     ///
     /// Worth doing on trigger for percussion: a kick that starts at a

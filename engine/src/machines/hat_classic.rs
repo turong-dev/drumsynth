@@ -79,6 +79,11 @@ impl HatClassic {
         self.env.is_active()
     }
 
+    /// Transpose is a no-op — bandpassed noise has no pitch to shift.
+    /// Present so [`MachineSlot::retune`](crate::machines::MachineSlot::retune)
+    /// can dispatch uniformly across the catalogue.
+    pub fn retune(&mut self, _semis: f32) {}
+
     /// One sample.
     #[inline(always)]
     pub fn tick(&mut self) -> f32 {

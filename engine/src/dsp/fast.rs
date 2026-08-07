@@ -146,6 +146,15 @@ pub fn exp2_approx(x: f32) -> f32 {
     poly * f32::from_bits(bits)
 }
 
+/// Semitone-to-frequency ratio: `2^(semis / 12)`.
+///
+/// The transpose factor behind chromatic note tracking. One call per
+/// trigger/control pass, never per sample. `semis` can be negative.
+#[inline(always)]
+pub fn semitone_ratio(semis: f32) -> f32 {
+    exp2_approx(semis * (1.0 / 12.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +230,14 @@ mod tests {
             let exact = libm::exp2f(x);
             approx::assert_relative_eq!(approx_val, exact, max_relative = 0.002);
         }
+    }
+
+    #[test]
+    fn semitone_ratio_is_octave_accurate() {
+        approx::assert_relative_eq!(semitone_ratio(0.0), 1.0, max_relative = 1e-4);
+        approx::assert_relative_eq!(semitone_ratio(12.0), 2.0, max_relative = 0.002);
+        approx::assert_relative_eq!(semitone_ratio(-12.0), 0.5, max_relative = 0.002);
+        // A perfect fifth ≈ 1.4983.
+        approx::assert_relative_eq!(semitone_ratio(7.0), 1.4983, max_relative = 0.003);
     }
 }

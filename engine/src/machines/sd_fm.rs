@@ -37,6 +37,9 @@ pub struct SdFm {
     mod_amount: f32,
     body_gain: f32,
     noise_gain: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -55,6 +58,7 @@ impl SdFm {
             mod_amount: 0.0,
             body_gain: 0.0,
             noise_gain: 0.0,
+            freq_scale: 1.0,
             level: 0.0,
         };
         s.set_macros(macros);
@@ -72,8 +76,8 @@ impl SdFm {
         let noise_mix = macros[6].clamp(0.0, 1.0); // NMIX 0..1
         let level = macros[7]; // LEVEL 0..1
 
-        self.carrier.set_freq(carrier_hz);
-        self.mod_hz = carrier_hz * mod_ratio;
+        self.carrier.set_freq(carrier_hz * self.freq_scale);
+        self.mod_hz = carrier_hz * mod_ratio * self.freq_scale;
         self.modulator.set_freq(self.mod_hz);
         self.mod_amount = mod_amount;
 
@@ -88,6 +92,20 @@ impl SdFm {
         self.body_gain = 1.0 - noise_mix;
         self.noise_gain = noise_mix;
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales carrier and modulator together so the FM ratio — and with it
+    /// the snare's timbre — survives the transpose. The noise rattle is
+    /// pitchless and untouched. Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.carrier.set_freq(self.carrier.freq() * ratio);
+        self.mod_hz *= ratio;
+        self.modulator.set_freq(self.mod_hz);
     }
 
     /// Hit it.

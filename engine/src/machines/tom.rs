@@ -35,6 +35,9 @@ pub struct Tom {
     start_hz: f32,
     end_hz: f32,
     sweep_range: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     stick_amount: f32,
     level: f32,
 }
@@ -52,6 +55,7 @@ impl Tom {
             start_hz: 0.0,
             end_hz: 0.0,
             sweep_range: 0.0,
+            freq_scale: 1.0,
             stick_amount: 0.0,
             level: 0.0,
         };
@@ -68,8 +72,8 @@ impl Tom {
         let stick_amount = macros[4]; // STICK 0..1
         let level = macros[5]; // LEVEL 0..1
 
-        self.start_hz = end_hz * pitch_ratio;
-        self.end_hz = end_hz;
+        self.start_hz = end_hz * pitch_ratio * self.freq_scale;
+        self.end_hz = end_hz * self.freq_scale;
         self.sweep_range = self.start_hz - self.end_hz;
         self.stick_amount = stick_amount;
         self.level = level;
@@ -83,6 +87,20 @@ impl Tom {
         self.stick_env
             .set_coeff(decay_coeff(0.003 + 0.005 * stick_amount, SAMPLE_RATE));
         self.hp.set_coeff(cutoff_coeff(3000.0, SAMPLE_RATE));
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales both sweep endpoints so the whole pitch drop moves with the
+    /// note. The stick click is pitchless noise and is untouched. Absolute,
+    /// not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = crate::dsp::fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.start_hz *= ratio;
+        self.end_hz *= ratio;
+        self.sweep_range = self.start_hz - self.end_hz;
     }
 
     /// Begin a hit at `velocity` (0.0..=1.0).

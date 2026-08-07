@@ -9,14 +9,29 @@
 //! pure logic and therefore testable on the host. The firmware's job is to
 //! get bytes out of a peripheral, nothing more.
 //!
-//! Note-to-track routing lives in [`crate::DrumEngine`], not here — this
-//! module parses bytes into events, the engine decides what an event means.
+//! Event-to-engine routing also lives here as [`handle_midi`] / [`apply_cc`],
+//! shared verbatim by the firmware (MIDI over UART) and the host `device`
+//! harness (MIDI over a virtual CoreMIDI port) so both targets interpret the
+//! same bytes identically. Parsing bytes into events is this module; deciding
+//! what an event *means* is the shared router.
+//!
+//! Routing is **one channel per track**:
+//!
+//! * A `NoteOn` on channel `N` plays track `N` *chromatically* — the note
+//!   number sets the pitch (middle C is the machine's macro pitch, each
+//!   semitone away transposes the voice by that many). This is the shared
+//!   [`crate::DrumEngine::trigger_channel`] path; a note on a channel with
+//!   no track is silent.
+//! * A `ControlChange` on channel `N` edits track `N`'s macros. `CC 7`
+//!   (master gain) is global on any channel.
 
 /// A parsed message the engine cares about.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MidiEvent {
     /// Note on with velocity `0.0..=1.0`.
     NoteOn {
+        /// MIDI channel, `0..=15`.
+        channel: u8,
         /// MIDI note number.
         note: u8,
         /// Normalised velocity.
@@ -24,6 +39,8 @@ pub enum MidiEvent {
     },
     /// Continuous controller.
     ControlChange {
+        /// MIDI channel, `0..=15`.
+        channel: u8,
         /// Controller number.
         controller: u8,
         /// Normalised value, `0.0..=1.0`.
@@ -49,6 +66,76 @@ pub mod notes {
     pub const CLAP: u8 = 39;
     /// High tom.
     pub const HIGH_TOM: u8 = 50;
+}
+
+// --- Shared event routing -----------------------------------------------
+//
+// These numbers and the two functions below are the one place that defines
+// how an incoming MIDI message becomes an engine action. Firmware and the
+// host `device` harness both call [`handle_midi`], so a controller or DAW
+// behaves identically against the Teensy and against the Mac tuning rig.
+
+/// MIDI note that plays a track at its macro-configured pitch. Middle C.
+/// Every semitone away transposes the voice by that many semitones.
+pub const CHROMATIC_REFERENCE_NOTE: u8 = 60;
+
+/// First CC number reserved for track macros. On channel `N`, CC
+/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_MACROS` sets track `N`'s macros.
+pub const CC_TRACK_BASE: u8 = 20;
+
+/// CC for the master gain. Following MIDI convention. Global on any channel.
+pub const CC_MASTER_GAIN: u8 = 7;
+
+/// Apply a MIDI event to the engine.
+///
+/// `NoteOn` routes through [`crate::DrumEngine::trigger_channel`]: the
+/// channel picks the track, the note picks the pitch. `ControlChange`
+/// reaches that channel's track-macro block or the master gain. `Panic`
+/// silences everything.
+pub fn handle_midi(engine: &mut crate::DrumEngine, event: MidiEvent) {
+    match event {
+        MidiEvent::NoteOn {
+            channel,
+            note,
+            velocity,
+        } => {
+            engine.trigger_channel(channel, note, velocity);
+        }
+        MidiEvent::ControlChange {
+            channel,
+            controller,
+            value,
+        } => {
+            apply_cc(engine, channel, controller, value);
+        }
+        MidiEvent::Panic => engine.panic(),
+    }
+}
+
+/// Map CC numbers onto engine parameters — channel-scoped track macros +
+/// master.
+///
+/// A CC on channel `N` edits track `N`, matching the note routing. `CC 7`
+/// stays global. `set_macro` recomputes coefficients, which involves `expf`
+/// calls — too expensive for an audio interrupt but entirely fine in the main
+/// loop or a MIDI callback. In the firmware this is the reason MIDI is drained
+/// from the main loop rather than an interrupt; the host harness keeps the
+/// same discipline (parsed on the CoreMIDI thread, applied from the audio
+/// thread between engine blocks).
+pub fn apply_cc(engine: &mut crate::DrumEngine, channel: u8, controller: u8, value: f32) {
+    if controller == CC_MASTER_GAIN {
+        engine.master_gain = value;
+        return;
+    }
+
+    // Channel-scoped track macros: CC 20..27 on channel N sets track N.
+    if controller >= CC_TRACK_BASE {
+        let macro_idx = (controller - CC_TRACK_BASE) as usize;
+        let track = channel as usize;
+        if track < crate::TRACKS && macro_idx < crate::NUM_MACROS {
+            engine.tracks[track].set_macro(macro_idx, value);
+        }
+    }
 }
 
 /// Incremental MIDI parser.
@@ -146,6 +233,7 @@ impl MidiParser {
                     None
                 } else {
                     Some(MidiEvent::NoteOn {
+                        channel: self.status & 0x0F,
                         note: self.data[0],
                         velocity: velocity as f32 * INV_127,
                     })
@@ -159,6 +247,7 @@ impl MidiParser {
                     Some(MidiEvent::Panic)
                 } else {
                     Some(MidiEvent::ControlChange {
+                        channel: self.status & 0x0F,
                         controller: cc,
                         value: self.data[1] as f32 * INV_127,
                     })
@@ -214,9 +303,33 @@ mod tests {
         let events = feed(&mut p, &[0x99, 36, 127]);
         assert_eq!(events.len(), 1);
         match events.get(0) {
-            MidiEvent::NoteOn { note, velocity } => {
+            MidiEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+            } => {
+                assert_eq!(channel, 9, "channel must be preserved");
                 assert_eq!(note, 36);
                 approx::assert_abs_diff_eq!(velocity, 1.0, epsilon = 1e-6);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_change_carries_channel() {
+        let mut p = MidiParser::new();
+        let events = feed(&mut p, &[0xB2, 1, 64]); // ch2, CC 1
+        assert_eq!(events.len(), 1);
+        match events.get(0) {
+            MidiEvent::ControlChange {
+                channel,
+                controller,
+                value,
+            } => {
+                assert_eq!(channel, 2);
+                assert_eq!(controller, 1);
+                approx::assert_abs_diff_eq!(value, 64.0 / 127.0, epsilon = 1e-6);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -285,5 +398,119 @@ mod tests {
         let mut e = DrumEngine::new();
         assert_eq!(e.trigger_note(notes::KICK, 1.0), Some(0));
         assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
+    }
+
+    #[test]
+    fn router_note_on_triggers_its_channel() {
+        use crate::{DrumEngine, MachineId};
+        // Channel 0 → track 0. Note 60 is the chromatic reference (no
+        // transpose), so the kick plays at its macro pitch.
+        let mut e = DrumEngine::new();
+        handle_midi(
+            &mut e,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: CHROMATIC_REFERENCE_NOTE,
+                velocity: 0.8,
+            },
+        );
+        assert!(e.tracks[0].is_active(), "kick should be sounding");
+        assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
+        assert!(!e.tracks[1].is_active(), "channel 0 must not touch track 1");
+
+        // A channel with no track lands silently, like the firmware expects.
+        let mut e = DrumEngine::new();
+        handle_midi(
+            &mut e,
+            MidiEvent::NoteOn {
+                channel: crate::TRACKS as u8,
+                note: CHROMATIC_REFERENCE_NOTE,
+                velocity: 1.0,
+            },
+        );
+        assert!(!e.is_active());
+    }
+
+    #[test]
+    fn router_cc_is_channel_scoped() {
+        use crate::DrumEngine;
+        // One engine for the whole test — DrumEngine is ~260 KB, so a fresh
+        // one per assertion would stack-overflow the 2 MB test thread.
+        let mut e = DrumEngine::new();
+        let mac7_track1_before = e.tracks[1].base_macros[7];
+
+        // CC 27 = 20 + 7 → macro 7. On channel 0 it edits track 0 only.
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TRACK_BASE + 7,
+                value: 0.5,
+            },
+        );
+        assert_eq!(e.tracks[0].base_macros[7], 0.5, "macro 7 on track 0");
+        assert_eq!(
+            e.tracks[1].base_macros[7], mac7_track1_before,
+            "channel 0 must not touch track 1"
+        );
+
+        // The same CC on channel 3 edits track 3 instead.
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 3,
+                controller: CC_TRACK_BASE + 7,
+                value: 0.25,
+            },
+        );
+        assert_eq!(e.tracks[3].base_macros[7], 0.25, "macro 7 on track 3");
+        assert_eq!(
+            e.tracks[0].base_macros[7], 0.5,
+            "channel 3 must not touch track 0"
+        );
+
+        // CC 7 = master gain, conventionally, on any channel.
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 9,
+                controller: CC_MASTER_GAIN,
+                value: 0.25,
+            },
+        );
+        assert_eq!(e.master_gain, 0.25);
+
+        // Macro CC on a channel with no track is ignored.
+        let mac0_before = e.tracks[0].base_macros[0];
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: crate::TRACKS as u8,
+                controller: CC_TRACK_BASE,
+                value: 1.0,
+            },
+        );
+        assert_eq!(e.master_gain, 0.25);
+        assert_eq!(
+            e.tracks[0].base_macros[0], mac0_before,
+            "channel beyond the track count must be ignored"
+        );
+    }
+
+    #[test]
+    fn router_panic_silences() {
+        use crate::DrumEngine;
+        let mut e = DrumEngine::new();
+        handle_midi(
+            &mut e,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: CHROMATIC_REFERENCE_NOTE,
+                velocity: 1.0,
+            },
+        );
+        assert!(e.is_active());
+        handle_midi(&mut e, MidiEvent::Panic);
+        assert!(!e.is_active(), "panic should cut everything");
     }
 }

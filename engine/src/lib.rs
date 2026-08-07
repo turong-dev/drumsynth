@@ -367,6 +367,14 @@ impl Track {
         }
     }
 
+    /// Transpose the machine by `semis` semitones relative to its macro
+    /// pitch. Absolute, not incremental — the whole voice (sweep, FM ratio,
+    /// detune) moves. Survives later macro recomputes via each machine's
+    /// internal `freq_scale`. Noise-only machines no-op. Control rate.
+    pub fn retune(&mut self, semis: f32) {
+        self.slot.retune(semis);
+    }
+
     /// Replace the strip configuration. Coefficients are recomputed.
     pub fn set_strip(&mut self, params: &StripParams) {
         let prev = self.strip;
@@ -622,7 +630,10 @@ pub struct DrumEngine {
     /// Send-FX bus (delay + reverb). Drained by [`Self::process`] after the
     /// dry sample sum and before master clip.
     pub send_fx: dsp::SendFx,
-    /// Note-number → track index. `None` = no track handles this note.
+    /// Note-number → track index, for the programmatic [`Self::trigger_note`]
+    /// path. `None` = no track handles this note. The shared MIDI router
+    /// (`midi::handle_midi`) does not consult this — it is one channel per
+    /// track via [`Self::trigger_channel`].
     pub note_map: [Option<u8>; 128],
     /// Post-sum, pre-output limiter gain, linear.
     pub master_gain: f32,
@@ -717,15 +728,38 @@ impl DrumEngine {
     ///
     /// Returns `Some(track)` when the note landed, `None` when nothing is
     /// mapped to it (silence is the correct behaviour on an unassigned note).
+    ///
+    /// Note: the shared MIDI router (`midi::handle_midi`) does **not** use
+    /// this path — it routes one channel per track via [`trigger_channel`].
+    /// This note-map API is kept for programmatic use (kits, sound design).
     pub fn trigger_note(&mut self, note: u8, velocity: f32) -> Option<usize> {
         let track = self.note_map[note as usize]?;
         self.trigger(track as usize, velocity);
         Some(track as usize)
     }
 
-    /// Map a MIDI note to a track. `None` means unassigned (default). The
-    /// firmware CC layer has no knowledge of MIDI semantics beyond this; it
-    /// reads the map straight back when it sees a note it cannot interpret.
+    /// Chromatic trigger for the one-channel-per-track MIDI path.
+    ///
+    /// The MIDI channel selects the track (`channel` < [`TRACKS`]); the note
+    /// number sets its pitch — [`midi::CHROMATIC_REFERENCE_NOTE`] (middle C)
+    /// is the machine's macro-configured pitch, and each semitone away
+    /// transposes the whole voice via [`Track::retune`] before the hit.
+    /// Choke/layer masks apply exactly as in [`Self::trigger`].
+    ///
+    /// Returns `Some(track)` when the note landed, `None` when the channel
+    /// has no track (silence is correct on an unassigned channel).
+    pub fn trigger_channel(&mut self, channel: u8, note: u8, velocity: f32) -> Option<usize> {
+        let track = channel as usize;
+        if track >= TRACKS {
+            return None;
+        }
+        let semis = note as f32 - crate::midi::CHROMATIC_REFERENCE_NOTE as f32;
+        self.tracks[track].retune(semis);
+        self.trigger(track, velocity);
+        Some(track)
+    }
+
+    /// Map a MIDI note to a track. `None` means unassigned (default).
     pub fn set_note(&mut self, note: u8, track: Option<u8>) {
         self.note_map[note as usize] = track;
     }
@@ -954,6 +988,114 @@ mod tests {
         let mut e = DrumEngine::new();
         assert_eq!(e.trigger_note(72, 1.0), None); // C5, unassigned
         assert!(!e.is_active());
+    }
+
+    #[test]
+    fn trigger_channel_routes_channel_to_track() {
+        let mut e = DrumEngine::new();
+        assert_eq!(e.trigger_channel(3, 60, 1.0), Some(3));
+        assert!(e.tracks[3].is_active(), "track 3 should be sounding");
+        assert!(
+            !e.tracks[0].is_active(),
+            "channel 3 must not trigger track 0"
+        );
+    }
+
+    #[test]
+    fn trigger_channel_ignores_channels_without_tracks() {
+        let mut e = DrumEngine::new();
+        assert_eq!(e.trigger_channel(TRACKS as u8, 60, 1.0), None);
+        assert!(!e.is_active());
+    }
+
+    #[test]
+    fn trigger_channel_is_chromatic() {
+        // Track 7 is SyTone (Middle C). Pitch measured by zero crossings in
+        // the first ~30 ms of a hit, where the FM sidebands are still busy
+        // but the carrier dominates. Two octaves up = 4x the frequency.
+        let crossings = |e: &mut DrumEngine| {
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut prev = 0.0f32;
+            let mut count = 0u32;
+            let window = (0.03 * SAMPLE_RATE) as usize;
+            let mut done = 0;
+            while done < window {
+                let n = window.min(done + BLOCK);
+                e.process(&mut l, &mut r);
+                for &s in l.iter().take(n - done) {
+                    if (prev < 0.0) != (s < 0.0) {
+                        count += 1;
+                    }
+                    prev = s;
+                }
+                done = n;
+            }
+            count
+        };
+
+        let mut e = DrumEngine::new();
+        e.trigger_channel(7, 60, 1.0); // middle C = reference pitch
+        let base = crossings(&mut e);
+
+        let mut e = DrumEngine::new();
+        e.trigger_channel(7, 84, 1.0); // two octaves up
+        let high = crossings(&mut e);
+
+        assert!(
+            high > base * 3 && high < base * 5,
+            "two octaves up should roughly quadruple crossings: {base} vs {high}"
+        );
+    }
+
+    #[test]
+    fn track_retune_transposes_and_survives_macro_recompute() {
+        // Track 7 is SyTone (Middle C). Pitch measured by zero crossings in
+        // the first ~30 ms of a hit, where the FM sidebands are still busy
+        // but the carrier dominates.
+        let crossings = |e: &mut DrumEngine| {
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            e.trigger(7, 1.0);
+            let mut prev = 0.0f32;
+            let mut count = 0u32;
+            let window = (0.03 * SAMPLE_RATE) as usize;
+            let mut done = 0;
+            while done < window {
+                let n = window.min(done + BLOCK);
+                e.process(&mut l, &mut r);
+                for &s in l.iter().take(n - done) {
+                    if (prev < 0.0) != (s < 0.0) {
+                        count += 1;
+                    }
+                    prev = s;
+                }
+                done = n;
+            }
+            count
+        };
+
+        let mut e = DrumEngine::new();
+        let base = crossings(&mut e);
+
+        let mut e = DrumEngine::new();
+        e.tracks[7].retune(12.0);
+        let octave = crossings(&mut e);
+
+        assert!(
+            octave > base * 3 / 2 && octave < base * 4,
+            "octave-up should roughly double crossings: {base} vs {octave}"
+        );
+
+        // A macro recompute (e.g. from a CC) must not drop the transpose.
+        let mut e = DrumEngine::new();
+        e.tracks[7].retune(12.0);
+        e.tracks[7].set_macro(5, 0.5); // DEC — recomputes coefficients
+        let after_recompute = crossings(&mut e);
+        assert!(
+            (after_recompute as i64 - octave as i64).abs() <= 2,
+            "macro recompute dropped the retune: {octave} vs {after_recompute}"
+        );
     }
 
     #[test]

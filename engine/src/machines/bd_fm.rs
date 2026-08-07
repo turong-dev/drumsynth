@@ -34,6 +34,9 @@ pub struct BdFm {
     end_hz: f32,
     sweep_range: f32,
     mod_hz: f32,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     mod_amount: f32,
     level: f32,
 }
@@ -51,6 +54,7 @@ impl BdFm {
             end_hz: 0.0,
             sweep_range: 0.0,
             mod_hz: 0.0,
+            freq_scale: 1.0,
             mod_amount: 0.0,
             level: 0.0,
         };
@@ -69,10 +73,10 @@ impl BdFm {
         let mod_amount = macros[6] * 4.0; // MOD.AMT 0..4 (in carrier cycles)
         let level = macros[7]; // LEVEL 0..1
 
-        self.start_hz = end_hz * pitch_ratio;
-        self.end_hz = end_hz;
+        self.start_hz = end_hz * pitch_ratio * self.freq_scale;
+        self.end_hz = end_hz * self.freq_scale;
         self.sweep_range = self.start_hz - self.end_hz;
-        self.mod_hz = end_hz * mod_ratio;
+        self.mod_hz = end_hz * mod_ratio * self.freq_scale;
         self.mod_amount = mod_amount;
         self.level = level;
 
@@ -82,6 +86,21 @@ impl BdFm {
             .set_coeff(decay_coeff(pitch_decay_s, SAMPLE_RATE));
         self.mod_env
             .set_coeff(decay_coeff(mod_decay_s, SAMPLE_RATE));
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales the sweep endpoints *and* the modulator, so the FM ratio (and
+    /// therefore the timbre) is preserved while everything moves in pitch.
+    /// Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        self.start_hz *= ratio;
+        self.end_hz *= ratio;
+        self.sweep_range = self.start_hz - self.end_hz;
+        self.mod_hz *= ratio;
     }
 
     /// Begin a hit at `velocity` (0.0..=1.0).

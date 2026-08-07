@@ -49,6 +49,9 @@ pub struct HhBasic {
     lp: OnePoleLp,
     /// Whether to reset oscillator phases on trigger.
     reset_on_trig: bool,
+    /// Semitone multiplier applied to every frequency. Set by [`retune`],
+    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    freq_scale: f32,
     level: f32,
 }
 
@@ -63,6 +66,7 @@ impl HhBasic {
             hp: OnePoleHp::new(0.0),
             lp: OnePoleLp::new(0.0),
             reset_on_trig: false,
+            freq_scale: 1.0,
             level: 0.0,
         };
         h.set_macros(macros);
@@ -84,7 +88,7 @@ impl HhBasic {
         for (i, r) in BASE_RATIOS.iter().enumerate() {
             let detune_sign = if i % 2 == 0 { 1.0 } else { -1.0 };
             let detune = 1.0 + detune_sign * tone_spread * (i as f32 + 1.0) * 0.1;
-            self.freqs[i] = base_hz * r * detune;
+            self.freqs[i] = base_hz * r * detune * self.freq_scale;
         }
 
         self.env.set_coeff(decay_coeff(main_decay_s, SAMPLE_RATE));
@@ -94,6 +98,19 @@ impl HhBasic {
         self.lp.set_coeff(cutoff_coeff(bpf_hz * 1.4, SAMPLE_RATE));
         self.reset_on_trig = reset_on_trig;
         self.level = level;
+    }
+
+    /// Transpose by `semis` semitones relative to the macro pitch.
+    ///
+    /// Scales the whole osc bank, preserving the ratios and detune between
+    /// the six oscillators. Absolute, not incremental.
+    pub fn retune(&mut self, semis: f32) {
+        let new_scale = crate::dsp::fast::semitone_ratio(semis);
+        let ratio = new_scale / self.freq_scale;
+        self.freq_scale = new_scale;
+        for f in self.freqs.iter_mut() {
+            *f *= ratio;
+        }
     }
 
     /// Hit it.
