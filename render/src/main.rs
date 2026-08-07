@@ -7,7 +7,7 @@
 //! Three modes:
 //!
 //! ```text
-//! render  — write a pattern to a WAV file
+//! render  — write a demo pattern to a WAV file
 //! sweep   — write one WAV per value of a parameter, for A/B-ing
 //! play    — real-time playback (requires --features live)
 //! ```
@@ -16,10 +16,16 @@
 //! with decay times from 100ms to 800ms takes a fraction of a second, and
 //! flipping between them in an editor is a much faster way to find the right
 //! one than turning a knob in real time.
+//!
+//! Performance counters are taken against a generic 8-track kit on track 0:
+//! since machines are normalised over 8 macros each, you sweep any knob of
+//! any machine the same way — `<machine> <macro-name> --from --to --steps`.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use drum_engine::{DrumEngine, Params, VoiceId, BLOCK, SAMPLE_RATE};
+use drum_engine::machines::MachineId;
+use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
 
+/// The 8-track kit you get from `DrumEngine::new()`.
 #[derive(Parser)]
 #[command(name = "render", about = "Audition the drum engine without hardware")]
 struct Cli {
@@ -41,11 +47,17 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         bars: usize,
     },
-    /// Render one file per value of a swept parameter.
+    /// Render one file per value of a swept macro knob.
+    ///
+    /// `<machine>` is one of `bd-classic`, `sd-natural`, `hat-classic`.
+    /// `<macro>` is the macro's name uppercased (`TUNE`, `SWEEP`, `DEC`, ...).
     Sweep {
-        /// Which parameter to sweep.
+        /// Machine to sweep a knob of.
         #[arg(value_enum)]
-        param: SweepParam,
+        machine: MachineArg,
+        /// Macro knob to sweep, by name (case-insensitive).
+        #[arg(value_name = "macro")]
+        macro_name: String,
         /// Lowest value.
         #[arg(long)]
         from: f32,
@@ -59,7 +71,34 @@ enum Command {
         #[arg(short, long, default_value = "sweep")]
         output_dir: String,
     },
-    /// Play the demo pattern in real time.
+    /// Render a single one-shot of the given machine with custom macros.
+    Machine {
+        /// Machine to render.
+        #[arg(value_enum)]
+        machine: MachineArg,
+        /// Override macros, in the form `TUNE=0.5 DEC=0.2 ...`.
+        #[arg(long = "macro", value_name = "NAME=VALUE", num_args = 1)]
+        macros: Vec<String>,
+        /// Output WAV path.
+        #[arg(short, long, default_value = "out.wav")]
+        output: String,
+        /// Length in seconds.
+        #[arg(long, default_value_t = 2.0)]
+        seconds: f32,
+    },
+    /// Render one hit per machine in the catalogue, in order.
+    ///
+    /// Each machine gets its own short segment, so you can audition the
+    /// whole catalogue in one pass without clicking through individual files.
+    Catalog {
+        /// Output WAV path.
+        #[arg(short, long, default_value = "out.wav")]
+        output: String,
+        /// Seconds per machine.
+        #[arg(long, default_value_t = 1.5)]
+        per_machine: f32,
+    },
+    /// Render a kit pattern in real time through the sound card.
     #[cfg(feature = "live")]
     Play {
         /// Tempo in BPM.
@@ -69,77 +108,36 @@ enum Command {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-enum SweepParam {
-    KickDecay,
-    KickPitchDecay,
-    KickStartHz,
-    KickDrive,
-    SnareNoiseMix,
-    SnareDecay,
-    HatDecay,
+enum MachineArg {
+    BdClassic,
+    BdFm,
+    Tom,
+    SdNatural,
+    SdFm,
+    Rs,
+    Cp,
+    HatClassic,
+    HhBasic,
+    CyMetallic,
+    CbClassic,
+    SyTone,
 }
 
-impl SweepParam {
-    fn apply(self, p: &mut Params, v: f32) {
+impl MachineArg {
+    fn id(self) -> MachineId {
         match self {
-            Self::KickDecay => p.kick.decay_s = v,
-            Self::KickPitchDecay => p.kick.pitch_decay_s = v,
-            Self::KickStartHz => p.kick.start_hz = v,
-            Self::KickDrive => p.kick.drive = v,
-            Self::SnareNoiseMix => p.snare.noise_mix = v,
-            Self::SnareDecay => p.snare.decay_s = v,
-            Self::HatDecay => p.hat.decay_s = v,
-        }
-    }
-
-    /// Which voice to trigger when auditioning this parameter in isolation.
-    fn voice(self) -> VoiceId {
-        match self {
-            Self::KickDecay | Self::KickPitchDecay | Self::KickStartHz | Self::KickDrive => {
-                VoiceId::Kick
-            }
-            Self::SnareNoiseMix | Self::SnareDecay => VoiceId::Snare,
-            Self::HatDecay => VoiceId::Hat,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::KickDecay => "kick_decay",
-            Self::KickPitchDecay => "kick_pitch_decay",
-            Self::KickStartHz => "kick_start_hz",
-            Self::KickDrive => "kick_drive",
-            Self::SnareNoiseMix => "snare_noise_mix",
-            Self::SnareDecay => "snare_decay",
-            Self::HatDecay => "hat_decay",
-        }
-    }
-}
-
-/// A 16-step pattern per voice. `true` means trigger.
-struct Pattern {
-    kick: [bool; 16],
-    snare: [bool; 16],
-    hat: [bool; 16],
-}
-
-impl Default for Pattern {
-    fn default() -> Self {
-        // Nothing clever, just something with enough going on to hear the
-        // voices interact and check the bus does not clip when they collide.
-        Self {
-            kick: [
-                true, false, false, false, false, false, true, false, false, false, true, false,
-                false, false, false, false,
-            ],
-            snare: [
-                false, false, false, false, true, false, false, false, false, false, false, false,
-                true, false, false, true,
-            ],
-            hat: [
-                true, false, true, false, true, false, true, false, true, false, true, false, true,
-                false, true, true,
-            ],
+            Self::BdClassic => MachineId::BdClassic,
+            Self::BdFm => MachineId::BdFm,
+            Self::Tom => MachineId::Tom,
+            Self::SdNatural => MachineId::SdNatural,
+            Self::SdFm => MachineId::SdFm,
+            Self::Rs => MachineId::Rs,
+            Self::Cp => MachineId::Cp,
+            Self::HatClassic => MachineId::HatClassic,
+            Self::HhBasic => MachineId::HhBasic,
+            Self::CyMetallic => MachineId::CyMetallic,
+            Self::CbClassic => MachineId::CbClassic,
+            Self::SyTone => MachineId::SyTone,
         }
     }
 }
@@ -149,19 +147,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Render { output, bpm, bars } => {
-            let samples = render_pattern(&Params::default(), &Pattern::default(), bpm, bars);
+            let samples = render_pattern(&Pattern::demo(), bpm, bars);
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
         }
 
         Command::Sweep {
-            param,
+            machine,
+            macro_name,
             from,
             to,
             steps,
             output_dir,
         } => {
+            let id = machine.id();
+            let (idx, info) = id
+                .macro_by_name(&macro_name)
+                .ok_or_else(|| format!("machine {id:?} has no macro named '{macro_name}'"))?;
             std::fs::create_dir_all(&output_dir)?;
             let steps = steps.max(2);
 
@@ -169,15 +172,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let t = i as f32 / (steps - 1) as f32;
                 let value = from + (to - from) * t;
 
-                let mut params = Params::default();
-                param.apply(&mut params, value);
+                // Use track 0 to host the sweep, load that track with the
+                // chosen machine, and set the chosen macro. Everything else
+                // stays at kit defaults.
+                let mut engine = DrumEngine::new();
+                engine.tracks[0].load_machine(id);
+                engine.tracks[0].set_macro(idx, value);
 
-                let samples = render_one_shot(&params, param.voice(), 2.0);
-                let path = format!("{output_dir}/{}_{:02}_{value:.4}.wav", param.name(), i);
+                let samples = render_one_shot(&mut engine, 0, 2.0);
+                let path = format!("{output_dir}/{}_{:02}_{value:.4}.wav", id.name(), i);
                 write_wav(&path, &samples)?;
                 println!("{path}");
             }
-            println!("\n{steps} files in {output_dir}/ — flip between them to compare");
+            let _ = info;
+            println!(
+                "\n{steps} files in {output_dir}/ — flip between them to compare \
+                 (swept {} {} from {from:.4} to {to:.4})",
+                id.name(),
+                macro_name,
+            );
+        }
+
+        Command::Machine {
+            machine,
+            macros,
+            output,
+            seconds,
+        } => {
+            let id = machine.id();
+            let mut engine = DrumEngine::new();
+            engine.tracks[0].load_machine(id);
+            for spec in macros {
+                apply_macro_arg(&mut engine, &spec)?;
+            }
+            let samples = render_one_shot(&mut engine, 0, seconds);
+            write_wav(&output, &samples)?;
+            let secs = samples.len() as f32 / 2.0 / SAMPLE_RATE;
+            println!("wrote {output} ({secs:.2}s)");
+        }
+
+        Command::Catalog {
+            output,
+            per_machine,
+        } => {
+            let mut all_samples = Vec::new();
+            for id in MachineId::ALL {
+                let mut engine = DrumEngine::new();
+                engine.tracks[0].load_machine(id);
+                let samples = render_one_shot(&mut engine, 0, per_machine);
+                all_samples.extend(samples);
+                println!("  {}", id.name());
+            }
+            write_wav(&output, &all_samples)?;
+            let secs = all_samples.len() as f32 / 2.0 / SAMPLE_RATE;
+            println!(
+                "wrote {output} ({secs:.2}s) — {} machines x {per_machine:.1}s each",
+                MachineId::COUNT
+            );
         }
 
         #[cfg(feature = "live")]
@@ -187,11 +238,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Render a single hit with a tail, for auditioning one voice.
-fn render_one_shot(params: &Params, voice: VoiceId, seconds: f32) -> Vec<f32> {
-    let mut engine = DrumEngine::new();
-    engine.set_params(params);
-    engine.trigger(voice, 1.0);
+/// Parse `NAME=VALUE` and apply to track 0 of the engine.
+fn apply_macro_arg(engine: &mut DrumEngine, spec: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (name, val) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("bad --macro '{spec}', expected NAME=VALUE"))?;
+    let id = engine.tracks[0].id();
+    let (idx, _) = id
+        .macro_by_name(name)
+        .ok_or_else(|| format!("machine {id:?} has no macro named '{name}'"))?;
+    let value: f32 = val.parse()?;
+    engine.tracks[0].set_macro(idx, value);
+    Ok(())
+}
+
+/// Render a single hit with a tail, for auditioning one track.
+fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f32> {
+    engine.trigger(track, 1.0);
 
     let total_blocks = (seconds * SAMPLE_RATE / BLOCK as f32) as usize;
     let mut out = Vec::with_capacity(total_blocks * BLOCK * 2);
@@ -208,6 +271,70 @@ fn render_one_shot(params: &Params, voice: VoiceId, seconds: f32) -> Vec<f32> {
     out
 }
 
+/// A 16-step pattern per track. `true` means trigger.
+#[derive(Default)]
+struct Pattern {
+    tracks: [[bool; 16]; TRACKS],
+}
+
+impl Pattern {
+    /// A full 8-track groove: kick, snare, closed + open metallic hat, clap,
+    /// tom fill, cowbell accent, and a tonal synth pulse.
+    fn demo() -> Self {
+        let mut p = Self::default();
+
+        // 0 — BdClassic (kick): syncopated groove
+        p.tracks[0] = [
+            true, false, false, false, false, false, true, false, false, false, true, false, false,
+            false, false, false,
+        ];
+
+        // 1 — SdNatural (snare): backbeat + ghost
+        p.tracks[1] = [
+            false, false, false, false, true, false, false, false, false, false, false, false,
+            true, false, false, true,
+        ];
+
+        // 2 — HatClassic (closed hat): 8th notes + flam
+        p.tracks[2] = [
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, true,
+        ];
+
+        // 3 — HH Basic (metallic open hat): the "and" of beat 2
+        p.tracks[3] = [
+            false, false, false, false, false, true, false, false, false, false, false, false,
+            false, false, false, false,
+        ];
+
+        // 4 — Cp (clap): doubles the second backbeat
+        p.tracks[4] = [
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            true, false, false, false,
+        ];
+
+        // 5 — Tom: end-of-bar fill
+        p.tracks[5] = [
+            false, false, false, false, false, false, false, false, false, false, false, false,
+            false, false, true, true,
+        ];
+
+        // 6 — CbClassic (cowbell): off-beat accents
+        p.tracks[6] = [
+            false, false, true, false, false, false, true, false, false, false, true, false, false,
+            false, true, false,
+        ];
+
+        // 7 — SyTone: bassline pulse on the downbeats + a high note
+        p.tracks[7] = [
+            true, false, false, false, true, false, false, false, true, false, false, false, true,
+            false, false, false,
+        ];
+
+        p
+    }
+}
+
 /// Render a pattern, block by block, exactly as the firmware will.
 ///
 /// Note the structure: the sequencer decides what to trigger *between*
@@ -215,9 +342,9 @@ fn render_one_shot(params: &Params, voice: VoiceId, seconds: f32) -> Vec<f32> {
 /// needs, so keeping it here means the host and target behave identically —
 /// including the up-to-667µs of timing quantisation that block processing
 /// imposes on trigger timing.
-fn render_pattern(params: &Params, pattern: &Pattern, bpm: f32, bars: usize) -> Vec<f32> {
+fn render_pattern(pattern: &Pattern, bpm: f32, bars: usize) -> Vec<f32> {
     let mut engine = DrumEngine::new();
-    engine.set_params(params);
+    setup_kit_mix(&mut engine);
 
     let samples_per_step = (SAMPLE_RATE * 60.0 / bpm / 4.0) as usize;
     let total_steps = bars * 16;
@@ -237,16 +364,14 @@ fn render_pattern(params: &Params, pattern: &Pattern, bpm: f32, bars: usize) -> 
 
         while next_step_at < block_start + BLOCK && next_step < total_steps {
             let s = next_step % 16;
-            if pattern.kick[s] {
-                engine.trigger(VoiceId::Kick, 1.0);
-            }
-            if pattern.snare[s] {
-                engine.trigger(VoiceId::Snare, 0.9);
-            }
-            if pattern.hat[s] {
-                // Accent the downbeats a little so it does not sound robotic.
-                let vel = if s % 4 == 0 { 0.9 } else { 0.55 };
-                engine.trigger(VoiceId::Hat, vel);
+            // Trigger whichever tracks have a step this row.
+            let mut i = 0;
+            while i < TRACKS {
+                if pattern.tracks[i][s] {
+                    let vel = default_velocity_for_track(i, s);
+                    engine.trigger(i, vel);
+                }
+                i += 1;
             }
             next_step += 1;
             next_step_at += samples_per_step;
@@ -260,6 +385,143 @@ fn render_pattern(params: &Params, pattern: &Pattern, bpm: f32, bars: usize) -> 
     }
 
     out
+}
+
+/// Configure per-track strip settings (pan, level, filter, drive) and a few
+/// macro tweaks so the kit sounds balanced across the stereo field rather
+/// than all-centre, all-equal. Preserves the choke/layer masks already set
+/// by `DrumEngine::new` (open-hat ↔ closed-hat relation).
+fn setup_kit_mix(engine: &mut DrumEngine) {
+    use drum_engine::dsp::SvfMode;
+    use drum_engine::StripParams;
+
+    // (track, pan, level, filter_mode, cutoff_hz, reso_q, drive)
+    let configs: [(usize, f32, f32, SvfMode, f32, f32, f32); TRACKS] = [
+        (0, 0.00, 0.95, SvfMode::Off, 1000.0, 0.707, 1.0), // kick — centre
+        (1, -0.25, 0.75, SvfMode::Off, 1000.0, 0.707, 1.0), // snare — slightly L
+        (2, 0.35, 0.45, SvfMode::Off, 1000.0, 0.707, 1.0), // closed hat — R
+        (3, 0.40, 0.40, SvfMode::Off, 1000.0, 0.707, 1.0), // HH Basic metallic — R
+        (4, -0.35, 0.65, SvfMode::Off, 1000.0, 0.707, 1.0), // clap — L
+        (5, -0.50, 0.75, SvfMode::Lp, 3000.0, 0.707, 1.0), // tom — far L, warm LP
+        (6, 0.15, 0.50, SvfMode::Off, 1000.0, 0.707, 1.0), // cowbell — near centre
+        (7, -0.10, 0.55, SvfMode::Off, 1000.0, 0.707, 1.2), // SY Tone — near centre, drive
+    ];
+
+    for &(track, pan, level, f_mode, f_cutoff_hz, f_reso_q, drive) in &configs {
+        let choke = engine.tracks[track].strip.choke_mask;
+        let layer = engine.tracks[track].strip.layer_mask;
+        let strip = StripParams {
+            f_mode,
+            f_cutoff_hz,
+            f_reso_q,
+            drive,
+            pan,
+            level,
+            choke_mask: choke,
+            layer_mask: layer,
+            ..StripParams::default()
+        };
+        engine.tracks[track].set_strip(&strip);
+    }
+
+    // Macro tweaks — a few beyond the defaults to get more musical results:
+
+    // Clap: slightly more body, less pure noise (BAL default 0.80 noise-heavy)
+    engine.tracks[4].set_macro(6, 0.65); // BAL
+
+    // Tom: tune lower (~132 Hz, a mid tom) and add a bit more stick
+    engine.tracks[5].set_macro(0, 0.50); // TUNE → ~132 Hz
+    engine.tracks[5].set_macro(4, 0.40); // STICK
+
+    // Cowbell: classic 808 tuning — ~540 Hz base, wider detune, short decay
+    engine.tracks[6].set_macro(0, 0.34); // TUNE → ~538 Hz
+    engine.tracks[6].set_macro(2, 0.86); // DET → ~1.43 ratio (the classic 540/800 pair)
+    engine.tracks[6].set_macro(1, 0.15); // DEC → ~85ms
+
+    // SY Tone: pitch it as a bassline — low note, moderate FM
+    engine.tracks[7].set_macro(0, 0.20); // TUNE → ~132 Hz (bass range)
+    engine.tracks[7].set_macro(4, 0.50); // MOD.AMT
+    engine.tracks[7].set_macro(2, 0.30); // FDBK
+    engine.tracks[7].set_macro(5, 0.40); // DEC → ~830ms (rings a bit)
+
+    // --- LFO modulation demo ---
+    // Snare (track 1): slow sine LFO on a LP filter, adds movement.
+    engine.tracks[1].mod_state.lfos[0].set_params(
+        0.3, // 0.3 Hz — very slow sweep
+        drum_engine::dsp::LfoWave::Sine,
+        drum_engine::dsp::LfoMode::Trig,
+        0.5, // depth: ±0.5
+        drum_engine::dsp::ModDest::FilterCutoff,
+        0.0,
+    );
+    // The snare needs a filter for the LFO to act on.
+    let snare_strip = drum_engine::StripParams {
+        f_mode: drum_engine::dsp::SvfMode::Lp,
+        f_cutoff_hz: 3000.0,
+        f_reso_q: 1.5,
+        pan: -0.25,
+        level: 0.75,
+        ..drum_engine::StripParams::default()
+    };
+    engine.tracks[1].set_strip(&snare_strip);
+
+    // --- Velocity modulation demo ---
+    // Kick (track 0): velocity → drive. Hard hits are gutsier.
+    engine.tracks[0].mod_state.vel_mods[0] = drum_engine::VelMod {
+        dest: drum_engine::dsp::ModDest::Drive,
+        depth: 0.3,
+    };
+
+    // --- Send FX demo (Phase 5) ---
+    // Snare (track 1): send to reverb for ambient backbeat space.
+    engine.tracks[1].strip.send_reverb = 0.5;
+    engine.tracks[1].strip.send_delay = 0.5;
+    // Clap (track 4): send to delay for a reggae-ish ghost echo.
+    engine.tracks[4].strip.send_delay = 0.5;
+    // Cowbell (track 6): light reverb send for an "other room" accent.
+    engine.tracks[6].strip.send_reverb = 0.5;
+
+    // Refresh the strip caches so the per-block fast path (no mod active for
+    // clap/cowbell) sees the new send levels. Copy each strip before calling
+    // `set_strip` so we don't simultaneously borrow the track mut and immut.
+    for t in [1usize, 4, 6] {
+        let strip = engine.tracks[t].strip;
+        engine.tracks[t].set_strip(&strip);
+    }
+
+    // FX bus configuration: a medium hall reverb and a slap-back delay.
+    engine.send_fx.delay.set_params(0.5, 0.45, 5_000.0, 1.0);
+    engine.send_fx.reverb.set_params(0.022, 0.86, 4_500.0, 1.0);
+    engine.send_fx.drive = 1.0;
+}
+
+/// Per-row accent patterns so the kit pattern sounds less robotic on the
+/// demo. Maps track index → step → velocity.
+fn default_velocity_for_track(track: usize, step: usize) -> f32 {
+    match (track, step) {
+        // Kick — strong on downbeats, softer on syncopation
+        (0, 0) | (0, 8) => 0.95,
+        (0, 6) | (0, 10) => 0.82,
+        // Snare — backbeat strong, ghost note soft
+        (1, 4) | (1, 12) => 0.90,
+        (1, 15) => 0.50,
+        // Closed hat — accent on even steps (downbeats), lighter off-beats
+        (2, _) if step.is_multiple_of(4) => 0.85,
+        (2, 15) => 0.70, // flam at the end
+        (2, _) => 0.50,
+        // HH Basic metallic hat
+        (3, _) => 0.75,
+        // Clap
+        (4, _) => 0.85,
+        // Tom fill — crescendo into the next bar
+        (5, 14) => 0.70,
+        (5, 15) => 0.85,
+        // Cowbell — short and punchy
+        (6, _) => 0.65,
+        // SY Tone — bassline pulse, steady
+        (7, _) => 0.80,
+        _ => 0.80,
+    }
 }
 
 /// Write interleaved stereo f32 to a 24-bit WAV.
@@ -310,7 +572,8 @@ fn play_live(bpm: f32) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut engine = DrumEngine::new();
-    let pattern = Pattern::default();
+    setup_kit_mix(&mut engine);
+    let pattern = Pattern::demo();
     let samples_per_step = (SAMPLE_RATE * 60.0 / bpm / 4.0) as usize;
 
     let mut l = [0.0f32; BLOCK];
@@ -330,15 +593,12 @@ fn play_live(bpm: f32) -> Result<(), Box<dyn std::error::Error>> {
                 if cursor >= BLOCK {
                     while next_step_at <= sample_clock {
                         let s = step % 16;
-                        if pattern.kick[s] {
-                            engine.trigger(VoiceId::Kick, 1.0);
-                        }
-                        if pattern.snare[s] {
-                            engine.trigger(VoiceId::Snare, 0.9);
-                        }
-                        if pattern.hat[s] {
-                            let vel = if s % 4 == 0 { 0.9 } else { 0.55 };
-                            engine.trigger(VoiceId::Hat, vel);
+                        let mut i = 0;
+                        while i < TRACKS {
+                            if pattern.tracks[i][s] {
+                                engine.trigger(i, default_velocity_for_track(i, s));
+                            }
+                            i += 1;
                         }
                         step += 1;
                         next_step_at += samples_per_step;

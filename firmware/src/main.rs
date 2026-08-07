@@ -12,7 +12,7 @@
 //! - the engine is constructed once, before interrupts are enabled
 //! - the audio callback does nothing but interleave and call `process`
 //! - MIDI is parsed in the engine crate, so it is host-testable
-//! - parameter updates happen outside the callback
+//! - parameter updates happen outside the callback, at CC rate
 //!
 //! # What is missing
 //!
@@ -25,8 +25,8 @@
 //! parts are hardware-strapped: no I2C, no register writes, no codec driver
 //! to find or write. Feed them BCLK, LRCLK and DATA and they produce
 //! line-level audio. The Audio Shield's SGTL5000 needs an I2C driver that
-//! does not currently exist in Rust, and there is no reason to take that on
-//! for an output-only instrument.
+//! does not exist in Rust, and there is no reason to take that on for an
+//! output-only instrument.
 //!
 //! ```text
 //!   Teensy 4.1              PCM5102A breakout
@@ -40,6 +40,20 @@
 //!
 //! Most PCM5102A breakouts want SCK tied low to select internal PLL mode.
 //! Check the silkscreen on yours; some have a solder jumper for it already.
+//!
+//! # MIDI CC map
+//!
+//! CCs are table-driven against the 8-track / 8-macro machine surface so
+//! adding a new macro on a new machine doesn't cost a match arm here.
+//!
+//! - CC 7  = master gain                              (0..1)
+//! - CC 20 = track 0 macro 0..7                       (8 CCs)
+//! - CC 30 = track 1 macro 0..7                       (8 CCs)
+//! - ...up to CC 90 = track 7 macros                  (8 CCs per track)
+//!
+//! Track n maps to `20 + n * 10 + macro_index`. The decimation of 10
+//! instead of 8 leaves room for future track-strip CCs (filter, amp, pan)
+//! per track without renumbering machine macros.
 
 #![no_std]
 #![no_main]
@@ -47,17 +61,37 @@
 use teensy4_panic as _;
 
 use drum_engine::{
-    midi::{note_to_voice, MidiEvent, MidiParser},
-    DrumEngine, Params, BLOCK,
+    midi::{MidiEvent, MidiParser},
+    DrumEngine, BLOCK, NUM_MACROS, TRACKS,
 };
+// The LPUART `read()` is a trait method (embedded-hal 0.2 `serial::Read`),
+// not inherent — bring it into scope or the call won't resolve.
+use embedded_hal::serial::Read as _;
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
+
+/// First CC number reserved for track macros.
+const CC_TRACK_BASE: u8 = 20;
+
+/// CC stride between successive tracks' macro blocks.
+const CC_TRACK_STRIDE: u8 = 10;
+
+/// CC for the master gain. Following MIDI convention.
+const CC_MASTER_GAIN: u8 = 7;
 
 /// Interleaved stereo scratch buffer handed to the DMA.
 ///
 /// Double the block size because it is L/R interleaved. Static rather than
 /// stack-allocated because DMA needs a stable address.
 static mut TX_BUFFER: [f32; BLOCK * 2] = [0.0; BLOCK * 2];
+
+/// The engine itself (~266 KB, almost all of it the send-FX delay/reverb
+/// buffers) — in OCRAM via a `.uninit` static, *not* the stack. `t4link.x`
+/// gives this target a 16 KB DTCM stack, and `DrumEngine::new()`'s return
+/// value alone is over 16x that; see [`DrumEngine::new_in_place`], which is
+/// what actually initializes this below.
+#[link_section = ".uninit"]
+static mut ENGINE_BUF: core::mem::MaybeUninit<DrumEngine> = core::mem::MaybeUninit::uninit();
 
 #[bsp::rt::entry]
 fn main() -> ! {
@@ -77,8 +111,16 @@ fn main() -> ! {
     // USB stack, so it is the faster thing to get working first.
     let mut midi_uart = board::lpuart(lpuart6, pins.p1, pins.p0, 31_250);
 
-    let mut engine = DrumEngine::new();
-    engine.set_params(&Params::default());
+    // SAFETY: `ENGINE_BUF` is `.uninit` OCRAM, written exactly once, here,
+    // before interrupts are enabled — single-threaded init, same
+    // requirement `new_in_place` documents. Raw-pointer construction
+    // (rather than `&mut ENGINE_BUF`) sidesteps the Rust 2024 warning on
+    // mutable-static references.
+    #[allow(unsafe_code)]
+    let engine: &'static mut DrumEngine = unsafe {
+        let p: *mut DrumEngine = core::ptr::addr_of_mut!(ENGINE_BUF).cast();
+        DrumEngine::new_in_place(p)
+    };
 
     let mut parser = MidiParser::new();
 
@@ -109,12 +151,12 @@ fn main() -> ! {
         // notes cannot delay an audio deadline.
         while let Ok(byte) = midi_uart.read() {
             if let Some(event) = parser.push(byte) {
-                handle_midi(&mut engine, event);
+                handle_midi(engine, event);
             }
         }
 
         // TODO(sai): this call moves into the DMA interrupt handler.
-        audio_callback(&mut engine, &mut left, &mut right);
+        audio_callback(engine, &mut left, &mut right);
 
         led.toggle();
     }
@@ -149,9 +191,9 @@ fn audio_callback(engine: &mut DrumEngine, left: &mut [f32; BLOCK], right: &mut 
 fn handle_midi(engine: &mut DrumEngine, event: MidiEvent) {
     match event {
         MidiEvent::NoteOn { note, velocity } => {
-            if let Some(voice) = note_to_voice(note) {
-                engine.trigger(voice, velocity);
-            }
+            // `trigger_note` will route via the engine's note-map; unmapped
+            // notes return `None` and silent ignore is the correct behaviour.
+            engine.trigger_note(note, velocity);
         }
         MidiEvent::ControlChange { controller, value } => {
             apply_cc(engine, controller, value);
@@ -160,32 +202,25 @@ fn handle_midi(engine: &mut DrumEngine, event: MidiEvent) {
     }
 }
 
-/// Map CC numbers onto parameters.
+/// Map CC numbers onto engine parameters — macro/track-grid + master.
 ///
-/// `set_params` recomputes coefficients, which involves `expf` calls — too
+/// `set_macro` recomputes coefficients, which involves `expf` calls — too
 /// expensive for an audio interrupt but entirely fine here in the main loop.
 /// If you later move MIDI handling into an interrupt, this needs to move back
 /// out again, or become a "params are dirty" flag that the main loop acts on.
 fn apply_cc(engine: &mut DrumEngine, controller: u8, value: f32) {
-    let mut p = *engine.params();
-
-    match controller {
-        // Kick
-        20 => p.kick.decay_s = 0.05 + value * 1.2,
-        21 => p.kick.pitch_decay_s = 0.005 + value * 0.15,
-        22 => p.kick.start_hz = 60.0 + value * 400.0,
-        23 => p.kick.drive = 1.0 + value * 6.0,
-        // Snare
-        24 => p.snare.decay_s = 0.03 + value * 0.6,
-        25 => p.snare.noise_mix = value,
-        26 => p.snare.body_hz = 100.0 + value * 300.0,
-        // Hat
-        27 => p.hat.decay_s = 0.01 + value * 0.4,
-        28 => p.hat.hp_hz = 2000.0 + value * 10_000.0,
-        // Master
-        7 => p.master_gain = value,
-        _ => return,
+    if controller == CC_MASTER_GAIN {
+        engine.master_gain = value;
+        return;
     }
 
-    engine.set_params(&p);
+    // Track macro grid: 20..117 covers 8 tracks x 10 stride, 8 macros / track.
+    if controller >= CC_TRACK_BASE {
+        let offset = controller - CC_TRACK_BASE;
+        let track = offset / CC_TRACK_STRIDE;
+        let macro_idx = offset % CC_TRACK_STRIDE;
+        if track < TRACKS as u8 && macro_idx < NUM_MACROS as u8 {
+            engine.tracks[track as usize].set_macro(macro_idx as usize, value);
+        }
+    }
 }

@@ -55,17 +55,78 @@ leaking in through a dependency on the commit that introduced it.
 
 **Run-time.** `firmware/src/bin/bench.rs` flashes to a bare Teensy with
 nothing attached — no DAC, no SD card, no jack — and reports what
-`engine.process()` actually costs:
+`engine.process()` actually costs. Measured on hardware, 8-track machine
+architecture with the full Phase 2 catalogue:
 
 ```
-voices=3 idle     avg=  1042 cy  peak=  1108 cy   0.3% of budget
-voices=3 sounding avg= 21883 cy  peak= 23104 cy   5.5% of budget
+idle     avg=  10946 cy  peak=  10946 cy    2.7% of budget  (342 cy/frame)
+3 sounding avg=  34484 cy  peak=  34507 cy    8.6% of budget  (1078 cy/frame)
+8 sounding avg=  78751 cy  peak=  78759 cy   19.7% of budget  (2461 cy/frame)
 ```
+
+The "8 sounding" line is the worst case — every track retriggered every
+block, heavier than any real performance. Idle is a loaded 8-track kit
+sitting silent; the per-track `is_active` early-out keeps it at 2.2%.
+
+Before the sine-table optimisation (see `engine/src/dsp/fast.rs`), the
+3-voice predecessor measured 125,907 cycles *sounding* — 31.5% of budget
+for three voices, 90% of it inside `libm::sinf`. Swapping `sin_turns` for a
+512-entry quarter-wave table with linear interpolation drops that to
+~10 cycles per lookup and is what makes the 8-track machine architecture
+affordable on this chip.
 
 The budget at 600MHz, 48kHz, 32-frame blocks is 400,000 cycles per block, or
 12,500 per output frame. Size against *peak*, not average: the callback has to
 make its deadline every time, and a mean that fits while the peak does not is
 a click you will hear.
+
+## Send FX
+
+Phase 5 adds a shared send-FX bus to the engine: every track gets two
+post-fader send levels (`send_delay`, `send_reverb` on `StripParams`),
+and the engine owns a `SendFx` struct that runs delay + reverb on whatever
+is sent to it. The wet buses are summed into the master bus before the
+safety clip — the dry path is untouched.
+
+```
+                ┌────────── per-track strip ──────────┐
+   machine ────►│ drive → filter → amp × pan × level │── dry bus ──► master
+                └──┬─────────────────────────────┬───┘      │
+                   │ × send_delay                 │ × send_reverb
+                   ▼                               ▼
+            ┌────────────┐                  ┌────────────┐
+            │   Delay    │                  │  Reverb   │
+            │ (24 KB LR) │                  │ (42 KB)   │
+            └─────┬──────┘                  └─────┬──────┘
+                  ▼                               ▼
+                  └──────── wet bus ──────────────┘   ↓
+                                                soft_clip → master clip → out
+```
+
+Both FX live in `engine/src/dsp/fx/` and are depressingly conventional:
+
+- **Delay** — 500 ms ring buffer × 2 channels, feedback with a one-pole
+  tone LP in the loop so repeats recede instead of piling up. Feedback is
+  clamped to 0.98 so a runaway macro can't blow the tank up.
+- **Reverb** — Dattorro-plate-ish: predelay → two series allpass diffusors →
+  six parallel Freeverb-style damped combs per side. L and R tank sizes
+  are deliberately different, so the stereo image spreads without cross-
+  feedback. ~42 KB of state.
+
+No random state anywhere. Identical input + parameters produce
+bit-identical output on host and target, which is the engine contract the
+determinism tests in `engine/src/lib.rs` enforce.
+
+Send levels and FX parameters are first-class modulation targets:
+`ModDest::SendDelay` / `ModDest::SendReverb` let an LFO sweep a track's
+wetness at block rate, the same way `ModDest::Drive` already does. The
+renderer demo wires this up — snare → reverb, clap → delay, cowbell →
+light reverb — and the kit sounds audibly wetter if you comment out the
+`setup_kit_mix` send block.
+
+The bench has two FX scenarios ("8 FX idle", "8 + FX") for measuring the
+per-block overhead of having FX in the engine, and the realistic worst
+case with two sends active. See `firmware/src/bin/bench.rs`.
 
 ## Hardware
 

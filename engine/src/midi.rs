@@ -8,8 +8,9 @@
 //! Deliberately in the engine crate rather than the firmware, because it is
 //! pure logic and therefore testable on the host. The firmware's job is to
 //! get bytes out of a peripheral, nothing more.
-
-use crate::VoiceId;
+//!
+//! Note-to-track routing lives in [`crate::DrumEngine`], not here — this
+//! module parses bytes into events, the engine decides what an event means.
 
 /// A parsed message the engine cares about.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -32,27 +33,22 @@ pub enum MidiEvent {
     Panic,
 }
 
-/// General MIDI percussion note numbers, for the voices we have.
+/// General MIDI percussion note numbers, for convenience and documentation.
+/// Engine routing is table-driven via [`crate::DrumEngine::set_note`]; these
+/// are just the values a GM-style note source will send.
 pub mod notes {
     /// Acoustic bass drum.
     pub const KICK: u8 = 36;
     /// Acoustic snare.
     pub const SNARE: u8 = 38;
     /// Closed hi-hat.
-    pub const HAT: u8 = 42;
-}
-
-/// Map a note number to a voice, if we have one.
-///
-/// Unmapped notes return `None` rather than falling through to a default.
-/// Silently triggering the wrong drum is worse than silence.
-pub fn note_to_voice(note: u8) -> Option<VoiceId> {
-    match note {
-        notes::KICK => Some(VoiceId::Kick),
-        notes::SNARE => Some(VoiceId::Snare),
-        notes::HAT => Some(VoiceId::Hat),
-        _ => None,
-    }
+    pub const CLOSED_HAT: u8 = 42;
+    /// Open hi-hat.
+    pub const OPEN_HAT: u8 = 46;
+    /// Hand clap.
+    pub const CLAP: u8 = 39;
+    /// High tom.
+    pub const HIGH_TOM: u8 = 50;
 }
 
 /// Incremental MIDI parser.
@@ -276,10 +272,18 @@ mod tests {
     }
 
     #[test]
-    fn drum_map_covers_our_voices() {
-        assert_eq!(note_to_voice(notes::KICK), Some(VoiceId::Kick));
-        assert_eq!(note_to_voice(notes::SNARE), Some(VoiceId::Snare));
-        assert_eq!(note_to_voice(notes::HAT), Some(VoiceId::Hat));
-        assert_eq!(note_to_voice(60), None);
+    fn drum_map_default() {
+        // Default engine note map: kick → 0, snare → 1, hat → 2.
+        use crate::{DrumEngine, MachineId};
+        let e = DrumEngine::new();
+        assert_eq!(e.note_map[notes::KICK as usize], Some(0));
+        assert_eq!(e.note_map[notes::SNARE as usize], Some(1));
+        assert_eq!(e.note_map[notes::CLOSED_HAT as usize], Some(2));
+        assert_eq!(e.note_map[notes::OPEN_HAT as usize], Some(3));
+        assert_eq!(e.note_map[notes::CLAP as usize], Some(4));
+        // Sanity: routed note triggers the right track's machine.
+        let mut e = DrumEngine::new();
+        assert_eq!(e.trigger_note(notes::KICK, 1.0), Some(0));
+        assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
     }
 }

@@ -57,6 +57,10 @@ drops from ~1,200 cy to ~10 cy. Three voices go from 126k to ~13k. Then:
 
 Comfortable. The 8-track decision is validated by these numbers.
 
+*(Pre-implementation estimate — measured Phase 5 numbers came in ~2x
+higher than the "8 tracks + sends" row; see the Phase 5 bench results
+below for what actually shipped and why.)*
+
 ## Architecture target
 
 ```
@@ -115,68 +119,145 @@ Key decisions:
 - [x] Build bench HEX, flash, capture numbers.
 - [x] Analyze: `libm::sinf` dominates at 90% of the sounding budget.
 
-### Phase 1 — Re-architecture + sin table (no new sounds)
+### Phase 1 — Re-architecture + sin table (DONE)
 
-The sin table goes first because nothing else makes sense until the
-budget is real:
+- [x] `fast::sin_turns` table swap: 512-entry quarter-wave, linear interp,
+      const-fn Taylor-built. Dropped 3-voice from 125,907 cy (31.5%) to
+      18,699 cy (4.7%).
+- [x] Machine trait + `MachineSlot` enum. Ports: BD Classic, SD Natural,
+      CH/OH Classic.
+- [x] `Track` struct + `Strip` (SVF, AHD, drive, equal-power pan, level).
+- [x] Macro layer: 8 normalized knobs/machine, names/abbrevs/defaults,
+      `set_macro` does CC-rate coefficient recompute.
+- [x] Control-rate-pass scaffolding (per-block dirty-flag recompute lives
+      behind `Track::set_macro` / `Track::set_strip`).
+- [x] Renderer: generic `sweep <machine> <macro>`, `machine <name>
+      --macro K=V`, `render` (8-track pattern). `SweepParam` enum deleted.
+- [x] MIDI: note-to-track map on `DrumEngine`, CC-to-(track, macro)
+      table-driven in firmware.
+- [x] Tests: 62 green (38 ported + 24 new — SVF, AHD, choke/layer, pan law,
+      macro mapping, MIDI routing, NaN at extreme macros).
+- [x] Bench: 8-track worst case = **17.0%** of budget (68,090 cy/block).
+      Idle 1.7%, 3-voice 9.0%. Headroom validated for Phase 2-5.
 
-1. **`fast::sin_turns` table swap.** 512-entry quarter-wave, linear
-   interpolation. Re-run bench to confirm the drop. A/B via host render to
-   confirm inaudible for percussion.
-2. **Machine trait + `MachineSlot` enum.** Port kick/snare/hat to
-   machines: BD Classic, SD Natural, CH/OH Classic (same machine, longer
-   DEC).
-3. **`Track` struct**: machine slot + strip (SVF, AHD, drive, pan).
-4. **Macro layer**: normalized 0..1 macros with names/ranges, `recalc()`.
-5. **Control-rate pass**: per-block `control()`, LFO stub, dirty-flag
-   coefficient recompute.
-6. **Renderer**: generic `sweep <machine> <macro>` and `machine <name>
-   --macro K=V` modes. Kill the `SweepParam` enum.
-7. **MIDI**: note-to-track map table, CC-to-(track, macro) map table.
-8. **Tests**: port all 38 existing tests to machines. Add macro-corner
-   NaN sweeps per machine. Add determinism test (two engines, same seed,
-   identical output).
+### Phase 2 — Core kit breadth (DONE)
 
-### Phase 2 — Core kit breadth
+- [x] Tom (pitch-swept sine + stick transient, no drive)
+- [x] CP (clap: multi-burst noise env + FM body, BurstEnv walks 3 on/off
+      crunch segments then decays)
+- [x] RS (rimshot: 2 detuned oscillators + noise tick)
+- [x] BD FM (2-operator FM kick, `tick_with_phase_bias` on SineOsc for
+      phase-modulation FM)
+- [x] SD FM (FM snare + noise, same FM phasor as BD FM)
+- [x] Default kit updated: BdClassic, SdNatural, Hat (closed), Hat (open),
+      Cp, Tom, Rs, BdFm — with OH/CH choke relation.
+- [x] MIDI note map expanded: 35/36/37/38/39/42/46/50 → tracks 0..7.
+- [x] 83 tests green (21 new machine tests). Fmt + clippy clean.
+- [x] Bench rebuilt: 85KB text. Awaiting hardware measurement.
 
-- Tom (pitch-swept sine, no drive — the kick with long pitch decay
-  already does this, but a dedicated machine is cleaner).
-- CP (clap: multi-burst noise envelope + body, ~20ms of repeated env
-  triggers then tail).
-- RS (rimshot: short 2-osc + noise tick).
-- BD FM (2-op FM kick).
-- SD FM (FM snare + noise).
+### Phase 3 — Modulation + performance (DONE)
 
-### Phase 3 — Modulation + performance
+- [x] `dsp/lfo.rs`: 2 LFOs per track, 6 waveforms (tri/sine/square/saw/
+      ramp/exp), 4 modes (Free/Trig/Hold/OneShot), single dest + bipolar
+      depth, block-rate advance.
+- [x] `ModDest` covers machine macros (0..7) + strip params (FilterCutoff,
+      FilterReso, Drive, Pan, Level, AmpDecay).
+- [x] Per-block `Track::control()`: advances LFOs, sums LFO + velocity mod
+      onto base macros/strip, recomputes coefficients (dirty-flag gated).
+      Fast no-op when no modulation is active.
+- [x] Velocity modulation: 4 slots per track (`VelMod { dest, depth }`),
+      applied at trigger time, sustained through the hit.
+- [x] `Sound` struct: `{ machine_id, macros, strip }`, Copy. `DrumEngine::
+      load_sound` + `trigger_with_sound` = sound locks.
+- [x] Choke/layer masks still handled by `DrumEngine::trigger` (from Phase 1).
+- [x] Renderer demo: slow sine LFO on snare filter cutoff + velocity→drive
+      on kick.
+- [x] 96 tests green (5 new: LFO macro mod, velocity→cutoff, Sound round-trip,
+      trigger_with_sound, control no-op). Fmt + clippy clean.
+- [x] Bench rebuilt: 100KB text. Awaiting hardware measurement.
 
-- 2 LFOs per track (tri/sine/square/saw/exp/random, free/trig/one-shot
-  modes, per-block update).
-- Velocity-to-parameter routing (4 slots with depth).
-- Choke/layer masks (u8 per track).
-- `load_sound(track, &Sound)` per-trig = sound locks.
-- Firmware CC map becomes table-driven.
+### Phase 4 — Extended catalog (DONE)
 
-### Phase 4 — Extended catalog
+- [x] HH Basic (6-detuned-osc 808-style hat, square-via-sign-of-sine)
+- [x] CY Metallic (ring-modulated 2-osc cymbal + HP noise transient)
+- [x] CB Classic (2-osc cowbell, square pair through bandpass)
+- [x] SY Tone (2-op FM tonal synth with modulator feedback, exp2 pitch)
+- [x] Catalogue now 12 machines. Renderer `MachineArg` updated.
+- [x] 114 tests green (18 new machine tests). Fmt + clippy clean.
+- [x] Bench rebuilt: 105KB text. Awaiting hardware measurement.
 
-- HH Basic (6-detuned-osc 808 hat — the README already flags this as the
-  right second iteration).
-- Metallic CY (ring-mod oscillator cluster + HP noise).
-- Metallic CB (2-osc cowbell, BP).
-- HH Lab (6 separately tunable oscillators).
-- Utility machines: Noise Gen (white noise + filter), Impulse (pings the
-  track filter into tom-like tones — nearly free since SVF exists).
-- SY Tone (2-op FM tonal synth).
-- SY Dual VCO (dual analog osc tonal synth).
-- SY Bits (bit/sample-rate reduction — can pull forward if lo-fi desired
-  earlier).
+### Phase 5 — Send FX (DONE)
 
-### Phase 5 — Send FX (bench-gated)
+- [x] Static-buffer stereo delay (`dsp/fx/delay.rs`): 24 KB stereo ring
+      buffer, 500 ms max, `time/feedback/tone/mix`, two independent
+      one-pole tone LPs in the feedback path. Feedback clamped to 0.98.
+- [x] Dattorro-plate-ish reverb (`dsp/fx/reverb.rs`): predelay → 2 allpass
+      diffusors → 6 damped combs per side. ~42 KB total. Tank sizes
+      deliberately different for L vs R so the stereo image spreads
+      without cross-feedback. No random state — fully deterministic.
+- [x] Per-track send levels (`send_delay`, `send_reverb` on `StripParams`).
+      Post-fader, like a mixer aux. Cached as `eff_send_*` on `Track`.
+- [x] FX bus overdrive (`SendFx.drive`) — wet sum soft-clipped pre-master.
+- [x] `DrumEngine.send_fx: SendFx` owned next to `tracks`. `process()`
+      accumulates sends into per-block stack buses, runs delay + reverb
+      block-by-block, sums wet into master before the master clip.
+- [x] `ModDest::SendDelay` / `ModDest::SendReverb` wired through
+      `Track::control()` (LFO + velocity mod). End-of-control push of
+      `eff_*` to `self.eff_*` so a strip change while mod is active
+      propagates even when the LFO targets something else.
+- [x] Renderer demo: snare → reverb (ambient space), clap → delay
+      (slap-back), cowbell → light reverb. 5.7s demo WAV.
+- [x] Bench rebuilt with two FX scenarios ("8 FX idle" for the empty-FX
+      overhead, "8 + FX" for the realistic worst case). 270 KB hex
+      (~9 KB flash growth from Phase 4).
+- [x] Bench measured on hardware (2026-08-06), steady state:
 
-- Static-buffer stereo delay (no tempo sync v1).
-- Dattorro-plate-ish reverb.
-- Per-track send levels (delay, reverb).
-- FX bus overdrive.
-- With 8 tracks at ~21% post-optimization, there is headroom for this.
+      ```
+      idle       avg=  92540 cy  peak=  92646 cy   23.2% of budget  (2895 cy/frame)
+      3 sounding avg= 149982 cy  peak= 150161 cy   37.5% of budget  (4692 cy/frame)
+      8 sounding avg= 272397 cy  peak= 272476 cy   68.1% of budget  (8514 cy/frame)
+      8 FX idle  avg= 272330 cy  peak= 272408 cy   68.1% of budget  (8512 cy/frame)
+      8 + FX     avg= 272330 cy  peak= 272408 cy   68.1% of budget  (8512 cy/frame)
+      ```
+
+      (First loop iteration reads a little low on the two FX rows —
+      271,514 / 272,293 cy — before settling at the above; cache warm-up,
+      not signal. Everything past iteration 1 repeats to the cycle.)
+
+      Three things stand out:
+
+      - **"8 sounding" and "8 + FX" are statistically the same number.**
+        The two tracks actually routed to sends (snare→reverb,
+        clap→delay) cost nothing measurable on top of running FX at all —
+        the fixed per-block cost of ticking the delay line and reverb
+        tank dominates completely over the per-sample send math.
+      - **"8 FX idle" ≈ "8 + FX" too** — FX are always advanced every
+        block regardless of whether any track sends to them (see
+        `SendFx`/`Track::process`), so there is no such thing as a cheap
+        "FX present but unused" state. Budgeting for FX means budgeting
+        for FX running flat out, always.
+      - **The estimate table above was optimistic by ~2x.** It projected
+        120-150k cy / 30-38% for "8 tracks + sends"; measured is 272k cy /
+        68.1% — the same shape of miss as the pre-sin-table `sinf`
+        estimate in Phase 0, just smaller magnitude. `idle` alone (92.5k
+        cy, no track sounding, FX ticking on silence) is already higher
+        than the whole Phase 1 8-track *sounding* figure of 68,090 cy —
+        the FX block-rate cost, not the per-voice cost, is now the
+        dominant term.
+
+      68.1% leaves real but not generous headroom — `bench`'s own
+      70%-warning threshold (`firmware/src/bin/bench.rs`) sits 2 points
+      above the current worst case. MIDI parsing, `set_macro` (`expf`
+      calls), and any future per-block work (Phase 6 sample playback,
+      more sends) all have to fit in the remaining ~32%, and the delay
+      line's 24,000-sample buffer is the biggest single lever left if that
+      gets tight (see Phase 6/backlog).
+- [x] 127 tests green (8 new FX tests + 5 new send-routing tests).
+      Delay round-trip, feedback decay, tone attenuation, NaN at extremes;
+      reverb impulse → tail, stereo from mono, no-runaway, NaN at extremes;
+      send routing for delay and reverb independently; LFO modulates
+      send_delay; bit-identical re-render determinism. Fmt + clippy clean
+      (only pre-existing warnings remain in lfo.rs / sy_tone.rs).
 
 ### Phase 6 — Optional: sample machine
 

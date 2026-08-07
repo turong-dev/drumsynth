@@ -69,6 +69,23 @@ impl SineOsc {
         }
         out
     }
+
+    /// Advance one sample with an added phase bias, returning the output.
+    ///
+    /// Used for FM: the modulator contributes a normalised-turns offset to the
+    /// carrier's phase *before* lookup, without disturbing the carrier's own
+    /// phase accumulator. The bias is in turns (1.0 = one cycle of phase
+    /// deviation) and `sin_turns` wraps for free, so no extra modulo here.
+    /// The accumulator advances as usual after the lookup.
+    #[inline(always)]
+    pub fn tick_with_phase_bias(&mut self, bias: f32) -> f32 {
+        let out = super::fast::sin_turns(self.phase + bias);
+        self.phase += self.inc;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        out
+    }
 }
 
 impl Default for SineOsc {

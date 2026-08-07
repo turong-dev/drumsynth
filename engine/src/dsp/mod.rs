@@ -7,16 +7,24 @@
 //! Setup can call `libm::expf` freely — it happens when a parameter changes,
 //! at UI rate. The hot path gets [`fast`], which trades accuracy for cycles.
 
+pub mod ahd;
 pub mod env;
 pub mod fast;
 pub mod filter;
+pub mod fx;
+pub mod lfo;
 pub mod noise;
 pub mod osc;
+pub mod svf;
 
+pub use ahd::AhdEnv;
 pub use env::DecayEnv;
 pub use filter::{OnePoleHp, OnePoleLp};
+pub use fx::SendFx;
+pub use lfo::{Lfo, LfoMode, LfoWave, ModDest};
 pub use noise::Noise;
 pub use osc::SineOsc;
+pub use svf::{Svf, SvfMode};
 
 /// Convert a decay time in seconds to a one-pole coefficient.
 ///

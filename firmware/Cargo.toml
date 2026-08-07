@@ -31,6 +31,9 @@ teensy4-bsp = { version = "0.5", features = ["rt"] }
 teensy4-panic = "0.3"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
+# Brings `embedded_hal::serial::Read` into scope so the LPUART `read()`
+# method resolves — imxrt-hal 0.5 implements the 0.2 traits.
+embedded-hal = "0.2"
 
 # Logging over USB serial rather than RTT.
 #
