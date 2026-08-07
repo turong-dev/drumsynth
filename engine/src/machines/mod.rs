@@ -106,20 +106,22 @@ pub const SLOT_CUT: usize = macro_index(BANK_FILTER, 0);
 pub const SLOT_LPF: usize = macro_index(BANK_FILTER, 1);
 
 // AMP slots (bank 2). CC 20 + flat.
-/// AMP bank: amp-envelope decay time.
-pub const SLOT_DECAY: usize = macro_index(BANK_AMP, 0);
-/// AMP bank: secondary/noise decay time.
-pub const SLOT_DECAY_2: usize = macro_index(BANK_AMP, 1);
 /// AMP bank: per-machine output level.
-pub const SLOT_LEVEL: usize = macro_index(BANK_AMP, 2);
+pub const SLOT_LEVEL: usize = macro_index(BANK_AMP, 0);
+/// AMP bank: per-machine panning.
+pub const SLOT_PAN: usize = macro_index(BANK_AMP, 1);
+/// AMP bank: amp-envelope decay time.
+pub const SLOT_DECAY: usize = macro_index(BANK_AMP, 2);
+/// AMP bank: secondary/noise decay time.
+pub const SLOT_DECAY_2: usize = macro_index(BANK_AMP, 3);
 /// AMP bank: voice-shaping amount (drive / stick / noise level).
-pub const SLOT_SHAPE: usize = macro_index(BANK_AMP, 3);
+pub const SLOT_SHAPE: usize = macro_index(BANK_AMP, 4);
 /// AMP bank: dry/wet or noise/body mix.
-pub const SLOT_MIX: usize = macro_index(BANK_AMP, 4);
+pub const SLOT_MIX: usize = macro_index(BANK_AMP, 5);
 /// AMP bank: delay send (track-routed).
-pub const SLOT_SEND_DELAY: usize = macro_index(BANK_AMP, 5);
+pub const SLOT_SEND_DELAY: usize = macro_index(BANK_AMP, 6);
 /// AMP bank: reverb send (track-routed).
-pub const SLOT_SEND_REVERB: usize = macro_index(BANK_AMP, 6);
+pub const SLOT_SEND_REVERB: usize = macro_index(BANK_AMP, 7);
 
 // MOD slots (bank 3). CC 20 + flat.
 /// MOD bank: FM/mod depth.
@@ -412,14 +414,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.255), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.9), // AMP 2
-            mi("DRIVE", "DRV", 0.16), // AMP 3
-            resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.9), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.255), // AMP 2
+            resv(), // AMP 3
+            mi("DRIVE", "DRV", 0.16), // AMP 4
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -449,14 +451,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.255), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.9), // AMP 2
+            mi("LEVEL", "LVL", 0.9), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.255), // AMP 2
             resv(), // AMP 3
             resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             mi("MOD.AMT", "MDA", 0.35), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -486,14 +488,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.40), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.85), // AMP 2
-            mi("STICK", "STK", 0.30), // AMP 3
-            resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.85), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.40), // AMP 2
+            resv(), // AMP 3
+            mi("STICK", "STK", 0.30), // AMP 4
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -523,14 +525,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("BDEC", "BDC", 0.13), // AMP 0
-            mi("NDEC", "NDC", 0.209), // AMP 1
-            mi("LEVEL", "LVL", 0.7), // AMP 2
-            resv(), // AMP 3
-            mi("NMIX", "NM", 0.62), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.7), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("BDEC", "BDC", 0.13), // AMP 2
+            mi("NDEC", "NDC", 0.209), // AMP 3
+            resv(), // AMP 4
+            mi("NMIX", "NM", 0.62), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -560,14 +562,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("BDEC", "BDC", 0.13), // AMP 0
-            mi("NDEC", "NDC", 0.209), // AMP 1
-            mi("LEVEL", "LVL", 0.7), // AMP 2
-            resv(), // AMP 3
-            mi("NMIX", "NM", 0.62), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.7), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("BDEC", "BDC", 0.13), // AMP 2
+            mi("NDEC", "NDC", 0.209), // AMP 3
+            resv(), // AMP 4
+            mi("NMIX", "NM", 0.62), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             mi("MOD.AMT", "MDA", 0.30), // MOD 0
             mi("MENV", "MEN", 0.15), // MOD 1
             resv(), // MOD 2
@@ -597,14 +599,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.30), // AMP 0
-            mi("NDEC", "NDC", 0.30), // AMP 1
-            mi("LEVEL", "LVL", 0.75), // AMP 2
-            mi("NLEV", "NLV", 0.40), // AMP 3
-            resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.75), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.30), // AMP 2
+            mi("NDEC", "NDC", 0.30), // AMP 3
+            mi("NLEV", "NLV", 0.40), // AMP 4
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -634,14 +636,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("BDEC", "BDC", 0.20), // AMP 0
-            mi("NDEC", "NDC", 0.30), // AMP 1
-            mi("LEVEL", "LVL", 0.7), // AMP 2
-            resv(), // AMP 3
-            mi("BAL", "BAL", 0.80), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.7), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("BDEC", "BDC", 0.20), // AMP 2
+            mi("NDEC", "NDC", 0.30), // AMP 3
+            resv(), // AMP 4
+            mi("BAL", "BAL", 0.80), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -671,14 +673,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.092), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.4), // AMP 2
+            mi("LEVEL", "LVL", 0.4), // AMP o
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.092), // AMP 2
             resv(), // AMP 3
             resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -708,14 +710,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.092), // AMP 0
-            mi("TDEC", "TDC", 0.30), // AMP 1
-            mi("LEVEL", "LVL", 0.4), // AMP 2
-            resv(), // AMP 3
-            mi("RST", "RST", 1.0), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            mi("LEVEL", "LVL", 0.4), // AMP 0
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.092), // AMP 2
+            mi("TDEC", "TDC", 0.30), // AMP 3
+            resv(), // AMP 4
+            mi("RST", "RST", 1.0), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -745,14 +747,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.30), // AMP 0
-            mi("TDEC", "TDC", 0.15), // AMP 1
-            mi("LEVEL", "LVL", 0.5), // AMP 2
-            resv(), // AMP 3
+            mi("LEVEL", "LVL", 0.5), // AMP 0
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.30), // AMP 2
+            mi("TDEC", "TDC", 0.15), // AMP 3
             resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -782,14 +784,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.15), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.55), // AMP 2
+            mi("LEVEL", "LVL", 0.55), // AMP 0
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.15), // AMP 2
             resv(), // AMP 3
             resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             resv(), // MOD 0
             resv(), // MOD 1
             resv(), // MOD 2
@@ -819,14 +821,14 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             resv(), // FILTER 5
             resv(), // FILTER 6
             resv(), // FILTER 7
-            mi("DEC", "DEC", 0.30), // AMP 0
-            resv(), // AMP 1
-            mi("LEVEL", "LVL", 0.7), // AMP 2
+            mi("LEVEL", "LVL", 0.7), // AMP 0
+            mi("PAN", "PAN", 0.5), // AMP 1
+            mi("DEC", "DEC", 0.30), // AMP 2
             resv(), // AMP 3
             resv(), // AMP 4
-            mi("SEND.DLY", "SDY", 0.0), // AMP 5
-            mi("SEND.RVB", "SRV", 0.0), // AMP 6
-            resv(), // AMP 7
+            resv(), // AMP 5
+            mi("SEND.DLY", "SDY", 0.0), // AMP 6
+            mi("SEND.RVB", "SRV", 0.0), // AMP 7
             mi("MOD.AMT", "MDA", 0.40), // MOD 0
             mi("MENV", "MEN", 0.25), // MOD 1
             resv(), // MOD 2
@@ -1078,13 +1080,14 @@ mod tests {
         assert_eq!(SLOT_MACHINE, 5);
         assert_eq!(SLOT_CUT, 8);
         assert_eq!(SLOT_LPF, 9);
-        assert_eq!(SLOT_DECAY, 16);
-        assert_eq!(SLOT_DECAY_2, 17);
-        assert_eq!(SLOT_LEVEL, 18);
-        assert_eq!(SLOT_SHAPE, 19);
-        assert_eq!(SLOT_MIX, 20);
-        assert_eq!(SLOT_SEND_DELAY, 21);
-        assert_eq!(SLOT_SEND_REVERB, 22);
+        assert_eq!(SLOT_LEVEL, 16);
+        assert_eq!(SLOT_PAN, 17);
+        assert_eq!(SLOT_DECAY, 18);
+        assert_eq!(SLOT_DECAY_2, 19);
+        assert_eq!(SLOT_SHAPE, 20);
+        assert_eq!(SLOT_MIX, 21);
+        assert_eq!(SLOT_SEND_DELAY, 22);
+        assert_eq!(SLOT_SEND_REVERB, 23);
         assert_eq!(SLOT_MOD_AMOUNT, 24);
         assert_eq!(SLOT_MOD_ENV, 25);
     }

@@ -52,8 +52,8 @@ pub mod machines;
 pub mod midi;
 
 pub use machines::{
-    MachineId, MacroInfo, NUM_BANKS, NUM_MACROS, MACROS_PER_BANK, SLOT_LEVEL, SLOT_MACHINE,
-    SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    MachineId, MacroInfo, NUM_BANKS, NUM_MACROS, MACROS_PER_BANK, SLOT_LEVEL, SLOT_PAN, 
+    SLOT_MACHINE, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 
 use dsp::{Lfo, ModDest};
@@ -338,6 +338,8 @@ impl Track {
         // consistent.
         self.base_macros[SLOT_SEND_DELAY] = self.strip.send_delay;
         self.base_macros[SLOT_SEND_REVERB] = self.strip.send_reverb;
+        // Pan is track-level too: keep the strip's pan mirrored in the macro.
+        self.base_macros[SLOT_PAN] = self.strip.pan * 0.5 + 0.5;
         // The MACH slot always mirrors the loaded machine (see `load_sound`).
         self.base_macros[SLOT_MACHINE] =
             id.index() as f32 / (MachineId::COUNT - 1) as f32;
@@ -398,6 +400,14 @@ impl Track {
         } else if idx == SLOT_SEND_REVERB {
             self.strip.send_reverb = v;
             self.eff_send_reverb = v;
+        } else if idx == SLOT_PAN {
+            // Macro 0..1 maps onto the bipolar -1..+1 strip pan (0.5 = centre).
+            // `tick` reads the cached pan gains, so recompute them here or the
+            // change is inaudible.
+            self.strip.pan = v * 2.0 - 1.0;
+            let (l, r) = pan_law(self.strip.pan);
+            self.pan_l = l;
+            self.pan_r = r;
         }
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
@@ -412,6 +422,12 @@ impl Track {
         self.strip.send_reverb = all[SLOT_SEND_REVERB];
         self.eff_send_delay = all[SLOT_SEND_DELAY];
         self.eff_send_reverb = all[SLOT_SEND_REVERB];
+        // Pan is track-routed too (see `set_macro`): the macro owns the value,
+        // the strip pan is the derived -1..+1 form and the gains feed `tick`.
+        self.strip.pan = all[SLOT_PAN] * 2.0 - 1.0;
+        let (l, r) = pan_law(self.strip.pan);
+        self.pan_l = l;
+        self.pan_r = r;
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
@@ -457,6 +473,9 @@ impl Track {
         // routing authority; the strip fields are derived storage.
         self.base_macros[SLOT_SEND_DELAY] = params.send_delay;
         self.base_macros[SLOT_SEND_REVERB] = params.send_reverb;
+        // Mirror the strip pan into the PAN macro slot so a strip edit keeps
+        // the macro view (MIDI CC 37) consistent, like the sends.
+        self.base_macros[SLOT_PAN] = params.pan * 0.5 + 0.5;
         if !self.mod_state.has_active_mod() {
             self.eff_drive = params.drive;
             self.eff_level = params.level;
@@ -1377,9 +1396,11 @@ mod tests {
 
         // Re-setting the same machine is a no-op (doesn't wipe macros).
         e.tracks[0].set_macro(SLOT_LEVEL, 0.5);
+        e.tracks[0].set_macro(SLOT_PAN, 0.5);
         e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
         assert_eq!(e.tracks[0].id(), MachineId::Rs);
         assert_eq!(e.tracks[0].base_macros[SLOT_LEVEL], 0.5);
+        assert_eq!(e.tracks[0].base_macros[SLOT_PAN], 0.5);
 
         // Top of the range hits the last machine in the catalogue.
         e.tracks[0].set_macro(SLOT_MACHINE, 1.0);
@@ -1593,6 +1614,7 @@ mod tests {
         e2.send_fx.delay.set_params(0.005, 0.5, 20_000.0, 1.0);
         e2.send_fx.reverb.set_params(0.0, 0.6, 6_000.0, 1.0);
         e2.send_fx.delay.reset();
+
         e2.send_fx.reverb.reset();
         e2.trigger(0, 1.0);
         let mut l2 = [0.0f32; BLOCK];
