@@ -17,9 +17,32 @@
 //!
 //! Per-sample cost: two `sin_turns` lookups (carrier + modulator) — still
 //! cheap thanks to the table swap.
+//!
+//! # Macros
+//!
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range       | notes |
+//! |-----|-----|-----------|-------------|-------|
+//! | 0   | 20  | TUNE      | 30..120 Hz  | settled fundamental |
+//! | 1   | 21  | SWEEP     | 1×..9×      | start-to-end pitch ratio |
+//! | 2   | 22  | SWP_T     | 5..105 ms   | pitch-sweep decay time |
+//! | 3   | 23  | MOD.HZ    | 1×..8×      | modulator relative to carrier |
+//! | 4   | 24  | MOD.DC    | 5..105 ms   | mod-envelope decay |
+//! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | 16  | 36  | DEC       | 50..1500 ms | amp-decay time |
+//! | 18  | 38  | LEVEL     | 0..1        | per-machine output level |
+//! | 24  | 44  | MOD.AMT   | 0..4        | FM depth in carrier cycles |
+//!
+//! All other slots are RESV (default 0.0) and ignored — the voice is
+//! sine-only with no transient layer.
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_MOD_AMOUNT, SLOT_MOD_DC, SLOT_MOD_HZ, SLOT_SWEEP,
+    SLOT_SWEEP_TIME, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// BD FM machine.
@@ -64,14 +87,14 @@ impl BdFm {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 30.0 + 90.0 * macros[0]; // TUNE 30..120 Hz
-        let pitch_ratio = 1.0 + 8.0 * macros[1]; // SWEEP 1×..9×
-        let pitch_decay_s = 0.005 + 0.1 * macros[2]; // SWP_T 5..105 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[3]; // DEC 50..1500 ms
-        let mod_ratio = 1.0 + 7.0 * macros[4]; // MOD.HZ 1×..8× relative
-        let mod_decay_s = 0.005 + 0.1 * macros[5]; // MOD.DEC 5..105 ms
-        let mod_amount = macros[6] * 4.0; // MOD.AMT 0..4 (in carrier cycles)
-        let level = macros[7]; // LEVEL 0..1
+        let end_hz = 30.0 + 90.0 * macros[SLOT_TUNE]; // TUNE 30..120 Hz
+        let pitch_ratio = 1.0 + 8.0 * macros[SLOT_SWEEP]; // SWEEP 1×..9×
+        let pitch_decay_s = 0.005 + 0.1 * macros[SLOT_SWEEP_TIME]; // SWP_T 5..105 ms
+        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_DECAY]; // DEC 50..1500 ms
+        let mod_ratio = 1.0 + 7.0 * macros[SLOT_MOD_HZ]; // MOD.HZ 1×..8× relative
+        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MOD_DC]; // MOD.DC 5..105 ms
+        let mod_amount = macros[SLOT_MOD_AMOUNT] * 4.0; // MOD.AMT 0..4 (in carrier cycles)
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;
@@ -186,9 +209,9 @@ mod tests {
     fn mod_amount_changes_tone() {
         let id = MachineId::BdFm;
         let mut quiet = id.default_macros();
-        quiet[6] = 0.0; // MOD.AMT = 0 → plain sine (no FM)
+        quiet[SLOT_MOD_AMOUNT] = 0.0; // MOD.AMT = 0 → plain sine (no FM)
         let mut loud = id.default_macros();
-        loud[6] = 1.0; // MOD.AMT = 1 → max FM
+        loud[SLOT_MOD_AMOUNT] = 1.0; // MOD.AMT = 1 → max FM
 
         // FM adds sidebands at higher frequencies, so the heavier-FM case
         // should have more zero crossings per unit time than the clean sine.

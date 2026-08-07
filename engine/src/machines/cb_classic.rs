@@ -6,18 +6,25 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | 300..1000 Hz  | osc A frequency |
-//! | 1   | DEC    | 30..400 ms    | decay |
-//! | 2   | DET    | 1.0..1.5      | osc B/A ratio |
-//! | 3   | BPF    | 300..4000 Hz  | bandpass center |
-//! | 4   | LEVEL  | 0..1          | per-machine output level |
-//! | 5-7 | RESV*  | (reserved)    | Q, waveform, etc. |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range         | notes |
+//! |-----|-----|-----------|---------------|-------|
+//! | 0   | 20  | TUNE      | 300..1000 Hz  | osc A frequency |
+//! | 1   | 21  | DET       | 1.0..1.5      | osc B/A ratio |
+//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | BPF       | 300..4000 Hz  | bandpass center |
+//! | 16  | 36  | DEC       | 30..400 ms    | decay |
+//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
+//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
-use crate::machines::NUM_MACROS;
+use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE};
 use crate::SAMPLE_RATE;
 
 /// CB Classic machine.
@@ -55,11 +62,11 @@ impl CbClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 300.0 + 700.0 * macros[0]; // TUNE 300..1000 Hz
-        let decay_s = 0.03 + 0.37 * macros[1]; // DEC 30..400 ms
-        let detune = 1.0 + 0.5 * macros[2]; // DET 1.0..1.5
-        let bpf_hz = 300.0 + 3700.0 * macros[3]; // BPF 300..4000 Hz
-        let level = macros[4]; // LEVEL 0..1
+        let base_hz = 300.0 + 700.0 * macros[SLOT_TUNE]; // TUNE 300..1000 Hz
+        let decay_s = 0.03 + 0.37 * macros[SLOT_DECAY]; // DEC 30..400 ms
+        let detune = 1.0 + 0.5 * macros[SLOT_SWEEP]; // DET 1.0..1.5
+        let bpf_hz = 300.0 + 3700.0 * macros[SLOT_CUT]; // BPF 300..4000 Hz
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.freq_a = base_hz * self.freq_scale;
         self.freq_b = base_hz * detune * self.freq_scale;

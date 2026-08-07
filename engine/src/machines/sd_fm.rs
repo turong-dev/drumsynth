@@ -8,20 +8,31 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | 100..400 Hz   | carrier pitch |
-//! | 1   | RAT    | 1.0..4.0      | modulator-to-carrier ratio |
-//! | 2   | BDEC   | 40..480 ms    | body decay |
-//! | 3   | NDEC   | 30..830 ms    | noise decay |
-//! | 4   | MENV   | 5..105 ms     | mod-envelope decay (FM thins over time) |
-//! | 5   | AMT    | 0..3          | FM amount in carrier cycles |
-//! | 6   | NMIX   | 0..1          | body↔rattle crossfade |
-//! | 7   | LEVEL  | 0..1          | per-machine output level |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range         | notes |
+//! |-----|-----|-----------|---------------|-------|
+//! | 0   | 20  | TUNE      | 100..400 Hz   | carrier pitch |
+//! | 1   | 21  | RAT       | 1.0..4.0      | modulator-to-carrier ratio |
+//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | 16  | 36  | BDEC      | 40..480 ms    | body decay |
+//! | 17  | 37  | NDEC      | 30..830 ms    | noise decay |
+//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
+//! | 20  | 40  | NMIX      | 0..1          | body↔rattle crossfade |
+//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 24  | 44  | AMT       | 0..3          | FM amount in carrier cycles |
+//! | 25  | 45  | MENV      | 5..105 ms     | mod-envelope decay (FM thins over time) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_MOD_AMOUNT, SLOT_MOD_ENV,
+    SLOT_SWEEP, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// SD FM machine.
@@ -67,14 +78,14 @@ impl SdFm {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let carrier_hz = 100.0 + 300.0 * macros[0]; // TUNE 100..400 Hz
-        let mod_ratio = 1.0 + 3.0 * macros[1]; // RAT 1..4
-        let body_decay_s = 0.04 + 0.44 * macros[2]; // BDEC 40..480 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[3]; // NDEC 30..830 ms
-        let mod_decay_s = 0.005 + 0.1 * macros[4]; // MENV 5..105 ms
-        let mod_amount = macros[5] * 3.0; // AMT 0..3
-        let noise_mix = macros[6].clamp(0.0, 1.0); // NMIX 0..1
-        let level = macros[7]; // LEVEL 0..1
+        let carrier_hz = 100.0 + 300.0 * macros[SLOT_TUNE]; // TUNE 100..400 Hz
+        let mod_ratio = 1.0 + 3.0 * macros[SLOT_SWEEP]; // RAT 1..4
+        let body_decay_s = 0.04 + 0.44 * macros[SLOT_DECAY]; // BDEC 40..480 ms
+        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_DECAY_2]; // NDEC 30..830 ms
+        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MOD_ENV]; // MENV 5..105 ms
+        let mod_amount = macros[SLOT_MOD_AMOUNT] * 3.0; // AMT 0..3
+        let noise_mix = macros[SLOT_MIX].clamp(0.0, 1.0); // NMIX 0..1
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.carrier.set_freq(carrier_hz * self.freq_scale);
         self.mod_hz = carrier_hz * mod_ratio * self.freq_scale;
@@ -184,7 +195,7 @@ mod tests {
     fn full_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
         let mut m = id.default_macros();
-        m[6] = 1.0;
+        m[SLOT_MIX] = 1.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -194,7 +205,7 @@ mod tests {
     fn zero_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
         let mut m = id.default_macros();
-        m[6] = 0.0;
+        m[SLOT_MIX] = 0.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -204,11 +215,11 @@ mod tests {
     fn fm_amount_changes_tone() {
         let id = MachineId::SdFm;
         let mut clean = id.default_macros();
-        clean[5] = 0.0;
-        clean[6] = 0.0;
+        clean[SLOT_MOD_AMOUNT] = 0.0;
+        clean[SLOT_MIX] = 0.0;
         let mut fm = id.default_macros();
-        fm[5] = 1.0;
-        fm[6] = 0.0;
+        fm[SLOT_MOD_AMOUNT] = 1.0;
+        fm[SLOT_MIX] = 0.0;
         let crossings = |macros: &[f32; NUM_MACROS]| {
             let mut s = SdFm::new(macros);
             s.trigger(1.0);

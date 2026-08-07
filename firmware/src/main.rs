@@ -43,17 +43,24 @@
 //!
 //! # MIDI CC map
 //!
-//! CCs are table-driven against the 8-track / 8-macro machine surface so
-//! adding a new macro on a new machine doesn't cost a match arm here.
+//! MIDI is routed by the shared `drum_engine::midi` router: **one channel
+//! per track**, so a CC on channel `N` edits track `N`. The CC map is the
+//! same flat macro index used everywhere — `CC (20 + idx)` sets macro `idx`
+//! (see [`drum_engine::midi::CC_TRACK_BASE`]):
 //!
-//! - CC 7  = master gain                              (0..1)
-//! - CC 20 = track 0 macro 0..7                       (8 CCs)
-//! - CC 30 = track 1 macro 0..7                       (8 CCs)
-//! - ...up to CC 90 = track 7 macros                  (8 CCs per track)
+//! - CC 7  = master gain                              (0..1, global)
+//! - CC 20..27  = PITCH  macros 0..7   on the track's channel
+//! - CC 28..35  = FILTER macros 8..15  on the track's channel
+//! - CC 36..43  = AMP    macros 16..23 on the track's channel
+//! - CC 44..51  = MOD    macros 24..31 on the track's channel
+//! - CC 120, 123 = panic (all sound off), any channel
 //!
-//! Track n maps to `20 + n * 10 + macro_index`. The decimation of 10
-//! instead of 8 leaves room for future track-strip CCs (filter, amp, pan)
-//! per track without renumbering machine macros.
+//! PITCH CC 25 is the machine selector: its value quantises over
+//! [`drum_engine::MachineId::ALL`] and loads that machine on the track.
+//!
+//! MIDI channels are conventionally labelled 1..=16; on the wire the nibble
+//! is 0-based, so channel 1 = wire 0 = track 0, up to channel 8 = wire 7 =
+//! track 7. Channels 9..=16 have no track — notes are silent, CCs ignored.
 
 #![no_std]
 #![no_main]

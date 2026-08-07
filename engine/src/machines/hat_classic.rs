@@ -11,17 +11,25 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | DEC    | 10..510 ms    | decay time; <100 ms reads as closed |
-//! | 1   | HPF    | 2000..11000 Hz | highpass colour |
-//! | 2   | LPF    | 4000..16000 Hz | lowpass top; takes the fizz off |
-//! | 3   | LEVEL  | 0..1          | per-machine output level |
-//! | 4-7 | RESV*  | (reserved)    | 6-osc model, no-color variant, etc. |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range          | notes |
+//! |-----|-----|-----------|----------------|-------|
+//! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | HPF       | 2000..11000 Hz | highpass colour |
+//! | 9   | 29  | LPF       | 4000..16000 Hz | lowpass top; takes the fizz off |
+//! | 16  | 36  | DEC       | 10..510 ms     | decay time; <100 ms reads as closed |
+//! | 18  | 38  | LEVEL     | 0..1           | per-machine output level |
+//! | 21  | 41  | SEND.DLY  | 0..1           | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//!
+//! Noise-only, so the PITCH bank is RESV (default 0.0) and ignored apart
+//! from the track-routed machine selector at slot 5.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, OnePoleLp};
-use crate::machines::NUM_MACROS;
+use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_LEVEL, SLOT_LPF};
 use crate::SAMPLE_RATE;
 
 /// Hat Classic machine.
@@ -51,10 +59,10 @@ impl HatClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let decay_s = 0.01 + 0.5 * macros[0]; // DEC 10..510 ms
-        let hp_hz = 2000.0 + 9000.0 * macros[1]; // HPF 2..11 kHz
-        let lp_hz = 4000.0 + 12000.0 * macros[2]; // LPF 4..16 kHz
-        let level = macros[3]; // LEVEL 0..1
+        let decay_s = 0.01 + 0.5 * macros[SLOT_DECAY]; // DEC 10..510 ms
+        let hp_hz = 2000.0 + 9000.0 * macros[SLOT_CUT]; // HPF 2..11 kHz
+        let lp_hz = 4000.0 + 12000.0 * macros[SLOT_LPF]; // LPF 4..16 kHz
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.env.set_coeff(decay_coeff(decay_s, SAMPLE_RATE));
         self.hp.set_coeff(cutoff_coeff(hp_hz, SAMPLE_RATE));

@@ -9,20 +9,29 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | 100..400 Hz   | shell fundamental |
-//! | 1   | RATIO  | 1.0..2.0      | second tone relative to first |
-//! | 2   | BDEC   | 40..640 ms    | body decay |
-//! | 3   | NDEC   | 30..830 ms    | noise decay |
-//! | 4   | HPF    | 400..4000 Hz  | noise highpass |
-//! | 5   | NMIX   | 0..1          | body↔rattle crossfade |
-//! | 6   | LEVEL  | 0..1          | per-machine output level |
-//! | 7   | RESV   | (reserved)    | noise LP resonance (phase 2) |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range         | notes |
+//! |-----|-----|-----------|---------------|-------|
+//! | 0   | 20  | TUNE      | 100..400 Hz   | shell fundamental |
+//! | 1   | 21  | RATIO     | 1.0..2.0      | second tone relative to first |
+//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | HPF       | 400..4000 Hz  | noise highpass |
+//! | 16  | 36  | BDEC      | 40..640 ms    | body decay |
+//! | 17  | 37  | NDEC      | 30..830 ms    | noise decay |
+//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
+//! | 20  | 40  | NMIX      | 0..1          | body↔rattle crossfade |
+//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_SWEEP, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// SD Natural machine.
@@ -62,13 +71,13 @@ impl SdNatural {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 100.0 + 300.0 * macros[0]; // TUNE 100..400 Hz
-        let body_ratio = 1.0 + macros[1]; // RATIO 1.0..2.0
-        let body_decay_s = 0.04 + 0.6 * macros[2]; // BDEC 40..640 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[3]; // NDEC 30..830 ms
-        let noise_hp_hz = 400.0 + 3600.0 * macros[4]; // HPF 400..4000 Hz
-        let noise_mix = macros[5]; // NMIX 0..1
-        let level = macros[6]; // LEVEL 0..1
+        let body_hz = 100.0 + 300.0 * macros[SLOT_TUNE]; // TUNE 100..400 Hz
+        let body_ratio = 1.0 + macros[SLOT_SWEEP]; // RATIO 1.0..2.0
+        let body_decay_s = 0.04 + 0.6 * macros[SLOT_DECAY]; // BDEC 40..640 ms
+        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_DECAY_2]; // NDEC 30..830 ms
+        let noise_hp_hz = 400.0 + 3600.0 * macros[SLOT_CUT]; // HPF 400..4000 Hz
+        let noise_mix = macros[SLOT_MIX]; // NMIX 0..1
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_a.set_freq(body_hz * self.freq_scale);
         self.body_b.set_freq(body_hz * body_ratio * self.freq_scale);
@@ -160,7 +169,7 @@ mod tests {
     #[test]
     fn full_noise_mix_still_makes_sound() {
         let mut macros = MachineId::SdNatural.default_macros();
-        macros[5] = 1.0; // NMIX
+        macros[SLOT_MIX] = 1.0; // NMIX
         let mut s = SdNatural::new(&macros);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -169,7 +178,7 @@ mod tests {
     #[test]
     fn zero_noise_mix_still_makes_sound() {
         let mut macros = MachineId::SdNatural.default_macros();
-        macros[5] = 0.0; // NMIX
+        macros[SLOT_MIX] = 0.0; // NMIX
         let mut s = SdNatural::new(&macros);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);

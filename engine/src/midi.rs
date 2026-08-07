@@ -15,15 +15,47 @@
 //! same bytes identically. Parsing bytes into events is this module; deciding
 //! what an event *means* is the shared router.
 //!
-//! Routing is **one channel per track**:
+//! Routing is **one channel per track**, `TRACKS` channels, the rest unused.
+//! MIDI channels are conventionally numbered **1..=16**; on the wire the
+//! nibble is 0-based, so the parser's `channel` field is wire value `N-1`.
 //!
-//! * A `NoteOn` on channel `N` plays track `N` *chromatically* — the note
-//!   number sets the pitch (middle C is the machine's macro pitch, each
-//!   semitone away transposes the voice by that many). This is the shared
-//!   [`crate::DrumEngine::trigger_channel`] path; a note on a channel with
-//!   no track is silent.
-//! * A `ControlChange` on channel `N` edits track `N`'s macros. `CC 7`
-//!   (master gain) is global on any channel.
+//! | MIDI channel (as labelled) | wire value | routes to |
+//! |----------------------------|------------|-----------|
+//! | 1..=8   | 0..=7  | track 0..=7 |
+//! | 9..=16  | 8..=15 | no track — NoteOn is silent, CC is ignored |
+//!
+//! # Notes
+//!
+//! * A `NoteOn` on channel `N` (wire `N-1`) plays track `N-1`
+//!   *chromatically* — the note number sets the pitch. Note 60 (middle C) is
+//!   the machine's macro pitch; each semitone away transposes the voice by
+//!   that many (track retune relative, so the macro pitch still maps the
+//!   same). Velocity 1..127 scales the voice output.
+//! * A `NoteOn` with zero velocity (or a `NoteOff`) is a no-op: drum voices
+//!   are one-shots, so there is nothing to release.
+//!
+//! # Control Changes
+//!
+//! `CC 7` (master gain) is global on any channel. Everything else is
+//! channel-scoped: a CC on channel `N` edits track `N-1`, matching the note
+//! routing. The CC map is the same flat macro index used everywhere —
+//! [`CC_TRACK_BASE`] = 20, `CC (20 + idx)` sets macro `idx`:
+//!
+//! | CC range  | bank     | macros     |
+//! |-----------|----------|------------|
+//! | 20..=27   | PITCH    | 0..=7      |
+//! | 28..=35   | FILTER   | 8..=15     |
+//! | 36..=43   | AMP      | 16..=23    |
+//! | 44..=51   | MOD      | 24..=31    |
+//! | 120, 123  | panic    | all sound/notes off, any channel |
+//!
+//! PITCH CC 25 is the machine selector ([`crate::machines::SLOT_MACHINE`]):
+//! the value is quantised over [`crate::MachineId::ALL`] and loads that
+//! machine on the track, so an engine can be swapped from MIDI without a
+//! program-change message.
+//!
+//! A CC outside those ranges is ignored. `CC 120` / `CC 123` on any channel
+//! emits [`MidiEvent::Panic`], which silences the whole engine.
 
 /// A parsed message the engine cares about.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -494,6 +526,44 @@ mod tests {
         assert_eq!(
             e.tracks[0].base_macros[0], mac0_before,
             "channel beyond the track count must be ignored"
+        );
+    }
+
+    #[test]
+    fn cc_machine_selector_swaps_engine() {
+        use crate::DrumEngine;
+        let mut e = DrumEngine::new();
+        assert_eq!(e.tracks[0].id(), crate::MachineId::BdClassic);
+
+        // CC 25 = CC_TRACK_BASE + SLOT_MACHINE (PITCH slot 5). 0.5 → index 5.
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TRACK_BASE + crate::machines::SLOT_MACHINE as u8,
+                value: 0.5,
+            },
+        );
+        assert_eq!(
+            e.tracks[0].id(),
+            crate::MachineId::Rs,
+            "CC 25 must swap the engine on the track's channel"
+        );
+
+        // Channel-scoped, like every other track macro.
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 1,
+                controller: CC_TRACK_BASE + crate::machines::SLOT_MACHINE as u8,
+                value: 1.0,
+            },
+        );
+        assert_eq!(e.tracks[1].id(), crate::MachineId::SyTone);
+        assert_eq!(
+            e.tracks[0].id(),
+            crate::MachineId::Rs,
+            "channel 1 must not touch track 0"
         );
     }
 

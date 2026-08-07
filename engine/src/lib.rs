@@ -51,7 +51,10 @@ pub mod dsp;
 pub mod machines;
 pub mod midi;
 
-pub use machines::{MachineId, Macro, MacroInfo, NUM_MACROS};
+pub use machines::{
+    MachineId, MacroInfo, NUM_BANKS, NUM_MACROS, MACROS_PER_BANK, SLOT_LEVEL, SLOT_MACHINE,
+    SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+};
 
 use dsp::{Lfo, ModDest};
 
@@ -330,14 +333,33 @@ impl Track {
     /// defaults. Strip and modulation are untouched.
     pub fn load_machine(&mut self, id: MachineId) {
         self.base_macros = id.default_macros();
+        // Sends are track-level, not machine-level: keep the strip's aux
+        // levels and mirror them back into the macro slots so the two stay
+        // consistent.
+        self.base_macros[SLOT_SEND_DELAY] = self.strip.send_delay;
+        self.base_macros[SLOT_SEND_REVERB] = self.strip.send_reverb;
+        // The MACH slot always mirrors the loaded machine (see `load_sound`).
+        self.base_macros[SLOT_MACHINE] =
+            id.index() as f32 / (MachineId::COUNT - 1) as f32;
         self.slot = MachineSlot::new(id, &self.base_macros);
     }
 
     /// Load a complete sound (machine + macros + strip) onto this track.
     pub fn load_sound(&mut self, sound: &Sound) {
         self.load_machine(sound.machine_id);
-        self.base_macros = sound.macros;
         self.set_strip(&sound.strip);
+        // The sound's macros are authoritative for its sends (they round-trip
+        // verbatim between host and device); derive the strip aux levels from
+        // them so the two stay consistent.
+        self.base_macros = sound.macros;
+        // The MACH slot always mirrors the loaded machine, whatever the
+        // sound's macro array carried.
+        self.base_macros[SLOT_MACHINE] =
+            sound.machine_id.index() as f32 / (MachineId::COUNT - 1) as f32;
+        self.strip.send_delay = self.base_macros[SLOT_SEND_DELAY];
+        self.strip.send_reverb = self.base_macros[SLOT_SEND_REVERB];
+        self.eff_send_delay = self.base_macros[SLOT_SEND_DELAY];
+        self.eff_send_reverb = self.base_macros[SLOT_SEND_REVERB];
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
@@ -350,18 +372,46 @@ impl Track {
 
     /// Set one base macro. Coefficient recompute is included.
     pub fn set_macro(&mut self, idx: usize, value: f32) {
-        if idx < NUM_MACROS {
-            let v = value.clamp(0.0, 1.0);
-            self.base_macros[idx] = v;
-            if !self.mod_state.has_active_mod() {
-                self.slot.set_macros(&self.base_macros);
+        if idx >= NUM_MACROS {
+            return;
+        }
+        let v = value.clamp(0.0, 1.0);
+        // Machine selector (PITCH slot 5): quantise 0..1 onto the machine
+        // catalogue. Track-routed, so CC 25 swaps engines without a program
+        // change. Loading a different machine resets macros to its defaults —
+        // the old voice's macro values mean nothing on the new one.
+        if idx == SLOT_MACHINE {
+            let i = (v * (MachineId::COUNT - 1) as f32) as usize;
+            let id = MachineId::ALL[i];
+            if id != self.slot.id() {
+                self.load_machine(id);
             }
+            return;
+        }
+        self.base_macros[idx] = v;
+        // The send macros are track-routed: editing SEND.DLY / SEND.RVB
+        // drives the strip's aux levels (and the effective values read in
+        // the per-sample path), not the machine DSP.
+        if idx == SLOT_SEND_DELAY {
+            self.strip.send_delay = v;
+            self.eff_send_delay = v;
+        } else if idx == SLOT_SEND_REVERB {
+            self.strip.send_reverb = v;
+            self.eff_send_reverb = v;
+        }
+        if !self.mod_state.has_active_mod() {
+            self.slot.set_macros(&self.base_macros);
         }
     }
 
     /// Replace all base macros in one call.
     pub fn set_macros(&mut self, all: &[f32; NUM_MACROS]) {
         self.base_macros = *all;
+        // Sends are track-routed from the macro array (see `set_macro`).
+        self.strip.send_delay = all[SLOT_SEND_DELAY];
+        self.strip.send_reverb = all[SLOT_SEND_REVERB];
+        self.eff_send_delay = all[SLOT_SEND_DELAY];
+        self.eff_send_reverb = all[SLOT_SEND_REVERB];
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
@@ -402,6 +452,11 @@ impl Track {
             self.pan_l = l;
             self.pan_r = r;
         }
+        // Mirror the aux levels into the send macros so a strip edit keeps the
+        // macro view (MIDI CC 41/42) consistent. The send macros are the
+        // routing authority; the strip fields are derived storage.
+        self.base_macros[SLOT_SEND_DELAY] = params.send_delay;
+        self.base_macros[SLOT_SEND_REVERB] = params.send_reverb;
         if !self.mod_state.has_active_mod() {
             self.eff_drive = params.drive;
             self.eff_level = params.level;
@@ -559,6 +614,10 @@ impl Track {
         // 5. Push effective values to the DSP.
         if macro_dirty {
             self.slot.set_macros(&eff_macros);
+            // Sends are track-routed from the macro array, so modulating
+            // SEND.DLY / SEND.RVB moves the aux levels too.
+            eff_send_delay = eff_macros[SLOT_SEND_DELAY];
+            eff_send_reverb = eff_macros[SLOT_SEND_REVERB];
         }
         if strip_dirty {
             self.filter.recalc(eff_cutoff, eff_reso, SAMPLE_RATE);
@@ -1090,7 +1149,7 @@ mod tests {
         // A macro recompute (e.g. from a CC) must not drop the transpose.
         let mut e = DrumEngine::new();
         e.tracks[7].retune(12.0);
-        e.tracks[7].set_macro(5, 0.5); // DEC — recomputes coefficients
+        e.tracks[7].set_macro(crate::machines::SLOT_DECAY, 0.5); // DEC — recomputes coefficients
         let after_recompute = crossings(&mut e);
         assert!(
             (after_recompute as i64 - octave as i64).abs() <= 2,
@@ -1296,9 +1355,47 @@ mod tests {
         };
         e.load_sound(0, &sound);
         assert_eq!(e.tracks[0].id(), MachineId::BdFm);
-        assert_eq!(e.tracks[0].base_macros, [0.5; NUM_MACROS]);
+        // Macros round-trip, except the MACH slot which always mirrors the
+        // loaded machine (BdFm = catalogue index 1 / 11).
+        let mut expected = [0.5; NUM_MACROS];
+        expected[SLOT_MACHINE] = 1.0 / 11.0;
+        assert_eq!(e.tracks[0].base_macros, expected);
         assert_eq!(e.tracks[0].strip.pan, 0.3);
         assert_eq!(e.tracks[0].strip.level, 0.6);
+    }
+
+    #[test]
+    fn machine_select_slot_swaps_engine() {
+        let mut e = DrumEngine::new();
+        assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
+
+        // 0.5 quantises onto the middle of the catalogue (index 5 = RS).
+        e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
+        assert_eq!(e.tracks[0].id(), MachineId::Rs);
+        // Macros reset to the new machine's defaults, MACH slot mirroring it.
+        assert_eq!(e.tracks[0].base_macros[SLOT_MACHINE], 5.0 / 11.0);
+
+        // Re-setting the same machine is a no-op (doesn't wipe macros).
+        e.tracks[0].set_macro(SLOT_LEVEL, 0.5);
+        e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
+        assert_eq!(e.tracks[0].id(), MachineId::Rs);
+        assert_eq!(e.tracks[0].base_macros[SLOT_LEVEL], 0.5);
+
+        // Top of the range hits the last machine in the catalogue.
+        e.tracks[0].set_macro(SLOT_MACHINE, 1.0);
+        assert_eq!(e.tracks[0].id(), MachineId::SyTone);
+    }
+
+    #[test]
+    fn machine_select_keeps_sends_and_strip() {
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro(SLOT_SEND_DELAY, 0.7);
+        e.tracks[0].set_macro(SLOT_MACHINE, 0.1); // BdFm (index 1)
+        assert_eq!(e.tracks[0].id(), MachineId::BdFm);
+        assert_eq!(
+            e.tracks[0].strip.send_delay, 0.7,
+            "machine swap must not drop the track's sends"
+        );
     }
 
     #[test]
@@ -1405,6 +1502,44 @@ mod tests {
         assert!(
             peak_r > 0.001,
             "reverb send produced no audible wet R: peak_r={peak_r}"
+        );
+    }
+
+    #[test]
+    fn send_macro_drives_delay_send() {
+        let mut e = DrumEngine::new();
+        // Route kick → delay through the SEND.DLY *macro* (track-routed), not
+        // the strip field.
+        e.tracks[0].set_macro(SLOT_SEND_DELAY, 0.7);
+        e.send_fx.delay.set_params(0.020, 0.7, 20_000.0, 1.0);
+        e.send_fx.delay.reset();
+
+        let (peak_l, peak_r) = render_peak_with_send(&mut e, 0, 32);
+        assert!(
+            peak_l > 0.01,
+            "SEND.DLY macro produced no audible wet: peak_l={peak_l}"
+        );
+        assert!(
+            peak_r > 0.01,
+            "SEND.DLY macro produced no audible wet R: peak_r={peak_r}"
+        );
+    }
+
+    #[test]
+    fn send_macro_drives_reverb_send() {
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro(SLOT_SEND_REVERB, 0.7);
+        e.send_fx.reverb.set_params(0.0, 0.8, 6_000.0, 1.0);
+        e.send_fx.reverb.reset();
+
+        let (peak_l, peak_r) = render_peak_with_send(&mut e, 0, 64);
+        assert!(
+            peak_l > 0.001,
+            "SEND.RVB macro produced no audible wet: peak_l={peak_l}"
+        );
+        assert!(
+            peak_r > 0.001,
+            "SEND.RVB macro produced no audible wet R: peak_r={peak_r}"
         );
     }
 

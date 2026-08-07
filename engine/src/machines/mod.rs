@@ -13,12 +13,23 @@
 //!
 //! # Macros
 //!
-//! Eight macros is the right number because it lines up with MIDI CC and
-//! with the Syntakt SYN-page layout. The 8th is conventionally an overdrive
-//! amount; on the machines we ship here, that lives on the *track strip*
-//! instead, freeing the slot for things that shape the synthesis itself.
-//! The slot index order is stable across versions — firmware CC mappings
-//! depend on it.
+//! Every machine exposes [`NUM_MACROS`] macro knobs laid out as
+//! [`NUM_BANKS`] banks of [`MACROS_PER_BANK`], mirroring the Syntakt
+//! PITCH/FILTER/AMP/MOD pages. The flat slot index is `bank * 8 + index`
+//! ([`macro_index`]); MIDI CC is `CC_TRACK_BASE + flat` (20-based), so
+//! slot 0 maps to CC 20 and slot 31 maps to CC 51. A fixed layout lets the
+//! same macro be a knob on one machine and a different-but-equivalent knob
+//! on another (e.g. slot 8 is the filter cutoff family on every machine
+//! that has a filter). Slots a machine does not use are `RESV` (default
+//! 0.0) and ignored. The slot index order is stable across versions —
+//! firmware CC mappings depend on it.
+//!
+//! | Bank | Slots | Group                 |
+//! |------|-------|-----------------------|
+//! | 0    | 0–7   | PITCH (tune, sweep, mod source, machine) |
+//! | 1    | 8–15  | FILTER (cutoff/HPF/BPF, resonance/LPF)   |
+//! | 2    | 16–23 | AMP (decay, level, shape, mix, sends)    |
+//! | 3    | 24–31 | MOD (FM/mod amplitude, env decay)        |
 
 pub mod bd_classic;
 pub mod bd_fm;
@@ -50,7 +61,71 @@ pub use tom::Tom;
 ///
 /// Deliberately a `const` rather than per-machine so callers can size
 /// arrays against the type, not against the largest variant.
-pub const NUM_MACROS: usize = 8;
+pub const NUM_MACROS: usize = 32;
+
+/// Number of macro banks, mirroring the Syntakt PITCH/FILTER/AMP/MOD pages.
+pub const NUM_BANKS: usize = 4;
+
+/// Macros per bank. Each bank maps to a 0–7 group on the Syntakt UI.
+pub const MACROS_PER_BANK: usize = NUM_MACROS / NUM_BANKS;
+
+/// Flat slot index for a macro, from its bank and in-bank position.
+///
+/// `bank * MACROS_PER_BANK + index`; MIDI CC is `CC_TRACK_BASE + flat`.
+pub const fn macro_index(bank: usize, index: usize) -> usize {
+    bank * MACROS_PER_BANK + index
+}
+
+/// PITCH bank: tune, pitch sweep, and the FM mod source.
+pub const BANK_PITCH: usize = 0;
+/// FILTER bank: cutoff/HPF/BPF and resonance/LPF.
+pub const BANK_FILTER: usize = 1;
+/// AMP bank: envelope, level, shape, mix, and sends.
+pub const BANK_AMP: usize = 2;
+/// MOD bank: FM/mod amplitude and env decay.
+pub const BANK_MOD: usize = 3;
+
+// PITCH slots (bank 0). CC 20 + flat.
+/// PITCH bank: settled fundamental.
+pub const SLOT_TUNE: usize = macro_index(BANK_PITCH, 0);
+/// PITCH bank: pitch-sweep depth.
+pub const SLOT_SWEEP: usize = macro_index(BANK_PITCH, 1);
+/// PITCH bank: pitch-sweep time / modulator feedback.
+pub const SLOT_SWEEP_TIME: usize = macro_index(BANK_PITCH, 2);
+/// PITCH bank: FM modulator ratio (BD FM only).
+pub const SLOT_MOD_HZ: usize = macro_index(BANK_PITCH, 3);
+/// PITCH bank: FM modulator envelope decay (BD FM only).
+pub const SLOT_MOD_DC: usize = macro_index(BANK_PITCH, 4);
+/// PITCH bank: machine selector, quantised over [`MachineId::ALL`].
+pub const SLOT_MACHINE: usize = macro_index(BANK_PITCH, 5);
+
+// FILTER slots (bank 1). CC 20 + flat.
+/// FILTER bank: cutoff / HPF / BPF frequency family.
+pub const SLOT_CUT: usize = macro_index(BANK_FILTER, 0);
+/// FILTER bank: resonance / lowpass cutoff family.
+pub const SLOT_LPF: usize = macro_index(BANK_FILTER, 1);
+
+// AMP slots (bank 2). CC 20 + flat.
+/// AMP bank: amp-envelope decay time.
+pub const SLOT_DECAY: usize = macro_index(BANK_AMP, 0);
+/// AMP bank: secondary/noise decay time.
+pub const SLOT_DECAY_2: usize = macro_index(BANK_AMP, 1);
+/// AMP bank: per-machine output level.
+pub const SLOT_LEVEL: usize = macro_index(BANK_AMP, 2);
+/// AMP bank: voice-shaping amount (drive / stick / noise level).
+pub const SLOT_SHAPE: usize = macro_index(BANK_AMP, 3);
+/// AMP bank: dry/wet or noise/body mix.
+pub const SLOT_MIX: usize = macro_index(BANK_AMP, 4);
+/// AMP bank: delay send (track-routed).
+pub const SLOT_SEND_DELAY: usize = macro_index(BANK_AMP, 5);
+/// AMP bank: reverb send (track-routed).
+pub const SLOT_SEND_REVERB: usize = macro_index(BANK_AMP, 6);
+
+// MOD slots (bank 3). CC 20 + flat.
+/// MOD bank: FM/mod depth.
+pub const SLOT_MOD_AMOUNT: usize = macro_index(BANK_MOD, 0);
+/// MOD bank: FM/mod envelope decay.
+pub const SLOT_MOD_ENV: usize = macro_index(BANK_MOD, 1);
 
 /// Stable index for a macro knob. Stored as `usize` in arrays `[f32;
 /// NUM_MACROS]`, indexed by this enum so spread-by-name stays readable.
@@ -59,27 +134,75 @@ pub const NUM_MACROS: usize = 8;
 /// and host render flags depend on absolute indices staying put.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Macro {
-    /// Macro knob slot 0.
+    /// Macro knob slot 0 (PITCH 0).
     M0 = 0,
-    /// Macro knob slot 1.
+    /// Macro knob slot 1 (PITCH 1).
     M1 = 1,
-    /// Macro knob slot 2.
+    /// Macro knob slot 2 (PITCH 2).
     M2 = 2,
-    /// Macro knob slot 3.
+    /// Macro knob slot 3 (PITCH 3).
     M3 = 3,
-    /// Macro knob slot 4.
+    /// Macro knob slot 4 (PITCH 4).
     M4 = 4,
-    /// Macro knob slot 5.
+    /// Macro knob slot 5 (PITCH 5).
     M5 = 5,
-    /// Macro knob slot 6.
+    /// Macro knob slot 6 (PITCH 6).
     M6 = 6,
-    /// Macro knob slot 7.
+    /// Macro knob slot 7 (PITCH 7).
     M7 = 7,
+    /// Macro knob slot 8 (FILTER 0).
+    M8 = 8,
+    /// Macro knob slot 9 (FILTER 1).
+    M9 = 9,
+    /// Macro knob slot 10 (FILTER 2).
+    M10 = 10,
+    /// Macro knob slot 11 (FILTER 3).
+    M11 = 11,
+    /// Macro knob slot 12 (FILTER 4).
+    M12 = 12,
+    /// Macro knob slot 13 (FILTER 5).
+    M13 = 13,
+    /// Macro knob slot 14 (FILTER 6).
+    M14 = 14,
+    /// Macro knob slot 15 (FILTER 7).
+    M15 = 15,
+    /// Macro knob slot 16 (AMP 0).
+    M16 = 16,
+    /// Macro knob slot 17 (AMP 1).
+    M17 = 17,
+    /// Macro knob slot 18 (AMP 2).
+    M18 = 18,
+    /// Macro knob slot 19 (AMP 3).
+    M19 = 19,
+    /// Macro knob slot 20 (AMP 4).
+    M20 = 20,
+    /// Macro knob slot 21 (AMP 5).
+    M21 = 21,
+    /// Macro knob slot 22 (AMP 6).
+    M22 = 22,
+    /// Macro knob slot 23 (AMP 7).
+    M23 = 23,
+    /// Macro knob slot 24 (MOD 0).
+    M24 = 24,
+    /// Macro knob slot 25 (MOD 1).
+    M25 = 25,
+    /// Macro knob slot 26 (MOD 2).
+    M26 = 26,
+    /// Macro knob slot 27 (MOD 3).
+    M27 = 27,
+    /// Macro knob slot 28 (MOD 4).
+    M28 = 28,
+    /// Macro knob slot 29 (MOD 5).
+    M29 = 29,
+    /// Macro knob slot 30 (MOD 6).
+    M30 = 30,
+    /// Macro knob slot 31 (MOD 7).
+    M31 = 31,
 }
 
 impl Macro {
     /// All macros, in slot order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; NUM_MACROS] = [
         Self::M0,
         Self::M1,
         Self::M2,
@@ -88,6 +211,30 @@ impl Macro {
         Self::M5,
         Self::M6,
         Self::M7,
+        Self::M8,
+        Self::M9,
+        Self::M10,
+        Self::M11,
+        Self::M12,
+        Self::M13,
+        Self::M14,
+        Self::M15,
+        Self::M16,
+        Self::M17,
+        Self::M18,
+        Self::M19,
+        Self::M20,
+        Self::M21,
+        Self::M22,
+        Self::M23,
+        Self::M24,
+        Self::M25,
+        Self::M26,
+        Self::M27,
+        Self::M28,
+        Self::M29,
+        Self::M30,
+        Self::M31,
     ];
 }
 
@@ -105,6 +252,16 @@ pub struct MacroInfo {
     pub abbrev: &'static str,
     /// Canonical factory macro value, used by [`MachineId::default_macros`].
     pub default: f32,
+}
+
+/// Build a [`MacroInfo`] literal.
+const fn mi(name: &'static str, abbrev: &'static str, default: f32) -> MacroInfo {
+    MacroInfo { name, abbrev, default }
+}
+
+/// A reserved slot: no knob, canonical default 0.0, ignored by the voice.
+const fn resv() -> MacroInfo {
+    mi("RESV", "RSV", 0.0)
 }
 
 /// A named synthesis model.
@@ -239,541 +396,445 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 0: BD Classic
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "SWEEP",
-                abbrev: "SWP",
-                default: 0.36,
-            },
-            MacroInfo {
-                name: "SWP_T",
-                abbrev: "SWT",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.255,
-            },
-            MacroInfo {
-                name: "DRIVE",
-                abbrev: "DRV",
-                default: 0.16,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.9,
-            },
-            MacroInfo {
-                name: "WAVE",
-                abbrev: "WAV",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "TRN",
-                abbrev: "TRN",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.20), // PITCH 0
+            mi("SWEEP", "SWP", 0.36), // PITCH 1
+            mi("SWP_T", "SWT", 0.15), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            resv(), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.255), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.9), // AMP 2
+            mi("DRIVE", "DRV", 0.16), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 1: BD FM
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "SWEEP",
-                abbrev: "SWP",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "SWP_T",
-                abbrev: "SWT",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.255,
-            },
-            MacroInfo {
-                name: "MOD.HZ",
-                abbrev: "MDH",
-                default: 0.43,
-            },
-            MacroInfo {
-                name: "MOD.DC",
-                abbrev: "MDD",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "MOD.AMT",
-                abbrev: "MDA",
-                default: 0.35,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.9,
-            },
+            mi("TUNE", "TUN", 0.20), // PITCH 0
+            mi("SWEEP", "SWP", 0.30), // PITCH 1
+            mi("SWP_T", "SWT", 0.15), // PITCH 2
+            mi("MOD.HZ", "MDH", 0.43), // PITCH 3
+            mi("MOD.DC", "MDD", 0.15), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            resv(), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.255), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.9), // AMP 2
+            resv(), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            mi("MOD.AMT", "MDA", 0.35), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 2: Tom
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.35,
-            },
-            MacroInfo {
-                name: "SWEEP",
-                abbrev: "SWP",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "SWP_T",
-                abbrev: "SWT",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "STICK",
-                abbrev: "STK",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.85,
-            },
-            MacroInfo {
-                name: "WAVE",
-                abbrev: "WAV",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.35), // PITCH 0
+            mi("SWEEP", "SWP", 0.40), // PITCH 1
+            mi("SWP_T", "SWT", 0.40), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            resv(), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.40), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.85), // AMP 2
+            mi("STICK", "STK", 0.30), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 3: SD Natural
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.28,
-            },
-            MacroInfo {
-                name: "RATIO",
-                abbrev: "RTO",
-                default: 0.48,
-            },
-            MacroInfo {
-                name: "BDEC",
-                abbrev: "BDC",
-                default: 0.13,
-            },
-            MacroInfo {
-                name: "NDEC",
-                abbrev: "NDC",
-                default: 0.209,
-            },
-            MacroInfo {
-                name: "HPF",
-                abbrev: "HPF",
-                default: 0.14,
-            },
-            MacroInfo {
-                name: "NMIX",
-                abbrev: "NM",
-                default: 0.62,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.7,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.28), // PITCH 0
+            mi("RATIO", "RTO", 0.48), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("HPF", "HPF", 0.14), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("BDEC", "BDC", 0.13), // AMP 0
+            mi("NDEC", "NDC", 0.209), // AMP 1
+            mi("LEVEL", "LVL", 0.7), // AMP 2
+            resv(), // AMP 3
+            mi("NMIX", "NM", 0.62), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 4: SD FM
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.28,
-            },
-            MacroInfo {
-                name: "RAT",
-                abbrev: "RAT",
-                default: 0.33,
-            },
-            MacroInfo {
-                name: "BDEC",
-                abbrev: "BDC",
-                default: 0.13,
-            },
-            MacroInfo {
-                name: "NDEC",
-                abbrev: "NDC",
-                default: 0.209,
-            },
-            MacroInfo {
-                name: "MENV",
-                abbrev: "MEN",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "AMT",
-                abbrev: "AMT",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "NMIX",
-                abbrev: "NM",
-                default: 0.62,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.7,
-            },
+            mi("TUNE", "TUN", 0.28), // PITCH 0
+            mi("RAT", "RAT", 0.33), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            resv(), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("BDEC", "BDC", 0.13), // AMP 0
+            mi("NDEC", "NDC", 0.209), // AMP 1
+            mi("LEVEL", "LVL", 0.7), // AMP 2
+            resv(), // AMP 3
+            mi("NMIX", "NM", 0.62), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            mi("MOD.AMT", "MDA", 0.30), // MOD 0
+            mi("MENV", "MEN", 0.15), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 5: RS (rimshot)
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "DET",
-                abbrev: "DET",
-                default: 0.25,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "NDEC",
-                abbrev: "NDC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "NLEV",
-                abbrev: "NLV",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "HPF",
-                abbrev: "HPF",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.75,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.40), // PITCH 0
+            mi("DET", "DET", 0.25), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("HPF", "HPF", 0.30), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.30), // AMP 0
+            mi("NDEC", "NDC", 0.30), // AMP 1
+            mi("LEVEL", "LVL", 0.75), // AMP 2
+            mi("NLEV", "NLV", 0.40), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 6: CP (clap)
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "RATIO",
-                abbrev: "RTO",
-                default: 0.50,
-            },
-            MacroInfo {
-                name: "BDEC",
-                abbrev: "BDC",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "NDEC",
-                abbrev: "NDC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "HPF",
-                abbrev: "HPF",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "LPF",
-                abbrev: "LPF",
-                default: 0.50,
-            },
-            MacroInfo {
-                name: "BAL",
-                abbrev: "BAL",
-                default: 0.80,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.7,
-            },
+            mi("TUNE", "TUN", 0.30), // PITCH 0
+            mi("RATIO", "RTO", 0.50), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("HPF", "HPF", 0.20), // FILTER 0
+            mi("LPF", "LPF", 0.50), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("BDEC", "BDC", 0.20), // AMP 0
+            mi("NDEC", "NDC", 0.30), // AMP 1
+            mi("LEVEL", "LVL", 0.7), // AMP 2
+            resv(), // AMP 3
+            mi("BAL", "BAL", 0.80), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 7: Hat Classic
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.092,
-            },
-            MacroInfo {
-                name: "HPF",
-                abbrev: "HPF",
-                default: 0.45,
-            },
-            MacroInfo {
-                name: "LPF",
-                abbrev: "LPF",
-                default: 0.75,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.4,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV2",
-                abbrev: "RS2",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV3",
-                abbrev: "RS3",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV4",
-                abbrev: "RS4",
-                default: 0.0,
-            },
+            resv(), // PITCH 0
+            resv(), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("HPF", "HPF", 0.45), // FILTER 0
+            mi("LPF", "LPF", 0.75), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.092), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.4), // AMP 2
+            resv(), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 8: HH Basic
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "TONE",
-                abbrev: "TON",
-                default: 0.50,
-            },
-            MacroInfo {
-                name: "TDEC",
-                abbrev: "TDC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.092,
-            },
-            MacroInfo {
-                name: "RST",
-                abbrev: "RST",
-                default: 1.0,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.4,
-            },
-            MacroInfo {
-                name: "BPF",
-                abbrev: "BPF",
-                default: 0.50,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.30), // PITCH 0
+            mi("TONE", "TON", 0.50), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("BPF", "BPF", 0.50), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.092), // AMP 0
+            mi("TDEC", "TDC", 0.30), // AMP 1
+            mi("LEVEL", "LVL", 0.4), // AMP 2
+            resv(), // AMP 3
+            mi("RST", "RST", 1.0), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 9: CY Metallic
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "TONE",
-                abbrev: "TON",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "TDEC",
-                abbrev: "TDC",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "NCOL",
-                abbrev: "NCL",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.5,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV2",
-                abbrev: "RS2",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.20), // PITCH 0
+            mi("TONE", "TON", 0.30), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("NCOL", "NCL", 0.30), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.30), // AMP 0
+            mi("TDEC", "TDC", 0.15), // AMP 1
+            mi("LEVEL", "LVL", 0.5), // AMP 2
+            resv(), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 10: CB Classic
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.15,
-            },
-            MacroInfo {
-                name: "DET",
-                abbrev: "DET",
-                default: 0.86,
-            },
-            MacroInfo {
-                name: "BPF",
-                abbrev: "BPF",
-                default: 0.35,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.55,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV2",
-                abbrev: "RS2",
-                default: 0.0,
-            },
-            MacroInfo {
-                name: "RESV3",
-                abbrev: "RS3",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.40), // PITCH 0
+            mi("DET", "DET", 0.86), // PITCH 1
+            resv(), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            mi("BPF", "BPF", 0.35), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.15), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.55), // AMP 2
+            resv(), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            resv(), // MOD 0
+            resv(), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
     // 11: SY Tone
     MachineInfo {
         macros: [
-            MacroInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.50,
-            },
-            MacroInfo {
-                name: "RATIO",
-                abbrev: "RTO",
-                default: 0.25,
-            },
-            MacroInfo {
-                name: "FDBK",
-                abbrev: "FDB",
-                default: 0.20,
-            },
-            MacroInfo {
-                name: "MENV",
-                abbrev: "MEN",
-                default: 0.25,
-            },
-            MacroInfo {
-                name: "MOD.AMT",
-                abbrev: "MDA",
-                default: 0.40,
-            },
-            MacroInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.30,
-            },
-            MacroInfo {
-                name: "LEVEL",
-                abbrev: "LVL",
-                default: 0.7,
-            },
-            MacroInfo {
-                name: "RESV",
-                abbrev: "RSV",
-                default: 0.0,
-            },
+            mi("TUNE", "TUN", 0.50), // PITCH 0
+            mi("RATIO", "RTO", 0.25), // PITCH 1
+            mi("FDBK", "FDB", 0.20), // PITCH 2
+            resv(), // PITCH 3
+            resv(), // PITCH 4
+            mi("MACH", "MCH", 0.0), // PITCH 5
+            resv(), // PITCH 6
+            resv(), // PITCH 7
+            resv(), // FILTER 0
+            resv(), // FILTER 1
+            resv(), // FILTER 2
+            resv(), // FILTER 3
+            resv(), // FILTER 4
+            resv(), // FILTER 5
+            resv(), // FILTER 6
+            resv(), // FILTER 7
+            mi("DEC", "DEC", 0.30), // AMP 0
+            resv(), // AMP 1
+            mi("LEVEL", "LVL", 0.7), // AMP 2
+            resv(), // AMP 3
+            resv(), // AMP 4
+            mi("SEND.DLY", "SDY", 0.0), // AMP 5
+            mi("SEND.RVB", "SRV", 0.0), // AMP 6
+            resv(), // AMP 7
+            mi("MOD.AMT", "MDA", 0.40), // MOD 0
+            mi("MENV", "MEN", 0.25), // MOD 1
+            resv(), // MOD 2
+            resv(), // MOD 3
+            resv(), // MOD 4
+            resv(), // MOD 5
+            resv(), // MOD 6
+            resv(), // MOD 7
         ],
     },
 ];
@@ -998,10 +1059,34 @@ mod tests {
     #[test]
     fn macro_by_name_finds_uppercase_exact() {
         let m = MachineId::BdClassic;
-        assert_eq!(m.macro_by_name("TUNE").map(|(i, _)| i), Some(0));
-        assert_eq!(m.macro_by_name("tune").map(|(i, _)| i), Some(0));
-        assert_eq!(m.macro_by_name("DEC").map(|(i, _)| i), Some(3));
+        assert_eq!(m.macro_by_name("TUNE").map(|(i, _)| i), Some(SLOT_TUNE));
+        assert_eq!(m.macro_by_name("tune").map(|(i, _)| i), Some(SLOT_TUNE));
+        assert_eq!(m.macro_by_name("DEC").map(|(i, _)| i), Some(SLOT_DECAY));
         assert_eq!(m.macro_by_name("MISSING"), None);
+    }
+
+    #[test]
+    fn canonical_slot_constants_are_stable() {
+        assert_eq!(NUM_MACROS, 32);
+        assert_eq!(NUM_BANKS, 4);
+        assert_eq!(MACROS_PER_BANK, 8);
+        assert_eq!(SLOT_TUNE, 0);
+        assert_eq!(SLOT_SWEEP, 1);
+        assert_eq!(SLOT_SWEEP_TIME, 2);
+        assert_eq!(SLOT_MOD_HZ, 3);
+        assert_eq!(SLOT_MOD_DC, 4);
+        assert_eq!(SLOT_MACHINE, 5);
+        assert_eq!(SLOT_CUT, 8);
+        assert_eq!(SLOT_LPF, 9);
+        assert_eq!(SLOT_DECAY, 16);
+        assert_eq!(SLOT_DECAY_2, 17);
+        assert_eq!(SLOT_LEVEL, 18);
+        assert_eq!(SLOT_SHAPE, 19);
+        assert_eq!(SLOT_MIX, 20);
+        assert_eq!(SLOT_SEND_DELAY, 21);
+        assert_eq!(SLOT_SEND_REVERB, 22);
+        assert_eq!(SLOT_MOD_AMOUNT, 24);
+        assert_eq!(SLOT_MOD_ENV, 25);
     }
 
     #[test]

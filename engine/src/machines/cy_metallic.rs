@@ -11,20 +11,26 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | 200..1200 Hz  | osc A frequency |
-//! | 1   | TONE   | 0..1          | osc B/A ratio (1.3..3.0) |
-//! | 2   | TDEC   | 5..100 ms     | transient (noise) decay |
-//! | 3   | DEC    | 100..2000 ms  | main decay (long — it's a cymbal) |
-//! | 4   | NCOL   | 1000..8000 Hz | noise HP colour |
-//! | 5   | LEVEL  | 0..1          | per-machine output level |
-//! | 6   | RESV   | (reserved)    | hit/wash balance (phase 2) |
-//! | 7   | RESV2  | (reserved)    | osc reset (phase 2) |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range         | notes |
+//! |-----|-----|-----------|---------------|-------|
+//! | 0   | 20  | TUNE      | 200..1200 Hz  | osc A frequency |
+//! | 1   | 21  | TONE      | 0..1          | osc B/A ratio (1.3..3.0) |
+//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | NCOL      | 1000..8000 Hz | noise HP colour |
+//! | 16  | 36  | DEC       | 100..2000 ms  | main decay (long — it's a cymbal) |
+//! | 17  | 37  | TDEC      | 5..100 ms     | transient (noise) decay |
+//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
+//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE};
 use crate::SAMPLE_RATE;
 
 /// CY Metallic machine.
@@ -60,12 +66,12 @@ impl CyMetallic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let osc_a_hz = 200.0 + 1000.0 * macros[0]; // TUNE 200..1200 Hz
-        let ratio = 1.3 + 1.7 * macros[1]; // TONE 1.3..3.0
-        let transient_decay_s = 0.005 + 0.095 * macros[2]; // TDEC 5..100 ms
-        let main_decay_s = 0.1 + 1.9 * macros[3]; // DEC 100..2000 ms
-        let noise_hp_hz = 1000.0 + 7000.0 * macros[4]; // NCOL 1..8 kHz
-        let level = macros[5]; // LEVEL 0..1
+        let osc_a_hz = 200.0 + 1000.0 * macros[SLOT_TUNE]; // TUNE 200..1200 Hz
+        let ratio = 1.3 + 1.7 * macros[SLOT_SWEEP]; // TONE 1.3..3.0
+        let transient_decay_s = 0.005 + 0.095 * macros[SLOT_DECAY_2]; // TDEC 5..100 ms
+        let main_decay_s = 0.1 + 1.9 * macros[SLOT_DECAY]; // DEC 100..2000 ms
+        let noise_hp_hz = 1000.0 + 7000.0 * macros[SLOT_CUT]; // NCOL 1..8 kHz
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(osc_a_hz * self.freq_scale);
         self.osc_b.set_freq(osc_a_hz * ratio * self.freq_scale);

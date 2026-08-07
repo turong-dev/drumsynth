@@ -18,8 +18,9 @@
 //! one than turning a knob in real time.
 //!
 //! Performance counters are taken against a generic 8-track kit on track 0:
-//! since machines are normalised over 8 macros each, you sweep any knob of
-//! any machine the same way — `<machine> <macro-name> --from --to --steps`.
+//! since machines are normalised over the same flat 32-macro map, you sweep
+//! any knob of any machine the same way — `<machine> <macro-name> --from
+//! --to --steps`.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use drum_engine::machines::MachineId;

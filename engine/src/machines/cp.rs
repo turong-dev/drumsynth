@@ -13,10 +13,32 @@
 //! gap_samples)` pairs whose durations sum to the ~25ms crunch region, after
 //! which the envelope falls through to an exponential decay tail. One PRNG,
 //! one filter, one table walk. The classic clap shape for the cost of a hat.
+//!
+//! # Macros
+//!
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range        | notes |
+//! |-----|-----|-----------|--------------|-------|
+//! | 0   | 20  | TUNE      | 150..400 Hz  | body pitch |
+//! | 1   | 21  | RATIO     | 1.0..1.5     | body osc ratio |
+//! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | HPF       | 800..4000 Hz | noise highpass colour |
+//! | 9   | 29  | LPF       | 4..12 kHz    | noise lowpass top |
+//! | 16  | 36  | BDEC      | 50..250 ms   | body decay |
+//! | 17  | 37  | NDEC      | 100..600 ms  | noise (burst + tail) decay |
+//! | 18  | 38  | LEVEL     | 0..1         | per-machine output level |
+//! | 20  | 40  | BAL       | 0..1         | noise↔body balance |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, OnePoleLp, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_LPF, SLOT_MIX, SLOT_SWEEP,
+    SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// Number of initial bursts in the crunch region. Three is the classic 808
@@ -70,14 +92,14 @@ impl Cp {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 150.0 + 250.0 * macros[0]; // TUNE 150..400 Hz
-        let body_ratio = 1.0 + 0.5 * macros[1]; // RATIO 1.0..1.5
-        let body_decay_s = 0.05 + 0.2 * macros[2]; // BDEC 50..250 ms
-        let noise_decay_s = 0.1 + 0.5 * macros[3]; // NDEC 100..600 ms
-        let hp_hz = 800.0 + 3200.0 * macros[4]; // HPF 800..4000 Hz
-        let lp_hz = 4000.0 + 8000.0 * macros[5]; // LPF 4..12 kHz
-        let bal = macros[6].clamp(0.0, 1.0); // BAL noise↔body
-        let level = macros[7]; // LEVEL 0..1
+        let body_hz = 150.0 + 250.0 * macros[SLOT_TUNE]; // TUNE 150..400 Hz
+        let body_ratio = 1.0 + 0.5 * macros[SLOT_SWEEP]; // RATIO 1.0..1.5
+        let body_decay_s = 0.05 + 0.2 * macros[SLOT_DECAY]; // BDEC 50..250 ms
+        let noise_decay_s = 0.1 + 0.5 * macros[SLOT_DECAY_2]; // NDEC 100..600 ms
+        let hp_hz = 800.0 + 3200.0 * macros[SLOT_CUT]; // HPF 800..4000 Hz
+        let lp_hz = 4000.0 + 8000.0 * macros[SLOT_LPF]; // LPF 4..12 kHz
+        let bal = macros[SLOT_MIX].clamp(0.0, 1.0); // BAL noise↔body
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_hz = body_hz * self.freq_scale;
         self.body_ratio = body_ratio;

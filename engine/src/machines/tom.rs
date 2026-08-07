@@ -8,20 +8,28 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | 45..220 Hz    | rack-to-floor tom fundamental |
-//! | 1   | SWEEP  | 1×..5×        | start-to-end pitch ratio |
-//! | 2   | SWP_T  | 20..200 ms    | pitch-sweep decay (slower than kick) |
-//! | 3   | DEC    | 100..900 ms   | amp decay (rings longer than a kick) |
-//! | 4   | STICK  | 0..1          | initial noise-click amount |
-//! | 5   | LEVEL  | 0..1          | per-machine output level |
-//! | 6   | WAVE   | (reserved)    | sine/triangle toggle (phase 2) |
-//! | 7   | RESV   | (reserved)    | second osc / detune (phase 2) |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range         | notes |
+//! |-----|-----|-----------|---------------|-------|
+//! | 0   | 20  | TUNE      | 45..220 Hz    | rack-to-floor tom fundamental |
+//! | 1   | 21  | SWEEP     | 1×..5×        | start-to-end pitch ratio |
+//! | 2   | 22  | SWP_T     | 20..200 ms    | pitch-sweep decay (slower than kick) |
+//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | 16  | 36  | DEC       | 100..900 ms   | amp decay (rings longer than a kick) |
+//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
+//! | 19  | 39  | STICK     | 0..1          | initial noise-click amount |
+//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// Tom machine.
@@ -65,12 +73,12 @@ impl Tom {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 45.0 + 175.0 * macros[0]; // TUNE 45..220 Hz
-        let pitch_ratio = 1.0 + 4.0 * macros[1]; // SWEEP 1×..5×
-        let pitch_decay_s = 0.02 + 0.18 * macros[2]; // SWP_T 20..200 ms
-        let amp_decay_s = 0.1 + 0.8 * macros[3]; // DEC 100..900 ms
-        let stick_amount = macros[4]; // STICK 0..1
-        let level = macros[5]; // LEVEL 0..1
+        let end_hz = 45.0 + 175.0 * macros[SLOT_TUNE]; // TUNE 45..220 Hz
+        let pitch_ratio = 1.0 + 4.0 * macros[SLOT_SWEEP]; // SWEEP 1×..5×
+        let pitch_decay_s = 0.02 + 0.18 * macros[SLOT_SWEEP_TIME]; // SWP_T 20..200 ms
+        let amp_decay_s = 0.1 + 0.8 * macros[SLOT_DECAY]; // DEC 100..900 ms
+        let stick_amount = macros[SLOT_SHAPE]; // STICK 0..1
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;

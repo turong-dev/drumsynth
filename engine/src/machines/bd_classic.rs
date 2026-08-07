@@ -11,19 +11,28 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range        | notes |
-//! |-----|--------|--------------|-------|
-//! | 0   | TUNE   | 30..120 Hz   | settled fundamental |
-//! | 1   | SWEEP  | 1×..11×      | start-to-end pitch ratio |
-//! | 2   | SWP_T  | 5..155 ms    | pitch-sweep decay time |
-//! | 3   | DEC    | 50..1500 ms  | amp-decay time |
-//! | 4   | DRIVE  | 1.0..6.0     | saturation amount |
-//! | 5   | LEVEL  | 0..1         | per-machine output level |
-//! | 6   | WAVE   | (reserved)   | sin/asym/triangle toggle (phase 2) |
-//! | 7   | TRN    | (reserved)   | transient layer (phase 2) |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range        | notes |
+//! |-----|-----|-----------|--------------|-------|
+//! | 0   | 20  | TUNE      | 30..120 Hz   | settled fundamental |
+//! | 1   | 21  | SWEEP     | 1×..11×      | start-to-end pitch ratio |
+//! | 2   | 22  | SWP_T     | 5..155 ms    | pitch-sweep decay time |
+//! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | 16  | 36  | DEC       | 50..1500 ms  | amp-decay time |
+//! | 18  | 38  | LEVEL     | 0..1         | per-machine output level |
+//! | 19  | 39  | DRIVE     | 1.0..6.0     | saturation amount |
+//! | 21  | 41  | SEND.DLY  | 0..1         | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1         | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored — the voice is
+//! sine-only with no transient layer.
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// BD Classic machine.
@@ -62,12 +71,12 @@ impl BdClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 30.0 + 90.0 * macros[0]; // TUNE 30..120 Hz
-        let pitch_ratio = 1.0 + 10.0 * macros[1]; // SWEEP 1×..11×
-        let pitch_decay_s = 0.005 + 0.15 * macros[2]; // SWP_T 5..155 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[3]; // DEC  50..1500 ms
-        let drive = 1.0 + 5.0 * macros[4]; // DRIVE 1..6
-        let level = macros[5]; // LEVEL 0..1
+        let end_hz = 30.0 + 90.0 * macros[SLOT_TUNE]; // TUNE 30..120 Hz
+        let pitch_ratio = 1.0 + 10.0 * macros[SLOT_SWEEP]; // SWEEP 1×..11×
+        let pitch_decay_s = 0.005 + 0.15 * macros[SLOT_SWEEP_TIME]; // SWP_T 5..155 ms
+        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_DECAY]; // DEC  50..1500 ms
+        let drive = 1.0 + 5.0 * macros[SLOT_SHAPE]; // DRIVE 1..6
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;
@@ -79,9 +88,7 @@ impl BdClassic {
             .set_coeff(decay_coeff(amp_decay_s, SAMPLE_RATE));
         self.pitch_env
             .set_coeff(decay_coeff(pitch_decay_s, SAMPLE_RATE));
-        // Macros 6 (WAVE) and 7 (TRN) are reserved for Phase 2 expansion
-        // (oscillator shape, transient layer). Macros 6/7 default to 0,
-        // which is sine-only / no transient — the previous voice's sound.
+        // All other slots are RESV and ignored — sine body, no transient.
     }
 
     /// Transpose by `semis` semitones relative to the macro pitch.

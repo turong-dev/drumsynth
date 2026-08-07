@@ -12,20 +12,29 @@
 //!
 //! # Macros
 //!
-//! | idx | name   | range         | notes |
-//! |-----|--------|---------------|-------|
-//! | 0   | TUNE   | base frequency multiplier | fundamental of the osc bank |
-//! | 1   | TONE   | 0..1          | bipolar — shrill to deep detune spread |
-//! | 2   | TDEC   | 5..80 ms      | transient decay (initial bright tick) |
-//! | 3   | DEC    | 10..510 ms    | main decay |
-//! | 4   | RST    | 0..1          | osc reset on trigger (0=free, 1=reset) |
-//! | 5   | LEVEL  | 0..1          | per-machine output level |
-//! | 6   | BPF    | 2000..12000 Hz| bandpass center |
-//! | 7   | RESV   | (reserved)   | bandpass Q (phase 2) |
+//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
+//! MIDI CC `20 + flat` on the track's channel:
+//!
+//! | idx | CC  | name      | range          | notes |
+//! |-----|-----|-----------|----------------|-------|
+//! | 0   | 20  | TUNE      | 200..1000 Hz   | fundamental of the osc bank |
+//! | 1   | 21  | TONE      | 0..1           | bipolar — shrill to deep detune spread |
+//! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
+//! | 8   | 28  | BPF       | 2000..12000 Hz | bandpass center |
+//! | 16  | 36  | DEC       | 10..510 ms     | main decay |
+//! | 17  | 37  | TDEC      | 5..80 ms       | transient decay (initial bright tick) |
+//! | 18  | 38  | LEVEL     | 0..1           | per-machine output level |
+//! | 20  | 40  | RST       | 0..1           | osc reset on trigger (0=free, 1=reset) |
+//! | 21  | 41  | SEND.DLY  | 0..1           | delay send (track-routed) |
+//! | 22  | 42  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//!
+//! All other slots are RESV (default 0.0) and ignored.
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
-use crate::machines::NUM_MACROS;
+use crate::machines::{
+    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_SWEEP, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// Number of oscillators in the bank.
@@ -75,13 +84,13 @@ impl HhBasic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 200.0 + 800.0 * macros[0]; // TUNE 200..1000 Hz
-        let tone_spread = 0.01 + 0.15 * macros[1]; // TONE detune spread
-        let transient_decay_s = 0.005 + 0.075 * macros[2]; // TDEC 5..80 ms
-        let main_decay_s = 0.01 + 0.5 * macros[3]; // DEC 10..510 ms
-        let reset_on_trig = macros[4] > 0.5; // RST threshold
-        let level = macros[5]; // LEVEL 0..1
-        let bpf_hz = 2000.0 + 10000.0 * macros[6]; // BPF 2..12 kHz
+        let base_hz = 200.0 + 800.0 * macros[SLOT_TUNE]; // TUNE 200..1000 Hz
+        let tone_spread = 0.01 + 0.15 * macros[SLOT_SWEEP]; // TONE detune spread
+        let transient_decay_s = 0.005 + 0.075 * macros[SLOT_DECAY_2]; // TDEC 5..80 ms
+        let main_decay_s = 0.01 + 0.5 * macros[SLOT_DECAY]; // DEC 10..510 ms
+        let reset_on_trig = macros[SLOT_MIX] > 0.5; // RST threshold
+        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+        let bpf_hz = 2000.0 + 10000.0 * macros[SLOT_CUT]; // BPF 2..12 kHz
 
         // Build the frequency bank: base ratios with bipolar detune spread.
         // Even-indexed oscs go sharp, odd-indexed go flat (or vice versa).
@@ -216,7 +225,7 @@ mod tests {
     fn reset_on_trig_zeroes_phases() {
         let id = MachineId::HhBasic;
         let mut macros = id.default_macros();
-        macros[4] = 1.0; // RST = reset
+        macros[SLOT_MIX] = 1.0; // RST = reset
         let mut h = HhBasic::new(&macros);
         // Run a bit to advance phases.
         h.trigger(1.0);
