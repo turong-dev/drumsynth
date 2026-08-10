@@ -9,11 +9,12 @@
 //! pure logic and therefore testable on the host. The firmware's job is to
 //! get bytes out of a peripheral, nothing more.
 //!
-//! Event-to-engine routing also lives here as [`handle_midi`] / [`apply_cc`],
-//! shared verbatim by the firmware (MIDI over UART) and the host `device`
-//! harness (MIDI over a virtual CoreMIDI port) so both targets interpret the
-//! same bytes identically. Parsing bytes into events is this module; deciding
-//! what an event *means* is the shared router.
+//! Event-to-engine routing also lives here as [`handle_midi`] / [`apply_cc`]
+//! and [`schedule_midi`], shared verbatim by the firmware (MIDI over UART +
+//! USB MIDI) and the host `device` harness (MIDI over a virtual CoreMIDI
+//! port) so both targets interpret the same bytes identically. Parsing bytes
+//! into events is this module; deciding what an event *means* is the shared
+//! router.
 //!
 //! Routing is **one channel per track**, `TRACKS` channels, the rest unused.
 //! MIDI channels are conventionally numbered **1..=16**; on the wire the
@@ -56,6 +57,25 @@
 //!
 //! A CC outside those ranges is ignored. `CC 120` / `CC 123` on any channel
 //! emits [`MidiEvent::Panic`], which silences the whole engine.
+//!
+//! # Sample-accurate notes
+//!
+//! [`schedule_midi`] is the main-loop variant of [`handle_midi`]. `NoteOn`
+//! events are queued into the engine's [`TimedQueue`](crate::TimedQueue)
+//! with a sample offset (where in the *next* audio block they should fire),
+//! so the firmware can land notes where the groove box placed them instead
+//! of at the next block boundary. `ControlChange` and `Panic` still apply
+//! immediately — CCs are control-rate, and a panic must cut instantly.
+//!
+//! # CC smoothing
+//!
+//! Track macros are set through [`Track::set_macro_target`](crate::Track::set_macro_target),
+//! not `set_macro`: the value ramps to its target at block rate (~7.5 ms
+//! one-pole) inside the audio callback's control pass. A burst of CCs (a
+//! knob being spun) therefore costs one coefficient recompute per macro per
+//! block instead of one per message, which keeps `apply_cc` cheap enough for
+//! the main loop and keeps the `expf`-heavy recomputes off the audio hot
+//! path. The machine selector is exempt — it jumps instantly.
 
 /// A parsed message the engine cares about.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -144,16 +164,54 @@ pub fn handle_midi(engine: &mut crate::DrumEngine, event: MidiEvent) {
     }
 }
 
+/// Route a MIDI event to the engine, sample-accurately.
+///
+/// `NoteOn` events are queued as
+/// [`TimedEvent`](crate::TimedEvent)s to fire `offset` samples into the
+/// next [`DrumEngine::process`](crate::DrumEngine::process) block — the
+/// firmware's MIDI path computes `offset` from its sample counter so notes
+/// land where the groove box placed them rather than at the next block
+/// boundary.
+///
+/// `ControlChange` and `Panic` are applied immediately via [`handle_midi`]:
+/// CCs are control-rate (their coefficient recompute is block-rate smoothed,
+/// see [`apply_cc`]), and a panic must cut instantly, not a block later.
+///
+/// Returns `true` when the event was queued/applied, `false` when the timed
+/// queue was full and the note was dropped (CCs and panics always return
+/// `true`).
+pub fn schedule_midi(engine: &mut crate::DrumEngine, event: MidiEvent, offset: usize) -> bool {
+    match event {
+        MidiEvent::NoteOn {
+            channel,
+            note,
+            velocity,
+        } => engine.schedule_timed(
+            offset,
+            crate::EngineEvent::NoteOn {
+                channel,
+                note,
+                velocity,
+            },
+        ),
+        _ => {
+            handle_midi(engine, event);
+            true
+        }
+    }
+}
+
 /// Map CC numbers onto engine parameters — channel-scoped track macros +
 /// master.
 ///
 /// A CC on channel `N` edits track `N`, matching the note routing. `CC 7`
-/// stays global. `set_macro` recomputes coefficients, which involves `expf`
-/// calls — too expensive for an audio interrupt but entirely fine in the main
-/// loop or a MIDI callback. In the firmware this is the reason MIDI is drained
-/// from the main loop rather than an interrupt; the host harness keeps the
-/// same discipline (parsed on the CoreMIDI thread, applied from the audio
-/// thread between engine blocks).
+/// stays global. Macros are set through [`Track::set_macro_target`](crate::Track::set_macro_target)
+/// so the value ramps to its target at block rate inside the audio
+/// callback's control pass (see the module docs, "CC smoothing") — the
+/// `expf`-heavy coefficient recompute happens at most once per block per
+/// moving macro, which is what keeps CCs safe to handle in the main loop
+/// rather than the audio interrupt. The host harness keeps the same
+/// discipline (parsed on the CoreMIDI thread, applied between engine blocks).
 pub fn apply_cc(engine: &mut crate::DrumEngine, channel: u8, controller: u8, value: f32) {
     if controller == CC_MASTER_GAIN {
         engine.master_gain = value;
@@ -165,7 +223,7 @@ pub fn apply_cc(engine: &mut crate::DrumEngine, channel: u8, controller: u8, val
         let macro_idx = (controller - CC_TRACK_BASE) as usize;
         let track = channel as usize;
         if track < crate::TRACKS && macro_idx < crate::NUM_MACROS {
-            engine.tracks[track].set_macro(macro_idx, value);
+            engine.tracks[track].set_macro_target(macro_idx, value);
         }
     }
 }
@@ -302,6 +360,15 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Run enough control passes for the CC smoother on `track` to reach its
+    /// targets. 200 blocks at k = 0.0851 leaves a residual below the 1e-4
+    /// snap threshold, so this converges exactly.
+    fn converge_macros(e: &mut crate::DrumEngine, track: usize) {
+        for _ in 0..200 {
+            e.tracks[track].control();
+        }
     }
 
     /// Tiny fixed-capacity collector so the tests stay allocation-free too.
@@ -480,6 +547,12 @@ mod tests {
                 value: 0.5,
             },
         );
+        // CCs ramp at block rate: the base macro must not jump yet.
+        assert!(
+            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            "CC should not apply instantly — it is block-rate smoothed"
+        );
+        converge_macros(&mut e, 0);
         assert_eq!(e.tracks[0].base_macros[7], 0.5, "macro 7 on track 0");
         assert_eq!(
             e.tracks[1].base_macros[7], mac7_track1_before,
@@ -495,6 +568,7 @@ mod tests {
                 value: 0.25,
             },
         );
+        converge_macros(&mut e, 3);
         assert_eq!(e.tracks[3].base_macros[7], 0.25, "macro 7 on track 3");
         assert_eq!(
             e.tracks[0].base_macros[7], 0.5,
@@ -582,5 +656,129 @@ mod tests {
         assert!(e.is_active());
         handle_midi(&mut e, MidiEvent::Panic);
         assert!(!e.is_active(), "panic should cut everything");
+    }
+
+    #[test]
+    fn schedule_midi_queues_notes_and_drains_in_process() {
+        use crate::{DrumEngine, BLOCK};
+        let mut e = DrumEngine::new();
+        assert!(schedule_midi(
+            &mut e,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: CHROMATIC_REFERENCE_NOTE,
+                velocity: 0.5,
+            },
+            7,
+        ));
+        // Queued, not triggered: nothing sounds until the next process().
+        assert_eq!(e.timed.len(), 1);
+        assert!(
+            !e.tracks[0].is_active(),
+            "a queued note must not trigger until process() drains it"
+        );
+
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        e.process(&mut l, &mut r);
+        assert!(e.tracks[0].is_active(), "drained note should fire");
+        assert!(e.timed.is_empty(), "process() must drain the queue");
+    }
+
+    #[test]
+    fn schedule_midi_applies_cc_and_panic_immediately() {
+        use crate::{DrumEngine, BLOCK};
+        let mut e = DrumEngine::new();
+
+        // A CC lands immediately as a target (it still slews; the machine
+        // selector and panics are the instant path).
+        schedule_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TRACK_BASE + 7,
+                value: 0.5,
+            },
+            0,
+        );
+        assert!(
+            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            "CC should be smoothed, not instant"
+        );
+
+        // A panic cuts a sounding engine instantly, even via schedule_midi —
+        // an offset is irrelevant to a panic.
+        assert!(schedule_midi(
+            &mut e,
+            MidiEvent::NoteOn {
+                channel: 0,
+                note: CHROMATIC_REFERENCE_NOTE,
+                velocity: 1.0,
+            },
+            0,
+        ));
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        e.process(&mut l, &mut r);
+        assert!(e.is_active());
+        assert!(schedule_midi(&mut e, MidiEvent::Panic, 99));
+        assert!(
+            !e.is_active(),
+            "panic must apply immediately, not at an offset"
+        );
+        assert!(
+            e.timed.is_empty(),
+            "the CC + note must not sit in the queue"
+        );
+    }
+
+    #[test]
+    fn cc_value_ramps_to_its_target() {
+        use crate::DrumEngine;
+        let mut e = DrumEngine::new();
+        let before = e.tracks[0].base_macros[7];
+
+        handle_midi(
+            &mut e,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TRACK_BASE + 7,
+                value: 0.5,
+            },
+        );
+        // The base macro must not have jumped; it is slewing.
+        assert!(
+            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            "CC applied instantly"
+        );
+        assert_eq!(
+            e.tracks[0].base_macros[7], before,
+            "base should be untouched mid-ramp"
+        );
+
+        // One control pass nudges it partway toward the target.
+        e.tracks[0].control();
+        assert!(
+            e.tracks[0].base_macros[7] > before,
+            "first block must move toward the target"
+        );
+
+        // Enough blocks converge to the exact target.
+        converge_macros(&mut e, 0);
+        assert_eq!(e.tracks[0].base_macros[7], 0.5);
+    }
+
+    #[test]
+    fn direct_set_macro_cancels_a_pending_ramp() {
+        use crate::DrumEngine;
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro_target(7, 1.0);
+        // A programmatic set mid-ramp is authoritative: the ramp stops.
+        e.tracks[0].set_macro(7, 0.2);
+        converge_macros(&mut e, 0);
+        assert_eq!(
+            e.tracks[0].base_macros[7], 0.2,
+            "the pending ramp should have been cancelled"
+        );
     }
 }

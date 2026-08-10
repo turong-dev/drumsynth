@@ -24,9 +24,13 @@
 //! A PCM5102A or PCM5100 I2S breakout, not the Teensy Audio Shield. Those
 //! parts are hardware-strapped: no I2C, no register writes, no codec driver
 //! to find or write. Feed them BCLK, LRCLK and DATA and they produce
-//! line-level audio. The Audio Shield's SGTL5000 needs an I2C driver that
-//! does not exist in Rust, and there is no reason to take that on for an
-//! output-only instrument.
+//! line-level audio. The Audio Shield's SGTL5000 needs an I2C bootstrap
+//! (power-up, clock setup, DAC enable, volume) — a WIP `sgtl5000` crate now
+//! exists (0.0.1, effectively unmaintained) but it adds a fragile dependency
+//! on top of the same SAI + DMA work either board needs, and there is no
+//! reason to take that on for an output-only instrument. The shield only
+//! pays for itself if you want its headphone amp or line-in ADC (the
+//! resample/loopback path).
 //!
 //! ```text
 //!   Teensy 4.1              PCM5102A breakout
@@ -61,14 +65,26 @@
 //! MIDI channels are conventionally labelled 1..=16; on the wire the nibble
 //! is 0-based, so channel 1 = wire 0 = track 0, up to channel 8 = wire 7 =
 //! track 7. Channels 9..=16 have no track — notes are silent, CCs ignored.
+//!
+//! # MIDI in
+//!
+//! Two transports, both routed through the shared [`drum_engine::midi`]
+//! router and the sample-accuracy machinery: USB MIDI on the main USB port
+//! (the [`usb`] module owns the one bus the Teensy has) and DIN MIDI on
+//! LPUART6 at 31250 baud for anyone still wired that way. The USB path
+//! drains 4-byte USB MIDI event packets and feeds their data bytes through
+//! a [`MidiParser`], because USB MIDI is just a transport wrapper around
+//! ordinary MIDI bytes.
 
 #![no_std]
 #![no_main]
 
 use teensy4_panic as _;
 
+mod usb;
+
 use drum_engine::{
-    midi::{handle_midi, MidiParser},
+    midi::{schedule_midi, MidiParser},
     DrumEngine, BLOCK,
 };
 // The LPUART `read()` is a trait method (embedded-hal 0.2 `serial::Read`),
@@ -97,6 +113,7 @@ fn main() -> ! {
         mut gpio2,
         pins,
         lpuart6,
+        usb,
         ..
     } = board::t41(board::instances());
 
@@ -109,6 +126,31 @@ fn main() -> ! {
     // USB stack, so it is the faster thing to get working first.
     let mut midi_uart = board::lpuart(lpuart6, pins.p1, pins.p0, 31_250);
 
+    // The shared USB stack — MIDI class on the one bus the Teensy has (see
+    // the `usb` module for why the class lives here rather than in a crate).
+    //
+    // SAFETY: called exactly once, here, before the loop polls it; interrupts
+    // do not exist yet.
+    #[allow(unsafe_code)]
+    unsafe {
+        usb::init(usb);
+    }
+
+    // FPSCR.FZ — flush denormals to zero across the whole core.
+    //
+    // The engine clamps its own tail state via `dsp::DENORMAL_FLOOR`, but
+    // that only covers what it can see. The send-FX buses, the `libm`
+    // helpers, and any future code all flush at the FPU boundary instead,
+    // which is the only guarantee that a long decay cannot turn into a
+    // denormal stall. One bit at init, paid forever after.
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut fpscr: u32;
+        core::arch::asm!("vmrs {}, fpscr", out(reg) fpscr);
+        fpscr |= 1 << 24; // FZ
+        core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
+    }
+
     // SAFETY: `ENGINE_BUF` is `.uninit` OCRAM, written exactly once, here,
     // before interrupts are enabled — single-threaded init, same
     // requirement `new_in_place` documents. Raw-pointer construction
@@ -120,7 +162,8 @@ fn main() -> ! {
         DrumEngine::new_in_place(p)
     };
 
-    let mut parser = MidiParser::new();
+    let mut parser_usb = MidiParser::new();
+    let mut parser_uart = MidiParser::new();
 
     // TODO(sai): bring up the audio interface.
     //
@@ -143,23 +186,58 @@ fn main() -> ! {
     let mut left = [0.0f32; BLOCK];
     let mut right = [0.0f32; BLOCK];
 
+    // Samples rendered so far. The next `process` block starts at this count.
+    // Before SAI this is a plain counter incremented once per block, so the
+    // offset below is always 0; once the audio interrupt owns it, the same
+    // arithmetic turns into the arrival-sample timing that `schedule_midi`
+    // was built for. Nothing else here needs to change for that.
+    let mut sample_counter: u64 = 0;
+    let mut usb_midi_buf = [0u8; 64];
+
     loop {
-        // Drain whatever MIDI has arrived. In the finished firmware this
-        // belongs in a UART interrupt pushing into a queue, so that a burst of
-        // notes cannot delay an audio deadline.
+        // USB MIDI: the host sends 4-byte USB MIDI event packets, each a
+        // status byte plus up to two data bytes. Feed those through the
+        // same parser as the DIN socket — USB MIDI is just a transport.
+        let n = usb::poll(&mut usb_midi_buf);
+        let mut i = 0;
+        while i < n {
+            for &b in &usb_midi_buf[i + 1..i + 4] {
+                if let Some(event) = parser_usb.push(b) {
+                    // Shared with the host `device` harness — the Teensy and
+                    // the Mac tuning rig interpret the same bytes identically.
+                    schedule_midi(engine, event, arrival_offset(sample_counter));
+                }
+            }
+            i += 4;
+        }
+
+        // Drain whatever MIDI has arrived on DIN. In the finished firmware
+        // this belongs in a UART interrupt pushing into a queue, so that a
+        // burst of notes cannot delay an audio deadline.
         while let Ok(byte) = midi_uart.read() {
-            if let Some(event) = parser.push(byte) {
-                // Shared with the host `device` harness — the Teensy and the
-                // Mac tuning rig interpret the same bytes identically.
-                handle_midi(engine, event);
+            if let Some(event) = parser_uart.push(byte) {
+                schedule_midi(engine, event, arrival_offset(sample_counter));
             }
         }
 
         // TODO(sai): this call moves into the DMA interrupt handler.
         audio_callback(engine, &mut left, &mut right);
+        sample_counter += BLOCK as u64;
 
         led.toggle();
     }
+}
+
+/// Where an event drained from a transport right now should fire.
+///
+/// The main loop renders in whole blocks, so an event that arrives while the
+/// engine is `sample_counter` samples in is scheduled to fire at that
+/// position in the *next* `process` block — the engine's `TimedQueue`
+/// contract, not a guess. Before SAI this is always 0 (the loop only reaches
+/// the drain points between blocks), which is exactly right: a block boundary
+/// is the earliest a note can play.
+fn arrival_offset(sample_counter: u64) -> usize {
+    (sample_counter % BLOCK as u64) as usize
 }
 
 /// The whole of the audio interrupt.

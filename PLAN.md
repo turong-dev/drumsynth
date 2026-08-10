@@ -285,6 +285,132 @@ Key decisions:
       transpose, Track-level transpose that survives a macro recompute).
       Fmt + clippy clean (only pre-existing lfo.rs / sy_tone.rs warnings).
 
+### Phase 8 — Deluge integration: audio (SAI) + MIDI
+
+The M3 headline from the design guidance. Two hardware plumbing pieces, split
+so MIDI (testable now, and done in the engine) isn't blocked on audio (which
+needs the PCM5102A + SAI work). Bench-gated: MIDI + CC handling must fit in
+the remaining ~32% alongside the FX cost.
+
+**8-A — Audio (SAI out)** — needs the PCM5102A hardware on hand.
+
+- [ ] SAI audio output (`TODO(sai)`): PCM5102A on BCLK/LRCLK/OUT1A, interleave
+      `process()` output to I2S, engine in a `.uninit` static via
+      `new_in_place`. This is the "bump teensy4-bsp to 0.6" trigger. Not the
+      Audio Shield: the SGTL5000 needs an I2C bootstrap on top of the same SAI
+      + DMA work, and the only Rust driver is a WIP `sgtl5000` crate (0.0.1,
+      effectively unmaintained). The shield only earns its keep if you want
+      its headphone amp or line-in ADC.
+- [ ] Audio callback in ITCM, hot buffers in DTCM (deferred to here).
+
+**8-M — MIDI (USB device)** — the engine side is done; this is firmware.
+
+- [x] USB MIDI device on the one bus the Teensy has. Built our own
+      `UsbDevice` (BusAdapter + MIDI class in `firmware/src/usb.rs`) since
+      `imxrt-log`'s `log::usbd` owns its whole stack, **and** since
+      `usbd-midi` 0.2.0 (the newest on the usb-device 0.2 that `imxrt-usbd`
+      0.2.2 is pinned to) only does host→device with wrong descriptors —
+      0.5.1 is correct but needs usb-device 0.3. The class mirrors
+      `imxrt-log`'s usbd.rs construction/poll so the two stay comparable.
+      Enumerate on the Deluge as host (Deluge DC-powered, device connected
+      before power-up). Verify on the bench whether the Deluge bus-powers
+      the Teensy; powered hub if not.
+- [x] Drain the USB MIDI parser from the main loop: `usb::poll` hands the raw
+      bytes to the shared `MidiParser`, route NoteOn → `schedule_midi` with
+      the sample-counter offset, CC/Panic → `handle_midi` (via
+      `schedule_midi`'s immediate path). `apply_cc` stays out of the audio
+      interrupt.
+- [x] CC → macro smoothing (one-pole ~7.5 ms): **done in the engine** —
+      `Track::set_macro_target` + block-rate slew in `control()`, so a CC
+      burst costs one coefficient recompute per macro per block, not one per
+      message. The firmware side is just `apply_cc`, which now calls it.
+- [x] Set the FZ bit in FPSCR at firmware init — protects the long FX tails
+      the engine's own `DENORMAL_FLOOR` clamp can't see.
+- [x] Bench regate: `8+FX+CC` scenario drives `apply_cc` every block on top
+      of playing + routed sends — the steady-state scenarios never exercise
+      the CC recompute path. Numbers recorded on the bench (goal: still
+      under ~70% of budget).
+
+### Phase 9 — Sample-accurate event timing
+
+Adopt the guidance's `TimedEvent { offset, event }` contract so a hit lands on
+the exact sample the sequencer meant, and the deferred gate inputs drop into
+the same plumbing unchanged. Block is already 32 (the guidance's recommended
+32–64), so the offset resolution is already fine. The engine side is done;
+the firmware sample-counter wiring is Phase 8-M.
+
+- [x] `TimedEvent` queue on the engine; drain at the top of `process()`, start
+      each voice at its sample offset inside the block. `TimedQueue` (capacity
+      [`MAX_TIMED_EVENTS`], offset clamped to `BLOCK - 1`, offset-sorted
+      drain) lives on `DrumEngine`. Tests: no output before the trigger offset
+      (a hit at offset 10 is bit-identical to a hit at offset 0 shifted by
+      10), a scheduled panic cuts at its offset, queue-full drops are
+      reported, events in one block land in offset order.
+- [x] MIDI note-on → `TimedEvent` with the arrival sample as the offset.
+      `midi::schedule_midi` queues NoteOns and applies CC/Panic immediately.
+- [x] Firmware: compute the arrival sample from the audio sample counter and
+      feed `schedule_midi` — `main.rs` keeps a `sample_counter` and passes
+      `arrival_offset(sample_counter)` to `schedule_midi`. Before SAI this is
+      always 0 (the loop only drains between blocks, so a block boundary is
+      the earliest a note can play); once the audio interrupt owns the
+      counter, the same call becomes arrival-sample timing unchanged.
+- [x] Retune-before-trigger discipline stays intact — the timed path routes
+      through `trigger_channel`, which already retunes.
+
+### Phase 10 — Tuning & test hardening (design-guidance items)
+
+Measurement + sound work, not architecture. The engine already has the hooks;
+these close the loop on the macro philosophy.
+
+- [ ] `render sweep` logs RMS (optionally LUFS) per step; a trim pass derives
+      the inverse gain so macros are loudness-compensated along their travel.
+- [ ] Macro monotonicity tests: per machine + macro, assert RMS and decay time
+      move monotonically across the travel — the automated dead-zone detector.
+- [ ] Golden WAV snapshots: default-macro renders committed per machine; CI
+      diffs after any refactor.
+- [ ] PUNCH-style multi-target macro on BD Classic (pitch-env depth + decay +
+      click) once the trim tooling exists.
+- [ ] AHD per-segment curve blend on the track amp env (the guidance's
+      linear ↔ one-pole lerp, ~2 lines in `ahd.rs`).
+- [ ] Preset save/load to SD (the open M4 item) — pairs with Phase 6's SDIO
+      kit loader.
+
+## Design guidance received (2026-08-10)
+
+A design-guidance review (`drum-machine-design.md`, untracked) landed after
+Phase 7: outside advice on macro philosophy, envelopes, event scheduling,
+Deluge integration, performance, and testing. This section records what the
+advice says, what the engine already does, and what we are taking from it.
+The verdicts feed Phases 8–10 and the settled-decisions table below.
+
+| Advice | State of the work | Verdict |
+|---|---|---|
+| Macros are tuned paths, not renamed params — no dead zones, monotonic, loudness-compensated | Normalized 0..1 macros with per-machine `set_macros`; the "tuned path" idea is the engine's core | **Adopt as a rule**, but it is currently unmeasured: no loudness compensation, nothing asserts monotonicity |
+| Macro mappings are **data, not code** (breakpoint `Curve` + `MacroTarget` + `loudness_trim`, host hot-reload) | Mappings are hand-written `set_macros` in each machine module | **Defer the data model.** Code mappings are compile-checked and the generic sweep already works off them; the win the advice targets (table-edit tuning) is mostly delivered by the host tool. Adopt the *tuning workflow* instead |
+| A macro should drive several params (`PUNCH` = depth + decay + click; `DIRT` gain-compensated) | Macros map mostly 1:1 to internal params | **Take a first one** — PUNCH-style macro on BD Classic (Phase 10). Gain-compensated DIRT needs the RMS tooling first |
+| Host tuning workflow: sweep + RMS/LUFS log, dead-zone detection, automated loudness trim | Generic `sweep <machine> <macro>` exists; no measurement, no logging | **Add RMS logging + monotonicity checks** (Phase 10). The renderer is already the right place |
+| AHD with per-segment **curve control** (linear ↔ one-pole blend) | `AhdEnv` has linear attack + exponential decay, no blend knob | **Take the guidance's blend verbatim** — ~2 lines, the missing knob (Phase 10) |
+| Run envelopes per-sample | Done — `AhdEnv::tick` and all machine envelopes run at audio rate | Already satisfied |
+| Pitch envelope independent of amp envelope | Per-machine sweep envelopes are separate from the track AHD | Already satisfied |
+| Sample-accurate triggers **inside** the block (`TimedEvent.offset`) | Triggers fire at block start. Block is already 32 (the guidance's recommended 32–64), so the floor is 667 µs — better than the 2.67 ms the advice warns about, but not sample-accurate | **Built** — `TimedQueue` drains in `process()` and fires at sample offsets; `midi::schedule_midi` queues NoteOns with the arrival sample. Firmware sample-counter wiring is Phase 8-M |
+| USB MIDI *device*, Deluge as host | Not built. Firmware has `bench` + `TODO(sai)` audio gap | **In scope — the M3 headline and the point of the box** (Phase 8) |
+| CC → macro smoothing (one-pole, 5–10 ms) | `apply_cc` steps macros 0..1 in 1/127 increments with a full coefficient recompute per message | **Built** — `Track::set_macro_target` slews at block rate (~7.5 ms) inside `control()`; `apply_cc` routes through it. Kills zipper, caps the `expf` churn (Phase 8-M) |
+| Fixed CC map documented and committed | `CC_TRACK_BASE` = 20, table-driven, documented in `midi.rs` and firmware | Already satisfied |
+| MIDI channel per voice (or note-number routing) | Both: one channel per track *and* a note map | Already satisfied |
+| Gate input circuit + firmware capture | Deferred by the advice itself; hardware-only | Parked — revisit only to close the last millisecond |
+| Set the FZ bit in FPSCR | Not set. The engine clamps via `DENORMAL_FLOOR` instead | **Take it** — one line in firmware init, protects the long FX tails too (Phase 8-M) |
+| Audio callback in ITCM, hot buffers in DTCM | Not done | Defer until SAI audio lands (Phase 8) |
+| Hard ceiling ~60% at max polyphony | Measured worst case (Phase 5) is 68.1% — above the advice's number, already flagged | Noted. Budget work concentrates on the delay buffer and `set_macro` (`expf`) |
+| PSRAM only if reverb/delay get long | Matches the plan's stance | Already satisfied |
+| Golden WAV snapshots against committed references | Not present | **Take it** — cheap, pins the sound across refactors (Phase 10) |
+| Property tests (no NaN, reaches zero, within ±1, silent before trigger) | Mostly present (NaN at extremes, output ≤ 1, decay-to-silence) | Top up — explicit "reaches zero" for all machines |
+| Macro monotonicity test | Not present | **Take it** — RMS-based, the automated form of "no dead zones" (Phase 10) |
+| Host `criterion` benches | Firmware bench (DWT) is the real measure | Defer — host numbers are a regression tripwire we already get from CI + the bench |
+
+Milestones M1/M2 from the guidance map to Phases 1–2. M3 (USB MIDI
+enumeration) is the outstanding item and becomes Phase 8. M4 splits: choke +
+velocity→macro are done; preset save/load to SD is still open (Phase 10).
+
 ## Settled decisions
 
 | question | answer |
@@ -297,7 +423,11 @@ Key decisions:
 | Sequencer | external (MIDI-driven); engine gains p-lock/sound-lock hooks |
 | Machine ordering | kit-first (Phase 2 before tonal machines) |
 | Sin table | mandatory, Phase 1 first task |
-| teensy4-bsp version | stay on 0.5 for bench; bump to 0.6 when SAI work begins |
+| teensy4-bsp version | stay on 0.5 for bench; bump to 0.6 when SAI work begins (Phase 8) |
+| Macro mapping storage | code (`set_macros` per machine); curve-as-data model deferred, tuning workflow adopted (Phase 10) |
+| Sample-accurate trigger offsets | built — `TimedQueue` + `schedule_midi` (Phase 9); firmware sample-counter wiring in Phase 8-M |
+| Gate input | deferred (advice-consistent); `TimedEvent` plumbing built first (Phase 9) |
+| Transport | USB MIDI device on the Deluge's host port (Phase 8); DIN/gates never a requirement |
 
 ## Hardware
 

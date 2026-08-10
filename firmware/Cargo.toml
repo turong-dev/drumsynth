@@ -44,6 +44,24 @@ embedded-hal = "0.2"
 imxrt-log = { version = "0.1", default-features = false, features = ["log", "usbd"] }
 log = "0.4"
 
+# USB MIDI device (Phase 8-M). The main binary builds its own USB stack (see
+# firmware/src/usb.rs) rather than imxrt-log's, which owns its entire stack
+# and cannot host a second class on the one bus the Teensy has.
+#
+# The MIDI class is vendored (~150 lines) rather than pulled from `usbd-midi`
+# because of a version wall: every imxrt USB crate (imxrt-hal's `usbd` module,
+# imxrt-log, usbd-serial) is built on usb-device 0.2, and `usbd-midi` only
+# moved to usb-device 0.3 at 0.3.0. 0.2.0 — the newest usable version — only
+# implements host→device MIDI with broken descriptors. Bump all of it together
+# (usb-device → 0.3, imxrt-usbd → whatever follows, usbd-midi → 0.5) if
+# imxrt-hal ever moves.
+#
+# `usb-device` is the one direct dependency: `BusAdapter` and friends come
+# through `bsp::hal::usbd`, which re-exports the imxrt-hal (and therefore
+# imxrt-usbd) types the BSP itself pins. Depending on them directly would
+# risk two versions of the same crate in the tree.
+usb-device = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

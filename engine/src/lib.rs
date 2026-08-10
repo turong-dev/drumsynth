@@ -52,8 +52,8 @@ pub mod machines;
 pub mod midi;
 
 pub use machines::{
-    MachineId, MacroInfo, NUM_BANKS, NUM_MACROS, MACROS_PER_BANK, SLOT_LEVEL, SLOT_PAN, 
-    SLOT_MACHINE, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    MachineId, MacroInfo, MACROS_PER_BANK, NUM_BANKS, NUM_MACROS, SLOT_LEVEL, SLOT_MACHINE,
+    SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 
 use dsp::{Lfo, ModDest};
@@ -273,12 +273,139 @@ impl Default for ModState {
     }
 }
 
+/// Maximum number of timed events the engine can hold for the next block.
+///
+/// 16 covers an 8-track grid of 16th notes at 150 BPM (a note every 10 ms)
+/// plus everything a MIDI cable can carry between two blocks. If a host
+/// saturates it, events are dropped — the design guidance is that losing an
+/// event beats missing the audio deadline.
+pub const MAX_TIMED_EVENTS: usize = 16;
+
+/// What a scheduled event does when it fires.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum EngineEvent {
+    /// Play a track chromatically, exactly as
+    /// [`MidiEvent::NoteOn`](crate::midi::MidiEvent::NoteOn) routes.
+    NoteOn {
+        /// MIDI channel, `0..=7` — selects the track.
+        channel: u8,
+        /// MIDI note number — sets the pitch (60 = macro pitch).
+        note: u8,
+        /// Normalised velocity, `0.0..=1.0`.
+        velocity: f32,
+    },
+    /// Silence the whole engine.
+    Panic,
+}
+
+/// An engine action scheduled for a sample offset within the next block.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TimedEvent {
+    /// Sample offset inside the next block, `0..=BLOCK-1`. Clamped on push.
+    pub offset: usize,
+    /// What fires at that offset.
+    pub event: EngineEvent,
+}
+
+/// Fixed-capacity schedule of engine events for the *next*
+/// [`DrumEngine::process`] block.
+///
+/// No allocation; lives inside [`DrumEngine`]. The main loop pushes events
+/// with a sample offset (how far into the next block they should fire) and
+/// [`DrumEngine::process`] drains it at the top, sorts by offset, and fires
+/// each event at its sample inside the block.
+#[derive(Clone, Copy)]
+pub struct TimedQueue {
+    items: [Option<TimedEvent>; MAX_TIMED_EVENTS],
+    len: usize,
+}
+
+impl Default for TimedQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimedQueue {
+    /// Empty queue.
+    pub const fn new() -> Self {
+        Self {
+            items: [None; MAX_TIMED_EVENTS],
+            len: 0,
+        }
+    }
+
+    /// Number of events currently queued.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True when the queue has no events.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// True when the queue is full — the next [`Self::push`] would drop.
+    pub fn is_full(&self) -> bool {
+        self.len == MAX_TIMED_EVENTS
+    }
+
+    /// Queue an event to fire `offset` samples into the next block.
+    ///
+    /// `offset` is clamped to `BLOCK - 1`, so a late-published event still
+    /// lands before the block ends rather than being silently lost. Returns
+    /// false if the queue is full (event dropped).
+    pub fn push(&mut self, offset: usize, event: EngineEvent) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        self.items[self.len] = Some(TimedEvent {
+            offset: offset.min(BLOCK - 1),
+            event,
+        });
+        self.len += 1;
+        true
+    }
+
+    /// Move the queue into `out`, sorted by ascending offset, and clear self.
+    /// Returns the number of events copied; only the first `n` entries of
+    /// `out` are valid.
+    ///
+    /// Sorted into the caller's array rather than returned so the hot path
+    /// reuses one stack array per block instead of building one.
+    pub fn drain_sorted(&mut self, out: &mut [Option<TimedEvent>; MAX_TIMED_EVENTS]) -> usize {
+        let n = self.len;
+        out[..n].copy_from_slice(&self.items[..n]);
+        // Insertion sort; at most 16 items, typically 1..=3.
+        let mut i = 1;
+        while i < n {
+            let mut j = i;
+            while j > 0 && out[j - 1].unwrap().offset > out[j].unwrap().offset {
+                out.swap(j - 1, j);
+                j -= 1;
+            }
+            i += 1;
+        }
+        self.items = [None; MAX_TIMED_EVENTS];
+        self.len = 0;
+        n
+    }
+}
+
 /// One channel of the kit.
 pub struct Track {
     /// Underlying synthesis model. Reassignable via [`Track::load_machine`].
     pub slot: MachineSlot,
     /// Base macro values (user-configured, pre-modulation).
     pub base_macros: [f32; NUM_MACROS],
+    /// CC macro targets: [`Track::control`] slews `base_macros` toward these
+    /// at block rate. Only macros touched by [`Track::set_macro_target`] are
+    /// tracked (see `macro_pending`); everything else is direct.
+    macro_targets: [f32; NUM_MACROS],
+    /// One-pole state used to slew a pending macro toward its target.
+    macro_smooth: [f32; NUM_MACROS],
+    /// Bitmask: bit `i` set = macro `i` is mid-ramp toward `macro_targets[i]`.
+    macro_pending: u32,
     /// Strip configuration (filter, amp env, drive, pan, level, choke, layer).
     pub strip: StripParams,
     /// LFOs + velocity modulation.
@@ -316,6 +443,9 @@ impl Track {
         Self {
             slot,
             base_macros,
+            macro_targets: base_macros,
+            macro_smooth: base_macros,
+            macro_pending: 0,
             strip,
             mod_state: ModState::new(),
             filter,
@@ -341,9 +471,11 @@ impl Track {
         // Pan is track-level too: keep the strip's pan mirrored in the macro.
         self.base_macros[SLOT_PAN] = self.strip.pan * 0.5 + 0.5;
         // The MACH slot always mirrors the loaded machine (see `load_sound`).
-        self.base_macros[SLOT_MACHINE] =
-            id.index() as f32 / (MachineId::COUNT - 1) as f32;
+        self.base_macros[SLOT_MACHINE] = id.index() as f32 / (MachineId::COUNT - 1) as f32;
         self.slot = MachineSlot::new(id, &self.base_macros);
+        // Macros reset wholesale: the CC smoother must follow, not ramp from
+        // a value that no longer means anything on the new machine.
+        self.sync_macro_smoothing();
     }
 
     /// Load a complete sound (machine + macros + strip) onto this track.
@@ -365,6 +497,9 @@ impl Track {
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
+        // base_macros was overwritten by hand after load_machine's sync;
+        // re-sync the CC smoother to the final array.
+        self.sync_macro_smoothing();
     }
 
     /// Which machine this track holds.
@@ -391,6 +526,10 @@ impl Track {
             return;
         }
         self.base_macros[idx] = v;
+        // Keep the CC smoother in sync: a direct set is the new current
+        // value, and any pending ramp to a stale target is cancelled.
+        self.macro_smooth[idx] = v;
+        self.macro_pending &= !(1 << idx);
         // The send macros are track-routed: editing SEND.DLY / SEND.RVB
         // drives the strip's aux levels (and the effective values read in
         // the per-sample path), not the machine DSP.
@@ -414,6 +553,64 @@ impl Track {
         }
     }
 
+    /// Set the *target* for a CC-driven macro.
+    ///
+    /// The value ramps to it at block rate via [`Track::control`] (see
+    /// [`MACRO_SMOOTH_K`]), so a burst of CC messages never triggers a
+    /// coefficient recompute per message — `set_macro`, the recompute call,
+    /// runs at most once per block per moving macro. The machine selector
+    /// jumps instantly: swapping engines must be immediate, and loading a
+    /// machine resets macros to its defaults anyway.
+    ///
+    /// Control rate, main loop only — never the audio interrupt.
+    pub fn set_macro_target(&mut self, idx: usize, value: f32) {
+        if idx >= NUM_MACROS {
+            return;
+        }
+        if idx == SLOT_MACHINE {
+            self.set_macro(idx, value);
+            return;
+        }
+        let v = value.clamp(0.0, 1.0);
+        self.macro_targets[idx] = v;
+        // Seed the ramp from wherever the macro actually is now, so a
+        // retarget mid-ramp (a knob being turned) continues smoothly from
+        // the current value rather than jumping back to the block base.
+        self.macro_smooth[idx] = self.base_macros[idx];
+        self.macro_pending |= 1 << idx;
+    }
+
+    /// Reset the CC smoother to match the current macro array: pending ramps
+    /// cancelled, targets and smoother seeded from base values.
+    fn sync_macro_smoothing(&mut self) {
+        self.macro_targets = self.base_macros;
+        self.macro_smooth = self.base_macros;
+        self.macro_pending = 0;
+    }
+
+    /// Advance every pending macro one block toward its target. At most one
+    /// `set_macro` per moving macro per block, so a CC burst costs one
+    /// coefficient recompute per macro per block instead of one per message.
+    fn advance_macro_smoothing(&mut self) {
+        let mut i = 0;
+        while i < NUM_MACROS {
+            if self.macro_pending & (1 << i) != 0 {
+                let target = self.macro_targets[i];
+                let next = self.macro_smooth[i] + (target - self.macro_smooth[i]) * MACRO_SMOOTH_K;
+                if (target - next).abs() < MACRO_SMOOTH_EPS {
+                    // Converged: snap; `set_macro` clears the pending bit.
+                    self.set_macro(i, target);
+                } else {
+                    // Still moving: `set_macro` clears the pending bit as
+                    // part of syncing the smoother, so re-arm it.
+                    self.set_macro(i, next);
+                    self.macro_pending |= 1 << i;
+                }
+            }
+            i += 1;
+        }
+    }
+
     /// Replace all base macros in one call.
     pub fn set_macros(&mut self, all: &[f32; NUM_MACROS]) {
         self.base_macros = *all;
@@ -431,6 +628,9 @@ impl Track {
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
+        // Bulk macro replace resets the CC smoother (same rationale as
+        // `load_machine`).
+        self.sync_macro_smoothing();
     }
 
     /// Transpose the machine by `semis` semitones relative to its macro
@@ -482,6 +682,9 @@ impl Track {
             self.eff_send_delay = params.send_delay;
             self.eff_send_reverb = params.send_reverb;
         }
+        // The strip edit just rewrote the send/pan macro mirrors; resync the
+        // CC smoother so a pending ramp doesn't yank them back.
+        self.sync_macro_smoothing();
     }
 
     /// Begin a hit at `velocity` (0..=1.0). Fires LFO triggers and stores
@@ -508,8 +711,16 @@ impl Track {
     /// Per-block control pass. Advances LFOs, sums modulation onto base
     /// macros + strip params, and recomputes coefficients. Called from
     /// [`DrumEngine::process`] before the sample loop. If no modulation is
-    /// active, this is a single-branch early return.
+    /// active and no CC macros are mid-ramp, this is a single-branch early
+    /// return.
     pub fn control(&mut self) {
+        // 0. CC macro smoothing first, before the mod-state borrow: slew
+        //    pending macros toward their targets and recompute coefficients
+        //    as they move, so a CC edit is audible even with no modulation.
+        if self.macro_pending != 0 {
+            self.advance_macro_smoothing();
+        }
+
         let mod_state = &mut self.mod_state;
         if !mod_state.has_active_mod() {
             return;
@@ -670,6 +881,17 @@ impl Track {
     }
 }
 
+/// One-pole coefficient for CC macro smoothing, block rate.
+///
+/// Time constant 7.5 ms (mid-range of the 5–10 ms design guidance), block
+/// rate 1500 Hz (SAMPLE_RATE / BLOCK). k = 1 − exp(−1 / (0.0075·1500)).
+const MACRO_SMOOTH_K: f32 = 0.0851;
+
+/// Convergence threshold for CC macro smoothing. A pending macro snaps to
+/// its target once the residual is below this; ~0.01% of full scale is
+/// comfortably inaudible.
+const MACRO_SMOOTH_EPS: f32 = 1.0e-4;
+
 /// Equal-power pan.
 ///
 /// `pan` of -1 maps to (1, 0), `pan` of +1 to (0, 1), and any in-between to
@@ -713,6 +935,9 @@ pub struct DrumEngine {
     /// (`midi::handle_midi`) does not consult this — it is one channel per
     /// track via [`Self::trigger_channel`].
     pub note_map: [Option<u8>; 128],
+    /// Sample-accurate event schedule for the next block. The main loop
+    /// pushes NoteOns here with a sample offset; [`Self::process`] drains it.
+    pub timed: TimedQueue,
     /// Post-sum, pre-output limiter gain, linear.
     pub master_gain: f32,
 }
@@ -731,6 +956,7 @@ impl DrumEngine {
             tracks: new_tracks(),
             send_fx: dsp::SendFx::new(),
             note_map: [None; 128],
+            timed: TimedQueue::new(),
             master_gain: 0.8,
         };
         configure_default_notes(&mut engine.note_map);
@@ -759,6 +985,7 @@ impl DrumEngine {
         core::ptr::addr_of_mut!((*dst).tracks).write(new_tracks());
         dsp::SendFx::new_in_place(core::ptr::addr_of_mut!((*dst).send_fx));
         core::ptr::addr_of_mut!((*dst).note_map).write([None; 128]);
+        core::ptr::addr_of_mut!((*dst).timed).write(TimedQueue::new());
         core::ptr::addr_of_mut!((*dst).master_gain).write(0.8);
 
         let engine = &mut *dst;
@@ -850,6 +1077,18 @@ impl DrumEngine {
         self.send_fx.reset();
     }
 
+    /// Schedule an event to fire `offset` samples into the next
+    /// [`Self::process`] block. Returns false if the queue is full — the
+    /// event is dropped.
+    ///
+    /// This is the sample-accurate half of the MIDI path;
+    /// [`crate::midi::schedule_midi`] routes incoming MIDI here. `offset`
+    /// is clamped to `BLOCK - 1`, so a main-loop event that races the audio
+    /// callback still lands before the block ends.
+    pub fn schedule_timed(&mut self, offset: usize, event: EngineEvent) -> bool {
+        self.timed.push(offset, event)
+    }
+
     /// Load a complete [`Sound`] onto a track. Cheaper than calling
     /// `load_machine` + `set_macros` + `set_strip` separately.
     pub fn load_sound(&mut self, track: usize, sound: &Sound) {
@@ -889,11 +1128,12 @@ impl DrumEngine {
 
     /// Render one block into planar stereo buffers.
     ///
-    /// Hot path. Calls [`Track::control`] once per block for each track (this
-    /// is where LFOs advance and modulation is summed), then ticks the
-    /// sounding tracks per sample. Idle tracks are skipped per sample via
-    /// `is_active`; the per-block `control` call is a fast no-op when no
-    /// modulation is configured.
+    /// Hot path. Drains the [`TimedQueue`] (firing events at their sample
+    /// offsets), calls [`Track::control`] once per block for each track (this
+    /// is where LFOs advance, modulation is summed, and CC macros slew),
+    /// then ticks the sounding tracks per sample. Idle tracks are skipped
+    /// per sample via `is_active`; the per-block `control` call is a fast
+    /// no-op when no modulation is configured.
     ///
     /// After the dry sum, send buses are routed through [`SendFx`] (delay +
     /// reverb) and the wet signal is summed into the master bus before the
@@ -909,6 +1149,13 @@ impl DrumEngine {
         let n = out_l.len().min(out_r.len()).min(BLOCK);
         let master = self.master_gain;
         let fx_drive = self.send_fx.drive;
+
+        // 0. Drain the timed event queue. Events are sorted by offset and
+        //    fired at the matching sample inside the block (step 2), so a
+        //    note scheduled half-way through the block sounds half-way
+        //    through, not at the next boundary.
+        let mut timed = [None::<TimedEvent>; MAX_TIMED_EVENTS];
+        let n_timed = self.timed.drain_sorted(&mut timed);
 
         // 1. Control pass: advance LFOs, apply modulation, recompute coefficients.
         for t in self.tracks.iter_mut() {
@@ -931,6 +1178,27 @@ impl DrumEngine {
         for i in 0..n {
             let mut sum_l = 0.0f32;
             let mut sum_r = 0.0f32;
+
+            // Timed events for this sample. The queue is offset-sorted, so
+            // each sample's events are contiguous.
+            let mut k = 0;
+            while k < n_timed {
+                let ev = timed[k].expect("drained entries are Some");
+                if ev.offset != i {
+                    break;
+                }
+                match ev.event {
+                    EngineEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                    } => {
+                        self.trigger_channel(channel, note, velocity);
+                    }
+                    EngineEvent::Panic => self.panic(),
+                }
+                k += 1;
+            }
 
             let mut t = 0;
             while t < TRACKS {
@@ -1436,6 +1704,108 @@ mod tests {
         let macro0 = e.tracks[0].base_macros;
         e.tracks[0].control();
         assert_eq!(e.tracks[0].base_macros, macro0, "control() mutated base");
+    }
+
+    // ----- Phase 8: sample-accurate timed events -----
+
+    #[test]
+    fn timed_note_fires_at_its_offset() {
+        // A hit scheduled 10 samples into the block must be bit-identical to
+        // a hit at offset 0 shifted by 10 — same trigger, same machine, same
+        // deterministic FX path, just started later.
+        let mut a = DrumEngine::new();
+        a.schedule_timed(
+            0,
+            EngineEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 1.0,
+            },
+        );
+        let mut b = DrumEngine::new();
+        b.schedule_timed(
+            10,
+            EngineEvent::NoteOn {
+                channel: 0,
+                note: 60,
+                velocity: 1.0,
+            },
+        );
+
+        let mut al = [0.0f32; BLOCK];
+        let mut ar = [0.0f32; BLOCK];
+        let mut bl = [0.0f32; BLOCK];
+        let mut br = [0.0f32; BLOCK];
+        a.process(&mut al, &mut ar);
+        b.process(&mut bl, &mut br);
+
+        // Sanity: the reference actually sounded (a phase-zero sine kick's
+        // first sample is 0, so check the whole block, not sample 0).
+        assert!(al.iter().any(|&s| s != 0.0), "reference kick is silent");
+
+        // The delayed hit is the same hit, shifted by its offset.
+        for i in 10..BLOCK {
+            assert_eq!(
+                al[i - 10].to_bits(),
+                bl[i].to_bits(),
+                "delayed onset diverged from the shifted reference at {i}"
+            );
+        }
+        // And the prefix is exact silence.
+        for &s in &bl[..10] {
+            assert_eq!(s, 0.0, "pre-offset samples must be silent");
+        }
+        // The queue drained.
+        assert!(b.timed.is_empty(), "process() must drain the queue");
+    }
+
+    #[test]
+    fn scheduled_panic_cuts_at_offset() {
+        let mut e = DrumEngine::new();
+        e.trigger(0, 1.0);
+        e.schedule_timed(5, EngineEvent::Panic);
+
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        e.process(&mut l, &mut r);
+
+        // The kick is cut at sample 5: audible before, exact silence after.
+        assert!(
+            l[..5].iter().any(|&s| s != 0.0),
+            "track should be sounding before the panic"
+        );
+        for i in 5..BLOCK {
+            assert_eq!(l[i], 0.0, "panic must cut at its offset ({i})");
+            assert_eq!(r[i], 0.0, "panic must cut at its offset ({i})");
+        }
+    }
+
+    #[test]
+    fn timed_queue_overflows_report_dropped_events() {
+        let mut q = TimedQueue::new();
+        for i in 0..MAX_TIMED_EVENTS {
+            assert!(q.push(i, EngineEvent::Panic), "slot {i} should accept");
+        }
+        assert!(q.is_full());
+        assert!(
+            !q.push(0, EngineEvent::Panic),
+            "queue full — the event must be dropped, not panic"
+        );
+        assert_eq!(q.len(), MAX_TIMED_EVENTS);
+
+        // Draining returns events sorted by ascending offset regardless of
+        // insertion order.
+        let mut q = TimedQueue::new();
+        assert!(q.push(30, EngineEvent::Panic));
+        assert!(q.push(2, EngineEvent::Panic));
+        assert!(q.push(17, EngineEvent::Panic));
+        let mut out = [None::<TimedEvent>; MAX_TIMED_EVENTS];
+        let n = q.drain_sorted(&mut out);
+        assert_eq!(n, 3);
+        assert_eq!(out[0].unwrap().offset, 2);
+        assert_eq!(out[1].unwrap().offset, 17);
+        assert_eq!(out[2].unwrap().offset, 30);
+        assert!(q.is_empty());
     }
 
     #[test]

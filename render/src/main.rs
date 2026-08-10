@@ -539,9 +539,9 @@ fn setup_kit_mix(engine: &mut DrumEngine) {
     // --- Send FX demo (Phase 5) ---
     // Snare (track 1): send to reverb for ambient backbeat space.
     engine.tracks[1].strip.send_reverb = 0.5;
-    engine.tracks[1].strip.send_delay = 0.5;
+    engine.tracks[1].strip.send_delay = 0.25;
     // Clap (track 4): send to delay for a reggae-ish ghost echo.
-    engine.tracks[4].strip.send_delay = 0.5;
+    engine.tracks[4].strip.send_delay = 0.25;
     // Cowbell (track 6): light reverb send for an "other room" accent.
     engine.tracks[6].strip.send_reverb = 0.5;
 
@@ -554,7 +554,7 @@ fn setup_kit_mix(engine: &mut DrumEngine) {
     }
 
     // FX bus configuration: a medium hall reverb and a slap-back delay.
-    engine.send_fx.delay.set_params(0.5, 0.45, 5_000.0, 1.0);
+    engine.send_fx.delay.set_params(0.346, 0.45, 5_000.0, 1.0);
     engine.send_fx.reverb.set_params(0.022, 0.86, 4_500.0, 1.0);
     engine.send_fx.drive = 1.0;
 }

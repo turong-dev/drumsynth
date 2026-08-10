@@ -29,6 +29,7 @@
 //! 8 sounding ...                                  (worst case, no FX)
 //! fx idle  ...                                    (FX advanced, no sends)
 //! 8 + FX   ...                                    (worst case with delay + reverb)
+//! 8+FX+CC  ...                                    (…plus a CC automation lane)
 //! ```
 //!
 //! Three numbers per scenario: idle (loaded kit, nothing sounding), 3-voice
@@ -38,6 +39,14 @@
 //! against the worst case, and against *peak*, not average — the audio
 //! callback has to make its deadline every single time, and an average that
 //! fits while the peak does not is a click you will hear.
+//!
+//! `8+FX+CC` is the Phase 8-M regate: the first four scenarios are
+//! steady-state, with macros parked at their values so `control()` takes its
+//! single-branch early return every block. Real MIDI moves macros, and every
+//! moving macro costs one coefficient recompute per block (the block-rate CC
+//! smoother re-arms itself on every message). The regate drives `apply_cc` —
+//! the exact main-loop API — every block on top of the full playing + FX
+//! case, so the number it reports is what the Deluge actually asks for.
 //!
 //! Before the sine-table swap in `engine::dsp::fast`, the 3-voice
 //! predecessor measured 125,907 cycles (31.5% of budget), ~90% of it inside
@@ -124,7 +133,12 @@ fn main() -> ! {
 
     log::info!("");
     log::info!("drum-engine cycle bench — {} tracks", TRACKS);
-    log::info!("core {:.0} MHz, {} Hz, block {}", CORE_HZ / 1e6, SAMPLE_RATE, BLOCK);
+    log::info!(
+        "core {:.0} MHz, {} Hz, block {}",
+        CORE_HZ / 1e6,
+        SAMPLE_RATE,
+        BLOCK
+    );
     log::info!("budget {:.0} cycles per block", BUDGET);
     log::info!("");
 
@@ -155,6 +169,15 @@ fn main() -> ! {
 
         let with_fx = measure_with_fx(&mut *engine, &mut left, &mut right);
         report("8 + FX    ", with_fx);
+
+        // --- Phase 8-M regate: playing + FX + CC automation ---
+        // Everything the groove box does at once: all 8 tracks retriggered,
+        // sends routed, and a filter-macro automation lane moved every block
+        // through `apply_cc`. This is the case the "must fit in the remaining
+        // ~32%" gate is really about (see the first four scenarios, which are
+        // steady-state and never exercise the CC recompute path).
+        let with_cc = measure_with_cc_automation(&mut *engine, &mut left, &mut right);
+        report("8+FX+CC   ", with_cc);
 
         log::info!("");
         poller.poll();
@@ -269,6 +292,85 @@ fn measure_with_fx(
     }
 }
 
+/// The Phase 8-M regate: playing + FX + CC automation, all at once.
+///
+/// The steady-state scenarios above park macros at their values, so
+/// `control()` early-returns every block and the CC recompute path is never
+/// exercised. Real MIDI moves macros, and every moving macro costs one
+/// coefficient recompute per block — `set_macro_target` re-arms the
+/// block-rate smoother on each message, so a lane that is driven every block
+/// recomputes every block, forever.
+///
+/// This drives `apply_cc` — the exact main-loop API, routing through the
+/// shared `midi` module just like the firmware and the host harness — on
+/// track 0's filter-cutoff macro while all 8 tracks retrigger and the sends
+/// stay routed, the composite case the "remaining ~32%" gate in the plan is
+/// really about.
+fn measure_with_cc_automation(
+    engine: &mut DrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+) -> Stats {
+    use drum_engine::midi::{apply_cc, CC_TRACK_BASE};
+
+    // Punch in sends for tracks 1 and 4, mirroring `measure_with_fx`.
+    engine.tracks[1].strip.send_reverb = 0.5;
+    engine.tracks[4].strip.send_delay = 0.5;
+    let s1 = engine.tracks[1].strip;
+    let s4 = engine.tracks[4].strip;
+    engine.tracks[1].set_strip(&s1);
+    engine.tracks[4].set_strip(&s4);
+
+    let mut total: u64 = 0;
+    let mut peak: u32 = 0;
+
+    engine.process(left, right);
+
+    // One filter-cutoff automation lane (macro 12 → CC 32 on the track's
+    // channel). The value sweeps 0.1..0.9 in 1/127 steps — CC resolution,
+    // bouncing at the ends — so the smoother is re-armed and mid-ramp on
+    // every block, one recompute per block, exactly what a knob being spun
+    // in real time does.
+    let mut cc_val = 0.1f32;
+    let mut rising = true;
+
+    for _ in 0..RUNS {
+        let mut t = 0;
+        while t < TRACKS {
+            engine.trigger(t, 1.0);
+            t += 1;
+        }
+
+        apply_cc(engine, 0, CC_TRACK_BASE + 12, cc_val);
+        cc_val += if rising { 1.0 / 127.0 } else { -(1.0 / 127.0) };
+        if cc_val > 0.9 {
+            cc_val = 0.9;
+            rising = false;
+        } else if cc_val < 0.1 {
+            cc_val = 0.1;
+            rising = true;
+        }
+
+        let start = DWT::cycle_count();
+        engine.process(left, right);
+        let end = DWT::cycle_count();
+        let elapsed = end.wrapping_sub(start);
+
+        total += elapsed as u64;
+        if elapsed > peak {
+            peak = elapsed;
+        }
+
+        core::hint::black_box(&*left);
+        core::hint::black_box(&*right);
+    }
+
+    Stats {
+        avg: (total / RUNS as u64) as u32,
+        peak,
+    }
+}
+
 /// Same as `measure` for the 8-track case but isolates the FX cost when no
 /// sends are routed. The FX buses are constructed every block (zeroed send
 /// buffers + delay/reverb pre-process on silence) — this is the empty-FX
@@ -347,11 +449,7 @@ fn enable_cycle_counter() {
 }
 
 /// Block for roughly `ms`, pumping the USB poller so logs keep flowing.
-fn delay_blocking(
-    poller: &mut imxrt_log::Poller,
-    pit: &mut bsp::hal::pit::Pit<3>,
-    ms: u32,
-) {
+fn delay_blocking(poller: &mut imxrt_log::Poller, pit: &mut bsp::hal::pit::Pit<3>, ms: u32) {
     // PIT runs from the perclk root; board::PERCLK_FREQUENCY is the divisor
     // to use. Chunked so the poller runs often enough that USB does not stall.
     const CHUNK_MS: u32 = 10;

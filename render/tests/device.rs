@@ -140,6 +140,16 @@ fn daw_cc_reaches_the_track_macro_grid() {
 
     let mut engine = DrumEngine::new();
     handle_midi(&mut engine, ev);
+    // Track macros are block-rate smoothed (see the midi module docs): the
+    // base macro must not jump to the target instantly, so converge the
+    // smoother before asserting the final value.
+    assert!(
+        (engine.tracks[0].base_macros[3] - value).abs() > 0.3,
+        "CC should not apply instantly — it is block-rate smoothed"
+    );
+    for _ in 0..200 {
+        engine.tracks[0].control();
+    }
     assert_eq!(engine.tracks[0].base_macros[3], value);
 
     // Same CC on channel 3 edits track 3 only — channel scoping over the wire.
@@ -151,6 +161,9 @@ fn daw_cc_reaches_the_track_macro_grid() {
     };
     assert_eq!(channel, 3);
     handle_midi(&mut engine, ev);
+    for _ in 0..200 {
+        engine.tracks[3].control();
+    }
     assert_eq!(engine.tracks[3].base_macros[3], value);
     assert_eq!(
         engine.tracks[0].base_macros[3],
