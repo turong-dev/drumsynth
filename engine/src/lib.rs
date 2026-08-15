@@ -53,7 +53,7 @@ pub mod midi;
 
 pub use machines::{
     MachineId, MacroInfo, MACROS_PER_BANK, NUM_BANKS, NUM_MACROS, SLOT_LEVEL, SLOT_MACHINE,
-    SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 
 use dsp::{Lfo, ModDest};
@@ -98,6 +98,44 @@ pub const DENORMAL_FLOOR: f32 = 1.0e-9;
 /// a lot and need a known length.
 pub const TRACKS: usize = 8;
 
+/// Output pair a track routes to.
+///
+/// The engine has four stereo output pairs: the master mix (default) plus
+/// three stereo auxes. A track routed to an aux pair does *not* contribute
+/// to the master mix — its dry signal lands on that aux pair only. Sends
+/// still ride the shared send buses; the wet FX return always lands on the
+/// master pair (matches how hardware aux returns work: the FX lives on the
+/// mix bus, not the individual channel).
+///
+/// "Mono out" is a stereo pair with the track's strip pan set to one
+/// extreme and the consumer collapsing stereo→mono. There is no dedicated
+/// mono path — that's how real drum machines with stereo individual-outs
+/// do it too.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum OutPair {
+    /// Master mix — pair 0 (channels 0/1). Default for every track.
+    #[default]
+    Master,
+    /// Auxiliary output 1 — pair 1 (channels 2/3).
+    Aux1,
+    /// Auxiliary output 2 — pair 2 (channels 4/5).
+    Aux2,
+    /// Auxiliary output 3 — pair 3 (channels 6/7).
+    Aux3,
+}
+
+impl OutPair {
+    /// Pair index, `0..=3`. Master = 0, Aux1 = 1, Aux2 = 2, Aux3 = 3.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Master => 0,
+            Self::Aux1 => 1,
+            Self::Aux2 => 2,
+            Self::Aux3 => 3,
+        }
+    }
+}
+
 /// Per-track signal chain — everything but the machine itself.
 ///
 /// Applied in order: drive → filter → amp-envelope × pan × level. The amp
@@ -132,6 +170,9 @@ pub struct StripParams {
     pub send_delay: f32,
     /// Send level to the reverb bus, 0..1. Post-fader, like a mixer aux.
     pub send_reverb: f32,
+    /// Which output pair this track routes to. Tracks on a non-master pair
+    /// do not contribute to the master sum.
+    pub out: OutPair,
     /// Mask of track indices that this track *chokes* when triggered. Bit `1
     /// << i` set means triggering this track resets track `i` immediately
     /// (cutting its tail) — the OH-cuts-CH relation.
@@ -155,6 +196,7 @@ impl Default for StripParams {
             level: 1.0,
             send_delay: 0.0,
             send_reverb: 0.0,
+            out: OutPair::Master,
             choke_mask: 0,
             layer_mask: 0,
         }
@@ -525,6 +567,23 @@ impl Track {
             }
             return;
         }
+        // Output routing (MOD slot 26): quantise 0..1 onto the 4 `OutPair`
+        // variants and write `strip.out`. Same instant-jump discipline as
+        // the machine selector — routing is a discrete choice, smoothing
+        // it across blocks would route a track to a half-pair. Stores the
+        // quantised macro value back so MIDI feedback / round-trip reads
+        // return the canonical centre of the variant.
+        if idx == SLOT_OUT {
+            const PAIRS: [OutPair; 4] =
+                [OutPair::Master, OutPair::Aux1, OutPair::Aux2, OutPair::Aux3];
+            let i = (v * (PAIRS.len() - 1) as f32 + 0.5) as usize;
+            self.strip.out = PAIRS[i];
+            let q = i as f32 / (PAIRS.len() - 1) as f32;
+            self.base_macros[SLOT_OUT] = q;
+            self.macro_smooth[SLOT_OUT] = q;
+            self.macro_pending &= !(1 << SLOT_OUT);
+            return;
+        }
         self.base_macros[idx] = v;
         // Keep the CC smoother in sync: a direct set is the new current
         // value, and any pending ramp to a stale target is cancelled.
@@ -567,7 +626,7 @@ impl Track {
         if idx >= NUM_MACROS {
             return;
         }
-        if idx == SLOT_MACHINE {
+        if idx == SLOT_MACHINE || idx == SLOT_OUT {
             self.set_macro(idx, value);
             return;
         }
@@ -625,6 +684,13 @@ impl Track {
         let (l, r) = pan_law(self.strip.pan);
         self.pan_l = l;
         self.pan_r = r;
+        // Output routing is track-routed too (see `set_macro`): quantise the
+        // macro value over the 4 `OutPair` variants and store the quantised
+        // form back so round-trip reads return the canonical centre.
+        const PAIRS: [OutPair; 4] = [OutPair::Master, OutPair::Aux1, OutPair::Aux2, OutPair::Aux3];
+        let i = (all[SLOT_OUT] * (PAIRS.len() - 1) as f32 + 0.5) as usize;
+        self.strip.out = PAIRS[i];
+        self.base_macros[SLOT_OUT] = i as f32 / (PAIRS.len() - 1) as f32;
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
@@ -676,6 +742,11 @@ impl Track {
         // Mirror the strip pan into the PAN macro slot so a strip edit keeps
         // the macro view (MIDI CC 37) consistent, like the sends.
         self.base_macros[SLOT_PAN] = params.pan * 0.5 + 0.5;
+        // Mirror routing into the OUT macro slot (MIDI CC 46). Same shape as
+        // `set_macro(SLOT_OUT)`: the macro view shows the canonical centre
+        // of the variant, so MIDI feedback reports the value the user
+        // expects.
+        self.base_macros[SLOT_OUT] = params.out.index() as f32 / 3.0;
         if !self.mod_state.has_active_mod() {
             self.eff_drive = params.drive;
             self.eff_level = params.level;
@@ -1139,6 +1210,14 @@ impl DrumEngine {
     /// reverb) and the wet signal is summed into the master bus before the
     /// final safety clip.
     ///
+    /// This is the stereo-summed convenience wrapper around
+    /// [`Self::process_dry_wet`]: every track's dry pair is summed into
+    /// `out_l`/`out_r`, the wet FX return is mixed in post-FX-bus-drive,
+    /// and the final safety clip is applied. Routing each track to its own
+    /// physical output (DAW multi-out, future TDM/multi-DAC firmware) uses
+    /// [`Self::process_dry_wet`] directly — the inner `tick()` path is the
+    /// same, only the post-tick routing differs.
+    ///
     /// # Panics
     ///
     /// Debug builds assert both slices are exactly [`BLOCK`] long.
@@ -1146,10 +1225,76 @@ impl DrumEngine {
         debug_assert_eq!(out_l.len(), BLOCK, "left buffer must be BLOCK frames");
         debug_assert_eq!(out_r.len(), BLOCK, "right buffer must be BLOCK frames");
 
+        // Stack buses — no allocation. 6 mono aux + 2 mono wet = 2 KB.
+        let mut master_l = [0.0f32; BLOCK];
+        let mut master_r = [0.0f32; BLOCK];
+        let mut aux = [[0.0f32; BLOCK]; 6];
+        let mut wet_l = [0.0f32; BLOCK];
+        let mut wet_r = [0.0f32; BLOCK];
+        self.process_dry_wet(
+            &mut master_l,
+            &mut master_r,
+            &mut aux,
+            &mut wet_l,
+            &mut wet_r,
+        );
+
         let n = out_l.len().min(out_r.len()).min(BLOCK);
         let master = self.master_gain;
         let fx_drive = self.send_fx.drive;
 
+        // Re-apply the exact pre-refactor master chain: FX-bus drive on the
+        // wet, inner soft_clip per side, sum with the dry master, then master
+        // gain + final clip. Sourced from `master_*` (dry Master-routed
+        // tracks) and `wet_*` (shared FX return). Tracks routed to aux pairs
+        // do not reach this path — they live on `aux` and the multi-out
+        // caller handles them.
+        for i in 0..n {
+            let wet_l_clipped = dsp::fast::soft_clip(wet_l[i] * fx_drive);
+            let wet_r_clipped = dsp::fast::soft_clip(wet_r[i] * fx_drive);
+            out_l[i] = dsp::fast::soft_clip((master_l[i] + wet_l_clipped) * master);
+            out_r[i] = dsp::fast::soft_clip((master_r[i] + wet_r_clipped) * master);
+        }
+    }
+
+    /// Render one block into a master dry pair, three stereo aux pairs, and a
+    /// shared wet-FX return pair.
+    ///
+    /// The primitive [`process`](Self::process) wraps. Per-track routing is
+    /// by [`StripParams::out`]: tracks on [`OutPair::Master`] sum into
+    /// `master_l`/`master_r`; tracks on [`OutPair::Aux1`]..[`OutPair::Aux3`]
+    /// sum into the matching pair of `aux`. A track routed to an aux does
+    /// *not* contribute to the master dry sum — the routing is either/or.
+    ///
+    /// Sends still ride the shared send buses regardless of routing — a
+    /// track on Aux2 with `send_reverb = 0.5` still produces dry on Aux2
+    /// and its wet return lands on `wet_l`/`wet_r` (which the caller mixes
+    /// onto the master pair — matching how hardware aux returns work: the
+    /// FX lives on the mix bus, not the individual channel).
+    ///
+    /// All five outputs are pre-everything: no FX-bus drive, no master gain,
+    /// no master clip. The caller decides what drive/gain/clip to apply to
+    /// each pair. The stereo `process` wrapper applies the canonical chain
+    /// (fx_drive + inner clip on wet, master gain + final clip on the sum)
+    /// to the master pair only and discards the auxes.
+    ///
+    /// The engine *zeros* `master_l`, `master_r`, and `aux` on entry — callers can pass in
+    /// buffers reused across blocks without worrying about leftover state. The wet buses
+    /// are overwritten in place, so they need no pre-zero from the caller. Inactive tracks
+    /// contribute zero to every dry bus, so callers can sum naively without an `is_active`
+    /// check.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds assert `aux` is exactly 6 entries of [`BLOCK`] frames.
+    pub fn process_dry_wet(
+        &mut self,
+        master_l: &mut [f32; BLOCK],
+        master_r: &mut [f32; BLOCK],
+        aux: &mut [[f32; BLOCK]; 6],
+        wet_l: &mut [f32; BLOCK],
+        wet_r: &mut [f32; BLOCK],
+    ) {
         // 0. Drain the timed event queue. Events are sorted by offset and
         //    fired at the matching sample inside the block (step 2), so a
         //    note scheduled half-way through the block sounds half-way
@@ -1162,23 +1307,53 @@ impl DrumEngine {
             t.control();
         }
 
+        // Zero the dry-sum buses — the sample loop accumulates with `+=`,
+        // so caller-passed state would otherwise leak across blocks. The
+        // wet buses are overwritten in step 3 (not accumulated), so they
+        // need no pre-zero. Cost: 8 × BLOCK × 4 = 1 KB of memset per call.
+        // Trivial against the per-block cycle budget and removes a class
+        // of "did the caller pre-zero?" bugs from the primitive's contract.
+        for s in master_l.iter_mut() {
+            *s = 0.0;
+        }
+        for s in master_r.iter_mut() {
+            *s = 0.0;
+        }
+        for bus in aux.iter_mut() {
+            for s in bus.iter_mut() {
+                *s = 0.0;
+            }
+        }
+
         // Send buses (block-sized, cleared per block). The sends are tapped
         // post-fader/post-pan inside the sample loop, then routed through
-        // [`SendFx`] afterwards.
-        // Block-sized stack arrays — no allocation, fixed at compile time.
+        // [`SendFx`] afterwards. Block-sized stack arrays — no allocation,
+        // fixed at compile time.
         let mut send_dl = [0.0f32; BLOCK];
         let mut send_dr = [0.0f32; BLOCK];
         let mut send_rl = [0.0f32; BLOCK];
         let mut send_rr = [0.0f32; BLOCK];
 
-        // 2. Sample loop. Dry bus accumulates into out_*; sends accumulate
-        //    into the four block buses above. The dry bus is left un-clipped
-        //    until after the wet sum is mixed back, so the final clip is the
-        //    only protection stage (matching the contract from Phase 1).
-        for i in 0..n {
-            let mut sum_l = 0.0f32;
-            let mut sum_r = 0.0f32;
+        // Block-rate fast-path probe: if every track is on `Master` (the
+        // default — the common case for stereo use, single-I2S firmware,
+        // and `render device` without `--multi-out`), skip the per-sample
+        // `match strip.out` entirely. Branch is one compare per block
+        // instead of one match per sample per voice — measurably recovers
+        // the autovectorizer's tight `sum_l += l; sum_r += r` shape that
+        // the routing match was breaking (Phase 11 regate: -3.8pp on 8
+        // sounding without the fast path). Multi-out callers still get the
+        // general path; correctness is identical (both paths produce the
+        // same master dry sum and the same zero auxes when routing is all-
+        // Master).
+        let all_master = self.tracks.iter().all(|t| t.strip.out == OutPair::Master);
 
+        // 2. Sample loop. Per-track dry goes to its routed pair (master or
+        //    one of the three auxes); sends accumulate into the four block
+        //    buses. The two `t` loops are deliberate code duplication: the
+        //    fast path avoids the per-sample `match strip.out` and keeps the
+        //    `master_l += l` accumulator vectorizable, which the bench
+        //    showed is worth ~3pp of budget on an 8-voice block.
+        for i in 0..BLOCK {
             // Timed events for this sample. The queue is offset-sorted, so
             // each sample's events are contiguous.
             let mut k = 0;
@@ -1200,36 +1375,67 @@ impl DrumEngine {
                 k += 1;
             }
 
-            let mut t = 0;
-            while t < TRACKS {
-                if self.tracks[t].is_active() {
-                    let (l, r) = self.tracks[t].tick();
-                    sum_l += l;
-                    sum_r += r;
-                    let sd = self.tracks[t].eff_send_delay;
-                    let sr = self.tracks[t].eff_send_reverb;
-                    let dl = l * sd;
-                    let dr = r * sd;
-                    let rl = l * sr;
-                    let rr = r * sr;
-                    // Two accumulations per send per channel: keeps the
-                    // modulation cache read out of `eff_send_*` (set by
-                    // `control()` at block rate).
-                    send_dl[i] += dl;
-                    send_dr[i] += dr;
-                    send_rl[i] += rl;
-                    send_rr[i] += rr;
+            if all_master {
+                let mut t = 0;
+                while t < TRACKS {
+                    if self.tracks[t].is_active() {
+                        let (l, r) = self.tracks[t].tick();
+                        let sd = self.tracks[t].eff_send_delay;
+                        let sr = self.tracks[t].eff_send_reverb;
+                        send_dl[i] += l * sd;
+                        send_dr[i] += r * sd;
+                        send_rl[i] += l * sr;
+                        send_rr[i] += r * sr;
+                        master_l[i] += l;
+                        master_r[i] += r;
+                    }
+                    t += 1;
                 }
-                t += 1;
+            } else {
+                let mut t = 0;
+                while t < TRACKS {
+                    if self.tracks[t].is_active() {
+                        let (l, r) = self.tracks[t].tick();
+                        let sd = self.tracks[t].eff_send_delay;
+                        let sr = self.tracks[t].eff_send_reverb;
+                        // Sends accumulate regardless of routing — aux sends
+                        // ride the shared bus, the wet return lives on the
+                        // master pair (mixed in by the caller).
+                        send_dl[i] += l * sd;
+                        send_dr[i] += r * sd;
+                        send_rl[i] += l * sr;
+                        send_rr[i] += r * sr;
+                        match self.tracks[t].strip.out {
+                            OutPair::Master => {
+                                master_l[i] += l;
+                                master_r[i] += r;
+                            }
+                            OutPair::Aux1 => {
+                                aux[0][i] += l;
+                                aux[1][i] += r;
+                            }
+                            OutPair::Aux2 => {
+                                aux[2][i] += l;
+                                aux[3][i] += r;
+                            }
+                            OutPair::Aux3 => {
+                                aux[4][i] += l;
+                                aux[5][i] += r;
+                            }
+                        }
+                    }
+                    t += 1;
+                }
             }
-
-            out_l[i] = sum_l;
-            out_r[i] = sum_r;
         }
 
-        // 3. Send-FX pass. The wet buses accumulate into the dry bus
-        //    (out_*) along with FX-bus drive — both FX are summed through a
-        //    soft_clip each, then a master clip protects the final mix.
+        // 3. Send-FX pass. Wet buses carry delay + reverb summed per side,
+        //    pre-FX-bus-drive, pre-clip. The caller (stereo wrapper, DAW
+        //    multi-out rig, firmware TDM) applies drive/gain/clip per its
+        //    own routing policy — same arithmetic as the stereo `process`
+        //    master loop, but left to the routing stage so a DAW can drive
+        //    the wet return on its own channel and a future firmware multi-
+        //    out path can mix it into the master pair the same way.
         let mut wet_dl = [0.0f32; BLOCK];
         let mut wet_dr = [0.0f32; BLOCK];
         let mut wet_rl = [0.0f32; BLOCK];
@@ -1240,13 +1446,9 @@ impl DrumEngine {
         self.send_fx
             .reverb
             .process_block(&send_rl, &send_rr, &mut wet_rl, &mut wet_rr);
-
-        // 4. Master clip on the dry + wet sum.
-        for i in 0..n {
-            let wet_l = dsp::fast::soft_clip((wet_dl[i] + wet_rl[i]) * fx_drive);
-            let wet_r = dsp::fast::soft_clip((wet_dr[i] + wet_rr[i]) * fx_drive);
-            out_l[i] = dsp::fast::soft_clip((out_l[i] + wet_l) * master);
-            out_r[i] = dsp::fast::soft_clip((out_r[i] + wet_r) * master);
+        for i in 0..BLOCK {
+            wet_l[i] = wet_dl[i] + wet_rl[i];
+            wet_r[i] = wet_dr[i] + wet_rr[i];
         }
     }
 }
@@ -1643,9 +1845,9 @@ mod tests {
         e.load_sound(0, &sound);
         assert_eq!(e.tracks[0].id(), MachineId::BdFm);
         // Macros round-trip, except the MACH slot which always mirrors the
-        // loaded machine (BdFm = catalogue index 1 / 11).
+        // loaded machine (BdFm = catalogue index 1 / 14 at COUNT=15).
         let mut expected = [0.5; NUM_MACROS];
-        expected[SLOT_MACHINE] = 1.0 / 11.0;
+        expected[SLOT_MACHINE] = 1.0 / 14.0;
         assert_eq!(e.tracks[0].base_macros, expected);
         assert_eq!(e.tracks[0].strip.pan, 0.3);
         assert_eq!(e.tracks[0].strip.level, 0.6);
@@ -1656,23 +1858,83 @@ mod tests {
         let mut e = DrumEngine::new();
         assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
 
-        // 0.5 quantises onto the middle of the catalogue (index 5 = RS).
+        // 0.5 quantises onto the middle of the catalogue (index 7 = Cp at
+        // COUNT=15).
         e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
-        assert_eq!(e.tracks[0].id(), MachineId::Rs);
+        assert_eq!(e.tracks[0].id(), MachineId::Cp);
         // Macros reset to the new machine's defaults, MACH slot mirroring it.
-        assert_eq!(e.tracks[0].base_macros[SLOT_MACHINE], 5.0 / 11.0);
+        assert_eq!(e.tracks[0].base_macros[SLOT_MACHINE], 7.0 / 14.0);
 
         // Re-setting the same machine is a no-op (doesn't wipe macros).
         e.tracks[0].set_macro(SLOT_LEVEL, 0.5);
         e.tracks[0].set_macro(SLOT_PAN, 0.5);
         e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
-        assert_eq!(e.tracks[0].id(), MachineId::Rs);
+        assert_eq!(e.tracks[0].id(), MachineId::Cp);
         assert_eq!(e.tracks[0].base_macros[SLOT_LEVEL], 0.5);
         assert_eq!(e.tracks[0].base_macros[SLOT_PAN], 0.5);
 
         // Top of the range hits the last machine in the catalogue.
         e.tracks[0].set_macro(SLOT_MACHINE, 1.0);
-        assert_eq!(e.tracks[0].id(), MachineId::SyTone);
+        assert_eq!(e.tracks[0].id(), MachineId::SweepFx);
+    }
+
+    /// Output routing (SLOT_OUT) quantises 0..1 over the 4 `OutPair`
+    /// variants, sets `strip.out`, and writes the quantised value back so
+    /// round-trip reads return the canonical centre. Instant under CC
+    /// (`set_macro_target`) and `set_macros` (bulk replace) — same
+    /// discipline as the machine selector.
+    #[test]
+    fn out_macro_quantises_and_round_trips() {
+        let mut e = DrumEngine::new();
+        // Default routing is Master (OUT macro = 0.0).
+        assert_eq!(e.tracks[0].strip.out, OutPair::Master);
+        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 0.0);
+
+        // 0.0 → Master, 0.34 → Aux1, 0.67 → Aux2, 1.0 → Aux3. The quantise
+        // centres at 0.0, 1/3, 2/3, 1.0 and writes that canonical value
+        // back.
+        for (input, expected_pair, expected_q) in [
+            (0.0f32, OutPair::Master, 0.0f32),
+            (0.34, OutPair::Aux1, 1.0 / 3.0),
+            (0.67, OutPair::Aux2, 2.0 / 3.0),
+            (1.0, OutPair::Aux3, 1.0),
+        ] {
+            e.tracks[0].set_macro(SLOT_OUT, input);
+            assert_eq!(
+                e.tracks[0].strip.out, expected_pair,
+                "macro {input} routed to wrong pair"
+            );
+            assert_eq!(
+                e.tracks[0].base_macros[SLOT_OUT], expected_q,
+                "macro {input} did not quantise-back to {expected_q}"
+            );
+        }
+
+        // `set_macro_target` jumps instantly — no smoothing.
+        e.tracks[0].macro_pending = !0; // poison: any pending should be cleared
+        e.tracks[0].set_macro_target(SLOT_OUT, 1.0);
+        assert_eq!(e.tracks[0].strip.out, OutPair::Aux3);
+        assert_eq!(
+            e.tracks[0].macro_pending & (1 << SLOT_OUT),
+            0,
+            "SLOT_OUT left pending"
+        );
+
+        // `set_macros` (bulk) applies routing too.
+        let mut all = e.tracks[0].base_macros;
+        all[SLOT_OUT] = 0.34; // Aux1
+        e.tracks[0].set_macros(&all);
+        assert_eq!(e.tracks[0].strip.out, OutPair::Aux1);
+        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 1.0 / 3.0);
+
+        // `set_strip` mirror: editing routing via the strip (e.g. a Sound
+        // carrying `out`) writes the canonical macro value back so MIDI
+        // feedback reports the in-use pair.
+        let mut strip = e.tracks[0].strip;
+        strip.out = OutPair::Aux2;
+        e.tracks[0].set_strip(&strip);
+        assert_eq!(e.tracks[0].strip.out, OutPair::Aux2);
+        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 2.0 / 3.0);
     }
 
     #[test]
@@ -2139,5 +2401,344 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `process_dry_wet` + manual sum/master should produce bit-identical
+    /// output to `process`. This is the contract that lets host multi-out
+    /// mode use `process_dry_wet` while stereo mode keeps using `process`
+    /// without having to keep two parallel mixing implementations honest.
+    #[test]
+    fn process_dry_wet_matches_process_when_summed() {
+        let mut a = DrumEngine::new();
+        let mut b = DrumEngine::new();
+        // Identical setup including a trigger so we exercise the wet path
+        // (the send buses are otherwise silent) and the dry path together.
+        a.trigger(0, 1.0);
+        b.trigger(0, 1.0);
+        // Drive a send so the wet bus is non-trivial: clone the strip send
+        // config so both engines see the same routing.
+        a.tracks[0].strip.send_reverb = 0.5;
+        b.tracks[0].strip.send_reverb = 0.5;
+        {
+            let strip = a.tracks[0].strip;
+            a.tracks[0].set_strip(&strip);
+            let strip = b.tracks[0].strip;
+            b.tracks[0].set_strip(&strip);
+        }
+
+        let master = a.master_gain;
+        let fx_drive = a.send_fx.drive;
+
+        for _ in 0..64 {
+            // Stereo reference via `process`.
+            let mut l_ref = [0.0f32; BLOCK];
+            let mut r_ref = [0.0f32; BLOCK];
+            a.process(&mut l_ref, &mut r_ref);
+
+            // Multi-out primitive, then re-apply the exact `process` master
+            // chain (FX-bus drive + inner clip on wet, then sum with the dry
+            // master, then master gain + final clip). All tracks default to
+            // `OutPair::Master`, so the auxes stay silent and the master dry
+            // carries the same sum `process` would have inlined.
+            let mut master_l = [0.0f32; BLOCK];
+            let mut master_r = [0.0f32; BLOCK];
+            let mut aux = [[0.0f32; BLOCK]; 6];
+            let mut wet_l = [0.0f32; BLOCK];
+            let mut wet_r = [0.0f32; BLOCK];
+            b.process_dry_wet(
+                &mut master_l,
+                &mut master_r,
+                &mut aux,
+                &mut wet_l,
+                &mut wet_r,
+            );
+            let mut l_multi = [0.0f32; BLOCK];
+            let mut r_multi = [0.0f32; BLOCK];
+            for i in 0..BLOCK {
+                let wet_l_clipped = dsp::fast::soft_clip(wet_l[i] * fx_drive);
+                let wet_r_clipped = dsp::fast::soft_clip(wet_r[i] * fx_drive);
+                l_multi[i] = dsp::fast::soft_clip((master_l[i] + wet_l_clipped) * master);
+                r_multi[i] = dsp::fast::soft_clip((master_r[i] + wet_r_clipped) * master);
+            }
+
+            for i in 0..BLOCK {
+                assert_eq!(
+                    l_ref[i].to_bits(),
+                    l_multi[i].to_bits(),
+                    "L diverged at sample {i}: process vs process_dry_wet+sum"
+                );
+                assert_eq!(
+                    r_ref[i].to_bits(),
+                    r_multi[i].to_bits(),
+                    "R diverged at sample {i}: process vs process_dry_wet+sum"
+                );
+            }
+            // Default routing → all auxes must be silent throughout.
+            for (t, bus) in aux.iter().enumerate() {
+                for s in bus {
+                    assert_eq!(
+                        *s, 0.0,
+                        "aux bus {t} should be silent under default routing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Triggering track `t` with default routing puts signal only on the
+    /// master dry pair. Every aux bus is silent. This pins the default
+    /// routing contract.
+    #[test]
+    fn process_dry_wet_default_routes_to_master() {
+        let mut e = DrumEngine::new();
+        e.trigger(3, 1.0); // track 3 = HH Basic in the default kit
+
+        let mut master_l = [0.0f32; BLOCK];
+        let mut master_r = [0.0f32; BLOCK];
+        let mut aux = [[0.0f32; BLOCK]; 6];
+        let mut wet_l = [0.0f32; BLOCK];
+        let mut wet_r = [0.0f32; BLOCK];
+
+        let mut master_energy = 0.0f32;
+        let mut aux_energy = 0.0f32;
+        for _ in 0..32 {
+            e.process_dry_wet(
+                &mut master_l,
+                &mut master_r,
+                &mut aux,
+                &mut wet_l,
+                &mut wet_r,
+            );
+            for i in 0..BLOCK {
+                master_energy += master_l[i] * master_l[i] + master_r[i] * master_r[i];
+            }
+            for bus in &aux {
+                for s in bus {
+                    aux_energy += s * s;
+                }
+            }
+        }
+
+        assert!(
+            master_energy > 0.0,
+            "master dry was silent under default routing"
+        );
+        assert_eq!(aux_energy, 0.0, "auxes not silent under default routing");
+    }
+
+    /// Routing a track to `OutPair::Aux2` puts its dry signal on aux buses
+    /// 2 and 3 only — *not* on the master dry pair. This pins the either/
+    /// or routing contract: a track on an aux does not contribute to the
+    /// master mix.
+    #[test]
+    fn process_dry_wet_aux_routing_excludes_master() {
+        let mut e = DrumEngine::new();
+        e.trigger(2, 1.0); // track 2 = HatClassic
+        e.tracks[2].strip.out = OutPair::Aux2;
+        // Push the strip through `set_strip` so any cached state stays
+        // consistent — `out` is read directly in the sample loop, so no
+        // extra recomputation is needed, but mirroring the device-mode
+        // workflow keeps the test honest if caching changes later.
+        let strip = e.tracks[2].strip;
+        e.tracks[2].set_strip(&strip);
+
+        let mut master_l = [0.0f32; BLOCK];
+        let mut master_r = [0.0f32; BLOCK];
+        let mut aux = [[0.0f32; BLOCK]; 6];
+        let mut wet_l = [0.0f32; BLOCK];
+        let mut wet_r = [0.0f32; BLOCK];
+
+        let mut aux2_energy = 0.0f32;
+        let mut other_aux_energy = 0.0f32;
+        let mut master_dry_energy = 0.0f32;
+        for _ in 0..32 {
+            e.process_dry_wet(
+                &mut master_l,
+                &mut master_r,
+                &mut aux,
+                &mut wet_l,
+                &mut wet_r,
+            );
+            for i in 0..BLOCK {
+                master_dry_energy += master_l[i] * master_l[i] + master_r[i] * master_r[i];
+            }
+            // Aux2 = buses 2 and 3.
+            aux2_energy += aux[2].iter().map(|s| s * s).sum::<f32>();
+            aux2_energy += aux[3].iter().map(|s| s * s).sum::<f32>();
+            // The other four aux buses (Aux1 and Aux3) must be silent.
+            for t in [0, 1, 4, 5] {
+                other_aux_energy += aux[t].iter().map(|s| s * s).sum::<f32>();
+            }
+        }
+
+        assert!(
+            aux2_energy > 0.0,
+            "Aux2 pair was silent for a track routed to Aux2"
+        );
+        assert_eq!(
+            other_aux_energy, 0.0,
+            "non-Aux2 auxes carried signal — routing leaked"
+        );
+        assert_eq!(
+            master_dry_energy, 0.0,
+            "master dry carried signal from an Aux2-routed track — routing is not either/or"
+        );
+    }
+
+    /// Inactive tracks contribute nothing to every bus — callers pre-zero
+    /// the dry buses (the `process` wrapper does this via `[0.0f32; BLOCK]`
+    /// array init) and `process_dry_wet` only adds the active tracks'
+    /// contributions. The wet buses are *produced* by the FX processor, not
+    /// summed from caller state — so they come back exactly zero on a
+    /// silent engine regardless of what the caller passed in.
+    #[test]
+    fn process_dry_wet_writes_zero_for_inactive_tracks() {
+        let mut e = DrumEngine::new();
+        // No trigger: every track is idle.
+
+        // Pre-zero the dry buses (master + aux) — caller responsibility.
+        let mut master_l = [0.0f32; BLOCK];
+        let mut master_r = [0.0f32; BLOCK];
+        let mut aux = [[0.0f32; BLOCK]; 6];
+        // Poison the wet buses: they are FX *outputs*, the engine writes
+        // every sample, so poisoning proves the engine doesn't read from
+        // them.
+        let mut wet_l = [0.5f32; BLOCK];
+        let mut wet_r = [0.5f32; BLOCK];
+        e.process_dry_wet(
+            &mut master_l,
+            &mut master_r,
+            &mut aux,
+            &mut wet_l,
+            &mut wet_r,
+        );
+
+        for s in &master_l {
+            assert_eq!(*s, 0.0, "master_l accumulated signal from idle tracks");
+        }
+        for s in &master_r {
+            assert_eq!(*s, 0.0, "master_r accumulated signal from idle tracks");
+        }
+        for (t, bus) in aux.iter().enumerate() {
+            for s in bus {
+                assert_eq!(*s, 0.0, "aux bus {t} accumulated signal from idle tracks");
+            }
+        }
+        // The wet return on a freshly-initialised silent engine is exactly
+        // zero — the FX tanks ring out only if something was sent to them.
+        for s in &wet_l {
+            assert_eq!(*s, 0.0, "wet_l not zero on a silent engine");
+        }
+        for s in &wet_r {
+            assert_eq!(*s, 0.0, "wet_r not zero on a silent engine");
+        }
+    }
+
+    /// `process_dry_wet` zeros its dry-sum buses on entry. Regression test
+    /// for the BlackHole feedback-loop bug: the host `device --multi-out`
+    /// mode reuses the same buffer set across audio callbacks, and a
+    /// primitive that only accumulated (not zeroed-then-summed) would
+    /// spiral upward block-on-block until the aux channels (which have no
+    /// clipper on the multi-out path) pegged any downstream meter.
+    #[test]
+    fn process_dry_wet_zeros_dry_buses_on_every_call() {
+        let mut e = DrumEngine::new();
+        e.trigger(0, 1.0);
+        e.tracks[0].strip.send_reverb = 0.5;
+        let strip = e.tracks[0].strip;
+        e.tracks[0].set_strip(&strip);
+
+        // Buffers reused across blocks, exactly like device.rs.
+        let mut master_l = [0.0f32; BLOCK];
+        let mut master_r = [0.0f32; BLOCK];
+        let mut aux = [[0.0f32; BLOCK]; 6];
+        let mut wet_l = [0.0f32; BLOCK];
+        let mut wet_r = [0.0f32; BLOCK];
+
+        // Block 1: record the peak across every dry bus.
+        e.process_dry_wet(
+            &mut master_l,
+            &mut master_r,
+            &mut aux,
+            &mut wet_l,
+            &mut wet_r,
+        );
+        let block1_master_peak = master_l
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max)
+            .max(master_r.iter().cloned().fold(0.0f32, f32::max));
+        let block1_aux_peak = aux
+            .iter()
+            .map(|b| b.iter().cloned().fold(0.0f32, f32::max))
+            .fold(0.0f32, f32::max);
+        // No track routed to an aux on the default kit, so aux stays zero.
+        assert_eq!(
+            block1_aux_peak, 0.0,
+            "auxes not silent under default routing"
+        );
+
+        // Block 2: same buffers, no fresh zero from the caller. If the
+        // primitive doesn't internally zero, the second call's master bus
+        // will be roughly 2× block 1's, then block 3 ~3×, etc. Run 64
+        // blocks and check the master stays bounded rather than running
+        // away.
+        let mut max_seen = 0.0f32;
+        for _ in 0..64 {
+            e.process_dry_wet(
+                &mut master_l,
+                &mut master_r,
+                &mut aux,
+                &mut wet_l,
+                &mut wet_r,
+            );
+            let peak = master_l
+                .iter()
+                .cloned()
+                .fold(0.0f32, f32::max)
+                .max(master_r.iter().cloned().fold(0.0f32, f32::max));
+            max_seen = max_seen.max(peak);
+        }
+        // There is no track routed to an aux by default, so the bounded-
+        // master-only assertion is enough. The block1 peak itself was
+        // near unity (a 1.0-velocity kick), so a 10× ceiling is generous
+        // against ~64 hit tail-offs that the engine would naturally
+        // produce if accumulation were happening — but tight enough that
+        // accumulation past a couple of blocks would blow it.
+        assert!(
+            max_seen <= 10.0,
+            "master dry accumulated across blocks — internal zero missing? peak={max_seen}"
+        );
+        assert!(
+            max_seen <= block1_master_peak * 2.0 + 1.0,
+            "master dry grew unboundedly across blocks: block1={block1_master_peak}, max={max_seen}"
+        );
+
+        // Same guarantee for the auxes when a track actually routes there.
+        e.tracks[2].strip.out = OutPair::Aux2;
+        let strip = e.tracks[2].strip;
+        e.tracks[2].set_strip(&strip);
+        e.trigger(2, 1.0);
+
+        let mut aux2_max = 0.0f32;
+        for _ in 0..32 {
+            e.process_dry_wet(
+                &mut master_l,
+                &mut master_r,
+                &mut aux,
+                &mut wet_l,
+                &mut wet_r,
+            );
+            let aux2_peak = aux[2]
+                .iter()
+                .cloned()
+                .fold(0.0f32, f32::max)
+                .max(aux[3].iter().cloned().fold(0.0f32, f32::max));
+            aux2_max = aux2_max.max(aux2_peak);
+        }
+        assert!(
+            aux2_max <= 10.0,
+            "aux2 dry accumulated across blocks (no clipper on multi-out aux path): peak={aux2_max}"
+        );
     }
 }

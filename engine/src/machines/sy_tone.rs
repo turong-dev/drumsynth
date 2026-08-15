@@ -29,8 +29,8 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_MOD_AMOUNT, SLOT_MOD_ENV, SLOT_SWEEP,
-    SLOT_SWEEP_TIME, SLOT_TUNE,
+    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_MOD_AMOUNT, SLOT_MOD_ENV, SLOT_SWEEP, SLOT_SWEEP_TIME,
+    SLOT_TUNE,
 };
 use crate::SAMPLE_RATE;
 

@@ -90,10 +90,12 @@ impl Tom {
             .set_coeff(decay_coeff(amp_decay_s, SAMPLE_RATE));
         self.pitch_env
             .set_coeff(decay_coeff(pitch_decay_s, SAMPLE_RATE));
-        // The stick click is very short — 3..8 ms — and highpassed so it
-        // reads as a stick slap rather than a cymbal tick.
+        // The stick click is short — 5..50 ms — and highpassed so it
+        // reads as a stick slap rather than a cymbal tick. The decay tracks
+        // the STICK amount, so a higher knob both raises the click and
+        // lengthens it.
         self.stick_env
-            .set_coeff(decay_coeff(0.003 + 0.005 * stick_amount, SAMPLE_RATE));
+            .set_coeff(decay_coeff(0.005 + 0.045 * stick_amount, SAMPLE_RATE));
         self.hp.set_coeff(cutoff_coeff(3000.0, SAMPLE_RATE));
     }
 
@@ -159,7 +161,7 @@ impl Tom {
 
         // Crossfade: stick_amount controls how present the click is; body is
         // always the dominant element. No drive — the body stays clean.
-        let mixed = body + stick * self.stick_amount * 0.5;
+        let mixed = body + stick * self.stick_amount * 1.25;
         mixed * self.level
     }
 }

@@ -609,7 +609,8 @@ mod tests {
         let mut e = DrumEngine::new();
         assert_eq!(e.tracks[0].id(), crate::MachineId::BdClassic);
 
-        // CC 25 = CC_TRACK_BASE + SLOT_MACHINE (PITCH slot 5). 0.5 → index 5.
+        // CC 25 = CC_TRACK_BASE + SLOT_MACHINE (PITCH slot 5). 0.5 → index 7
+        // (Cp, at COUNT=15).
         handle_midi(
             &mut e,
             MidiEvent::ControlChange {
@@ -620,7 +621,7 @@ mod tests {
         );
         assert_eq!(
             e.tracks[0].id(),
-            crate::MachineId::Rs,
+            crate::MachineId::Cp,
             "CC 25 must swap the engine on the track's channel"
         );
 
@@ -633,10 +634,10 @@ mod tests {
                 value: 1.0,
             },
         );
-        assert_eq!(e.tracks[1].id(), crate::MachineId::SyTone);
+        assert_eq!(e.tracks[1].id(), crate::MachineId::SweepFx);
         assert_eq!(
             e.tracks[0].id(),
-            crate::MachineId::Rs,
+            crate::MachineId::Cp,
             "channel 1 must not touch track 0"
         );
     }

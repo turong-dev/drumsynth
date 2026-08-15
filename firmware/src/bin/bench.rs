@@ -29,7 +29,8 @@
 //! 8 sounding ...                                  (worst case, no FX)
 //! fx idle  ...                                    (FX advanced, no sends)
 //! 8 + FX   ...                                    (worst case with delay + reverb)
-//! 8+FX+CC  ...                                    (…plus a CC automation lane)
+//! 8+FX+CC   ...                                    (…plus a CC automation lane)
+//! 8+FX+SWFX ...  (Phase 12: one track a sustained SweepFx, worst case)
 //! ```
 //!
 //! Three numbers per scenario: idle (loaded kit, nothing sounding), 3-voice
@@ -48,6 +49,22 @@
 //! the exact main-loop API — every block on top of the full playing + FX
 //! case, so the number it reports is what the Deluge actually asks for.
 //!
+//! `8 + BD VA` is the Phase 11 regate: track 0 swapped to the virtual-analogue
+//! bridged-T kick, configured for its worst case — full pitch sweep, deep
+//! decay, high Q — to expose `BridgedT::set_coeffs`'s per-sample divide + two
+//! `fast::sin_turns` lookups. This is the path that could blow the budget if
+//! Option A (per-sample retune) turns out wrong; the bench is what gates the
+//! decision.
+//!
+//! `8+FX+SWFX` is the Phase 12 regate: the same 8-track + send-FX load, but
+//! track 0 swapped to SweepFx sustaining its heaviest gesture — max sweep
+//! depth, high resonance, HP mode. Two things are new in the budget model:
+//! the per-sample `Svf::recalc` + `fast::exp2_approx` while the LFO moves the
+//! cutoff (the SVF cost the strip only pays under modulation), and the fact
+//! that a sustained machine defeats the per-track idle early-out for its whole
+//! gesture — a kit with a sweep-FX track idles at "7 idle + 1 sounding" rather
+//! than "8 idle".
+//!
 //! Before the sine-table swap in `engine::dsp::fast`, the 3-voice
 //! predecessor measured 125,907 cycles (31.5% of budget), ~90% of it inside
 //! `libm::sinf`.
@@ -62,6 +79,9 @@
 use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
+use drum_engine::machines::{
+    MachineId, SLOT_DECAY, SLOT_LPF, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME,
+};
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -102,11 +122,26 @@ fn main() -> ! {
     // serial port wondering why.
     let led = board::led(&mut gpio2, pins.p13);
 
-    let (_, _, _, mut pit3) = pit;
+    let mut pit = pit;
     let mut poller = imxrt_log::log::usbd(usb, imxrt_log::Interrupts::Disabled)
         .expect("failed to bring up USB logging");
 
     enable_cycle_counter();
+
+    // FPSCR.FZ — flush denormals to zero, matching `main.rs`. The bench
+    // otherwise leaves denormals in play, and the send-FX tanks are the one
+    // place values decay freely below the engine's `DENORMAL_FLOOR`: on the
+    // M7 VFP a subnormal result takes the slow trap path (~20-30 cycles), so
+    // "8 FX idle" (tanks on exact zeros) vs "8 + FX" (tanks on real signal)
+    // diverge by hundreds of cycles *solely because FZ is unset*. The
+    // firmware never sees this — `main.rs` sets FZ at init.
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut fpscr: u32;
+        core::arch::asm!("vmrs {}, fpscr", out(reg) fpscr);
+        fpscr |= 1 << 24; // FZ
+        core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
+    }
 
     // Initialize the engine in OCRAM via `new_in_place`, not `p.write(DrumEngine::new())`.
     // The latter still has to build `DrumEngine::new()`'s ~266 KB return
@@ -129,7 +164,7 @@ fn main() -> ! {
 
     // Give the host a moment to enumerate and for you to attach a terminal.
     // Without this you miss the header every time.
-    delay_blocking(&mut poller, &mut pit3, 3_000);
+    delay_blocking(&mut poller, &mut pit, 3_000);
 
     log::info!("");
     log::info!("drum-engine cycle bench — {} tracks", TRACKS);
@@ -164,6 +199,11 @@ fn main() -> ! {
         // case. The FX themselves are advanced every block regardless of
         // whether sends are routed, so "fx idle" isolates the per-block
         // bookkeeping cost of having FX in the engine.
+        //
+        // Each scenario sets and restores its own send state via `set_send`
+        // — `eff_send_*` survives `panic()`/`reset()`, so without explicit
+        // handling the first `measure_with_fx` would leave tracks 1/4
+        // routed in every scenario of every later loop iteration.
         let fx_idle = measure_fxeffect_only(&mut *engine, &mut left, &mut right, TRACKS);
         report("8 FX idle ", fx_idle);
 
@@ -179,9 +219,29 @@ fn main() -> ! {
         let with_cc = measure_with_cc_automation(&mut *engine, &mut left, &mut right);
         report("8+FX+CC   ", with_cc);
 
+        // --- Phase 11 regate: 8 tracks with BdVa on track 0, worst case ---
+        // Swap track 0 (BdClassic in the default kit) for BdVa configured
+        // for its heaviest path — full pitch sweep (SLOT_SWEEP=1), deep
+        // decay (SLOT_DECAY=1), max Q (SLOT_LPF=1). This forces
+        // `BridgedT::set_coeffs` to execute every sample with the maximum
+        // pitch deflection (the full 0..120 Hz sweep range active), which
+        // is the Option A path the Plan flagged as bench-gated. Every
+        // other track keeps its default kit machine so the scenario is
+        // comparable to "8 sounding" with one track substituted.
+        let bdva = measure_with_bdva(&mut *engine, &mut left, &mut right);
+        report("8 + BD VA ", bdva);
+
+        // --- Phase 12 regate: one track sustaining a SweepFx gesture ---
+        // The 8-track + send-FX load with track 0 swapped to SweepFx at its
+        // heaviest sustained config. The gesture is long (6 s DEC), so the
+        // machine stays `is_active()` across the whole measurement — the
+        // sustained-load caveat the Phase 12 plan adds to the budget model.
+        let swfx = measure_with_sweepfx_sustained(&mut *engine, &mut left, &mut right);
+        report("8+FX+SWFX ", swfx);
+
         log::info!("");
         poller.poll();
-        delay_blocking(&mut poller, &mut pit3, 2_000);
+        delay_blocking(&mut poller, &mut pit, 2_000);
     }
 }
 
@@ -243,9 +303,25 @@ fn measure(
     }
 }
 
+/// Set a track's delay/reverb send levels, refreshing the engine's
+/// `eff_send_*` caches via `set_strip`. Writing `strip.send_*` directly is
+/// not enough — `process_dry_wet` reads the cached `eff_send_*` values, which
+/// are only re-derived by `set_strip` (or the macro path). Every scenario
+/// uses this so its send state is explicit and self-contained; without it a
+/// prior scenario's sends leak into every later measurement.
+fn set_send(engine: &mut DrumEngine, track: usize, delay: f32, reverb: f32) {
+    engine.tracks[track].strip.send_delay = delay;
+    engine.tracks[track].strip.send_reverb = reverb;
+    let s = engine.tracks[track].strip;
+    engine.tracks[track].set_strip(&s);
+}
+
 /// Same as `measure` but with all 8 tracks retriggered and the send-FX
 /// buses punched in: track 1 → reverb, track 4 → delay. This is the
 /// realistic Phase 5 worst case: dry path + delay line + plate tank.
+///
+/// Restores the default (dry) sends on the way out — `eff_send_*` otherwise
+/// persists on the track, silently routing FX in every later scenario.
 fn measure_with_fx(
     engine: &mut DrumEngine,
     left: &mut [f32; BLOCK],
@@ -253,12 +329,8 @@ fn measure_with_fx(
 ) -> Stats {
     // Punch in sends for tracks 1 and 4. `set_strip` refreshes the cache.
     // Snare (1) → reverb, Clap (4) → delay. The other tracks stay dry.
-    engine.tracks[1].strip.send_reverb = 0.5;
-    engine.tracks[4].strip.send_delay = 0.5;
-    let s1 = engine.tracks[1].strip;
-    let s4 = engine.tracks[4].strip;
-    engine.tracks[1].set_strip(&s1);
-    engine.tracks[4].set_strip(&s4);
+    set_send(engine, 1, 0.0, 0.5);
+    set_send(engine, 4, 0.5, 0.0);
 
     let mut total: u64 = 0;
     let mut peak: u32 = 0;
@@ -285,6 +357,9 @@ fn measure_with_fx(
         core::hint::black_box(&*left);
         core::hint::black_box(&*right);
     }
+
+    set_send(engine, 1, 0.0, 0.0);
+    set_send(engine, 4, 0.0, 0.0);
 
     Stats {
         avg: (total / RUNS as u64) as u32,
@@ -314,12 +389,8 @@ fn measure_with_cc_automation(
     use drum_engine::midi::{apply_cc, CC_TRACK_BASE};
 
     // Punch in sends for tracks 1 and 4, mirroring `measure_with_fx`.
-    engine.tracks[1].strip.send_reverb = 0.5;
-    engine.tracks[4].strip.send_delay = 0.5;
-    let s1 = engine.tracks[1].strip;
-    let s4 = engine.tracks[4].strip;
-    engine.tracks[1].set_strip(&s1);
-    engine.tracks[4].set_strip(&s4);
+    set_send(engine, 1, 0.0, 0.5);
+    set_send(engine, 4, 0.5, 0.0);
 
     let mut total: u64 = 0;
     let mut peak: u32 = 0;
@@ -365,23 +436,183 @@ fn measure_with_cc_automation(
         core::hint::black_box(&*right);
     }
 
+    set_send(engine, 1, 0.0, 0.0);
+    set_send(engine, 4, 0.0, 0.0);
+
     Stats {
         avg: (total / RUNS as u64) as u32,
         peak,
     }
 }
 
+/// Phase 11 regate: track 0 swapped to `BdVa` configured for its heaviest
+/// path — full sweep, deep decay, max Q. Exposes `BridgedT::set_coeffs`
+/// running per-sample (Option A from `PLAN.md` Phase 11): two
+/// `fast::sin_turns` lookups plus a divide every sample. The bench-gate
+/// decision is whether this fits in the remaining headroom; if not, the
+/// plan calls for splitting static/moving coefficients (Option B).
+///
+/// Restores the default kit on track 0 after the run so subsequent loops
+/// see the unchanged engine.
+fn measure_with_bdva(
+    engine: &mut DrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+) -> Stats {
+    // Save the original track-0 machine so we can restore it on the way out
+    // — the next loop iteration expects the default kit.
+    let original = engine.tracks[0].id();
+
+    // Swap to BdVa and configure the worst case. Macros applied via
+    // `set_macro` so the strip and the engine both see the change.
+    engine.tracks[0].load_machine(MachineId::BdVa);
+    engine.tracks[0].set_macro(SLOT_SWEEP, 1.0); // 0..120 Hz pitch deflection
+    engine.tracks[0].set_macro(SLOT_SWEEP_TIME, 1.0); // 55 ms (sustains the sweep)
+    engine.tracks[0].set_macro(SLOT_DECAY, 1.0); // 1500 ms amp decay
+    engine.tracks[0].set_macro(SLOT_LPF, 1.0); // Q = 10 (max resonance)
+
+    let mut total: u64 = 0;
+    let mut peak: u32 = 0;
+
+    engine.process(left, right);
+
+    for _ in 0..RUNS {
+        // All 8 tracks retriggered — same load as the "8 sounding" scenario
+        // so the delta vs that row is exactly the BdVa-per-sample cost on
+        // track 0, no other variable.
+        let mut t = 0;
+        while t < TRACKS {
+            engine.trigger(t, 1.0);
+            t += 1;
+        }
+
+        let start = DWT::cycle_count();
+        engine.process(left, right);
+        let end = DWT::cycle_count();
+        let elapsed = end.wrapping_sub(start);
+
+        total += elapsed as u64;
+        if elapsed > peak {
+            peak = elapsed;
+        }
+
+        core::hint::black_box(&*left);
+        core::hint::black_box(&*right);
+    }
+
+    // Restore the original track-0 machine so the next loop's scenarios see
+    // the unmodified kit.
+    engine.tracks[0].load_machine(original);
+
+    Stats {
+        avg: (total / RUNS as u64) as u32,
+        peak,
+    }
+}
+
+/// The Phase 12 regate: the 8-track + send-FX load, but track 0 holds a
+/// SweepFx machine sustaining its heaviest gesture.
+///
+/// The sustained-load caveat the Phase 12 plan adds to the budget model: a
+/// sustained machine defeats the per-track idle early-out for its whole
+/// gesture, so a kit with a sweep-FX track idles at "7 idle + 1 sounding"
+/// rather than "8 idle". This scenario measures that number directly — all 8
+/// tracks active, track 0 running the worst-case SVF path (max sweep depth,
+/// high resonance, HP mode, the per-sample `Svf::recalc` + `exp2_approx` the
+/// strip only pays under modulation) while the sends are routed.
+///
+/// The gesture is long (max DEC ≈ 6 s), so track 0 stays `is_active()` for
+/// the whole run rather than retriggering — the engine's `trigger` on that
+/// track would otherwise just restart the AHD and the measurement would
+/// silently fall back to the one-shot load.
+fn measure_with_sweepfx_sustained(
+    engine: &mut DrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+) -> Stats {
+    // Save the original track-0 machine so we can restore it on the way out.
+    let original = engine.tracks[0].id();
+
+    // Swap to SweepFx at its heaviest sustained config: max sweep depth
+    // (DEPTH=1, 4 octaves), high resonance (RESO=1, Q≈8), HP mode
+    // (MODE=1), start cutoff at the top of its range (START=1, 8 kHz),
+    // and a long gesture (DEC=1, ≈6 s) so it never idles mid-run.
+    engine.tracks[0].load_machine(MachineId::SweepFx);
+    engine.tracks[0].set_macro(SLOT_SWEEP, 1.0); // DEPTH 4 oct
+    engine.tracks[0].set_macro(SLOT_LPF, 1.0); // RESO Q≈8
+    engine.tracks[0].set_macro(SLOT_SHAPE, 1.0); // MODE HP
+    engine.tracks[0].set_macro(SLOT_SWEEP_TIME, 1.0); // START 8 kHz
+    engine.tracks[0].set_macro(SLOT_DECAY, 1.0); // DEC ≈6 s gesture
+
+    // Punch in the same sends as the other FX scenarios: snare (1) →
+    // reverb, clap (4) → delay.
+    set_send(engine, 1, 0.0, 0.5);
+    set_send(engine, 4, 0.5, 0.0);
+
+    let mut total: u64 = 0;
+    let mut peak: u32 = 0;
+
+    engine.process(left, right);
+
+    // Start the sustained gesture once. It must not be retriggered in the
+    // loop — a retrigger would restart the AHD and the machine would run
+    // its attack rather than its long hold, defeating the sustained load
+    // this scenario exists to measure.
+    engine.tracks[0].trigger(1.0);
+
+    for _ in 0..RUNS {
+        // Track 0 sustains (not retriggered); the other seven retrigger
+        // every block as in the "8 sounding" scenarios.
+        let mut t = 1;
+        while t < TRACKS {
+            engine.trigger(t, 1.0);
+            t += 1;
+        }
+
+        let start = DWT::cycle_count();
+        engine.process(left, right);
+        let end = DWT::cycle_count();
+        let elapsed = end.wrapping_sub(start);
+
+        total += elapsed as u64;
+        if elapsed > peak {
+            peak = elapsed;
+        }
+
+        core::hint::black_box(&*left);
+        core::hint::black_box(&*right);
+    }
+
+    // Restore the kit and the dry sends.
+    engine.tracks[0].load_machine(original);
+    set_send(engine, 1, 0.0, 0.0);
+    set_send(engine, 4, 0.0, 0.0);
+
+    Stats {
+        avg: (total / RUNS as u64) as u32,
+        peak,
+    }
+}
 /// Same as `measure` for the 8-track case but isolates the FX cost when no
 /// sends are routed. The FX buses are constructed every block (zeroed send
 /// buffers + delay/reverb pre-process on silence) — this is the empty-FX
 /// overhead an application that doesn't use sends still pays. It is
 /// expected to be small.
+///
+/// Explicitly zeroes the sends first. Without this, a previous `measure_with_fx`
+/// call leaves `eff_send_*` nonzero on tracks 1/4 and this scenario silently
+/// measures FX on real signal instead of on silence.
 fn measure_fxeffect_only(
     engine: &mut DrumEngine,
     left: &mut [f32; BLOCK],
     right: &mut [f32; BLOCK],
     retrigger_count: usize,
 ) -> Stats {
+    // Force the strips dry (and refresh the `eff_send_*` caches) so this
+    // scenario measures FX-on-silence regardless of what ran before it.
+    set_send(engine, 1, 0.0, 0.0);
+    set_send(engine, 4, 0.0, 0.0);
+
     let mut total: u64 = 0;
     let mut peak: u32 = 0;
 
@@ -449,19 +680,20 @@ fn enable_cycle_counter() {
 }
 
 /// Block for roughly `ms`, pumping the USB poller so logs keep flowing.
-fn delay_blocking(poller: &mut imxrt_log::Poller, pit: &mut bsp::hal::pit::Pit<3>, ms: u32) {
+fn delay_blocking(poller: &mut imxrt_log::Poller, pit: &mut bsp::hal::pit::Pit, ms: u32) {
+    use bsp::hal::pit::Channel;
     // PIT runs from the perclk root; board::PERCLK_FREQUENCY is the divisor
     // to use. Chunked so the poller runs often enough that USB does not stall.
     const CHUNK_MS: u32 = 10;
     let ticks = (board::PERCLK_FREQUENCY / 1_000) * CHUNK_MS;
 
     for _ in 0..(ms / CHUNK_MS) {
-        pit.set_load_timer_value(ticks);
-        pit.enable();
-        while !pit.is_elapsed() {
+        pit.set_load_timer_value(Channel::Chan0, ticks);
+        pit.enable(Channel::Chan0);
+        while !pit.is_elapsed(Channel::Chan0) {
             poller.poll();
         }
-        pit.clear_elapsed();
-        pit.disable();
+        pit.clear_elapsed(Channel::Chan0);
+        pit.disable(Channel::Chan0);
     }
 }

@@ -23,8 +23,14 @@
 //! --to --steps`.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use drum_engine::machines::MachineId;
+use drum_engine::machines::{
+    MachineId, SLOT_DECAY, SLOT_MIX, SLOT_MOD_AMOUNT, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME,
+    SLOT_TUNE,
+};
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
+
+mod measure;
+mod verify;
 
 /// The MIDI-in / audio-out device mode. Behind the `live` feature with the
 /// rest of the host audio stack.
@@ -57,6 +63,11 @@ enum Command {
     ///
     /// `<machine>` is one of `bd-classic`, `sd-natural`, `hat-classic`.
     /// `<macro>` is the macro's name uppercased (`TUNE`, `SWEEP`, `DEC`, ...).
+    ///
+    /// Each step logs its integrated RMS in dBFS, so you can see how a knob
+    /// changes loudness as well as sound — the Phase 10 tuning workflow.
+    /// Add `--lufs` for K-weighted loudness (ITU-R BS.1770), which tracks
+    /// perceived level where spectral knobs (filter) understate it.
     Sweep {
         /// Machine to sweep a knob of.
         #[arg(value_enum, default_value = "bd-classic")]
@@ -76,6 +87,68 @@ enum Command {
         /// Directory for the output files.
         #[arg(short, long, default_value = "sweep")]
         output_dir: String,
+        /// Also log K-weighted loudness (LUFS) per step.
+        #[arg(long)]
+        lufs: bool,
+    },
+    /// Sweep a macro, measure each step, and derive its loudness trim.
+    ///
+    /// Prints a per-step table of RMS (dBFS) and the inverse gain that would
+    /// flatten loudness across the travel, plus a paste-ready Rust `const`
+    /// array you can drop into the machine's `set_macros` to compensate.
+    /// The reference is the step nearest the macro's *default* value: the
+    /// factory sound stays exactly as-is (gain 1.0), louder steps are
+    /// attenuated safely, and quieter steps report a boost gain so you can
+    /// see where compensation would push toward clipping.
+    ///
+    /// This is the automated half of "macros are loudness-compensated along
+    /// their travel": the tool derives the numbers, you paste them in.
+    Trim {
+        /// Machine to sweep a knob of.
+        #[arg(value_enum)]
+        machine: MachineArg,
+        /// Macro knob to trim, by name (case-insensitive).
+        #[arg(value_name = "macro")]
+        macro_name: String,
+        /// Lowest value.
+        #[arg(long, default_value_t = 0.0)]
+        from: f32,
+        /// Highest value.
+        #[arg(long, default_value_t = 1.0)]
+        to: f32,
+        /// How many steps (must be >= 2).
+        #[arg(long, default_value_t = 8)]
+        steps: usize,
+        /// Length of each rendered hit in seconds.
+        #[arg(long, default_value_t = 2.0)]
+        seconds: f32,
+        /// Measure K-weighted loudness (LUFS) instead of plain RMS.
+        #[arg(long)]
+        lufs: bool,
+    },
+    /// Sweep every knob on every machine and check monotonicity.
+    ///
+    /// The design rule is "macros are tuned paths, not renamed params — no
+    /// dead zones, monotonic, loudness-compensated". This is the automated
+    /// form of that: for each machine × voice knob it sweeps 0..1, measures
+    /// the hit's integrated RMS and tail length at each step, and flags
+    /// non-monotonic travel or dead zones. Exits non-zero if anything fails.
+    ///
+    /// Spatial/routing knobs (PAN, SEND.*, the MACH selector) are excluded —
+    /// they are not loudness paths and mono-sum RMS would read them as dead
+    /// zones.
+    Verify {
+        /// Steps per sweep (>= 2).
+        #[arg(long, default_value_t = 9)]
+        steps: usize,
+        /// Only check these machines (repeatable, by name).
+        #[arg(long, value_enum)]
+        machines: Vec<MachineArg>,
+        /// Print the per-step curve of one machine's knob and exit
+        /// (e.g. `--dump rs TUNE`). The Phase 10 tuning view behind a
+        /// failing verdict.
+        #[arg(long, num_args = 2)]
+        dump: Vec<String>,
     },
     /// Render a single one-shot of the given machine with custom macros.
     Machine {
@@ -117,6 +190,14 @@ enum Command {
     /// sequence it) and renders through the audio device named by `--out` —
     /// BlackHole, your speakers, or an aggregate device you created. The
     /// engine is fixed at 48 kHz, so the device must run at that rate.
+    ///
+    /// `--multi-out` opens an 18-channel session (8 stereo track pairs +
+    /// one stereo wet-FX return) instead of the default stereo sum, so a
+    /// DAW can mix each drum on its own channel. Each track's dry signal is
+    /// on channels `2*t, 2*t+1`; the shared wet return (delay + reverb sum,
+    /// pre-drive/pre-clip) is on channels 16/17. The engine primitive
+    /// behind this is `DrumEngine::process_dry_wet`, which the firmware's
+    /// future multi-DAC/TDM path will route the same way.
     #[cfg(feature = "live")]
     Device {
         /// Substring to match against output device names. Defaults to
@@ -129,6 +210,10 @@ enum Command {
         /// Print available output devices and exit.
         #[arg(long)]
         list: bool,
+        /// Per-track multi-out: 18 channels (8 × stereo dry pairs + 1 ×
+        /// stereo wet). The device must support 18ch @ 48kHz F32.
+        #[arg(long)]
+        multi_out: bool,
     },
 }
 
@@ -136,6 +221,7 @@ enum Command {
 enum MachineArg {
     BdClassic,
     BdFm,
+    BdVa,
     Tom,
     SdNatural,
     SdFm,
@@ -146,6 +232,8 @@ enum MachineArg {
     CyMetallic,
     CbClassic,
     SyTone,
+    DubSiren,
+    SweepFx,
 }
 
 impl MachineArg {
@@ -153,6 +241,7 @@ impl MachineArg {
         match self {
             Self::BdClassic => MachineId::BdClassic,
             Self::BdFm => MachineId::BdFm,
+            Self::BdVa => MachineId::BdVa,
             Self::Tom => MachineId::Tom,
             Self::SdNatural => MachineId::SdNatural,
             Self::SdFm => MachineId::SdFm,
@@ -163,6 +252,37 @@ impl MachineArg {
             Self::CyMetallic => MachineId::CyMetallic,
             Self::CbClassic => MachineId::CbClassic,
             Self::SyTone => MachineId::SyTone,
+            Self::DubSiren => MachineId::DubSiren,
+            Self::SweepFx => MachineId::SweepFx,
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Self> {
+        for m in MachineId::ALL {
+            if m.name() == s {
+                return Some(MachineArg::from_machine(m));
+            }
+        }
+        None
+    }
+
+    fn from_machine(id: MachineId) -> Self {
+        match id {
+            MachineId::BdClassic => Self::BdClassic,
+            MachineId::BdFm => Self::BdFm,
+            MachineId::BdVa => Self::BdVa,
+            MachineId::Tom => Self::Tom,
+            MachineId::SdNatural => Self::SdNatural,
+            MachineId::SdFm => Self::SdFm,
+            MachineId::Rs => Self::Rs,
+            MachineId::Cp => Self::Cp,
+            MachineId::HatClassic => Self::HatClassic,
+            MachineId::HhBasic => Self::HhBasic,
+            MachineId::CyMetallic => Self::CyMetallic,
+            MachineId::CbClassic => Self::CbClassic,
+            MachineId::SyTone => Self::SyTone,
+            MachineId::DubSiren => Self::DubSiren,
+            MachineId::SweepFx => Self::SweepFx,
         }
     }
 }
@@ -185,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             to,
             steps,
             output_dir,
+            lufs,
         } => {
             let id = machine.id();
             let (idx, info) = id
@@ -207,7 +328,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let samples = render_one_shot(&mut engine, 0, 2.0);
                 let path = format!("{output_dir}/{}_{:02}_{value:.4}.wav", id.name(), i);
                 write_wav(&path, &samples)?;
-                println!("{path}");
+
+                // Phase 10: log the step's loudness. The same samples that
+                // went into the WAV get measured, so the number is exact.
+                let m = measure::measure_buffer(&samples, lufs);
+                if lufs {
+                    println!("{path}  rms={:>6.1} dBFS  lufs={:>5.1}", m.rms_db(), m.lufs);
+                } else {
+                    println!("{path}  rms={:>6.1} dBFS", m.rms_db());
+                }
             }
             let _ = info;
             println!(
@@ -216,6 +345,144 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id.name(),
                 macro_name,
             );
+        }
+
+        Command::Trim {
+            machine,
+            macro_name,
+            from,
+            to,
+            steps,
+            seconds,
+            lufs,
+        } => {
+            let id = machine.id();
+            let (idx, info) = id
+                .macro_by_name(&macro_name)
+                .ok_or_else(|| format!("machine {id:?} has no macro named '{macro_name}'"))?;
+            let steps = steps.max(2);
+
+            let mut values = Vec::with_capacity(steps);
+            let mut levels = Vec::with_capacity(steps);
+
+            for i in 0..steps {
+                let t = i as f32 / (steps - 1) as f32;
+                let value = from + (to - from) * t;
+
+                let mut engine = DrumEngine::new();
+                engine.tracks[0].load_machine(id);
+                engine.tracks[0].set_macro(idx, value);
+
+                let samples = render_one_shot(&mut engine, 0, seconds);
+                let m = measure::measure_buffer(&samples, lufs);
+                let level = if lufs { m.lufs } else { m.rms_db() };
+                values.push(value);
+                levels.push(level);
+            }
+
+            // The reference is the step nearest the macro's default value —
+            // the factory sound keeps gain 1.0 and the rest of the travel is
+            // compensated around it. Steps louder than the reference are
+            // attenuated (safe); the table shows the boost needed elsewhere.
+            let anchor = info.default.clamp(from, to);
+            let anchor_idx = (0..steps)
+                .min_by(|&a, &b| {
+                    (values[a] - anchor)
+                        .abs()
+                        .partial_cmp(&(values[b] - anchor).abs())
+                        .unwrap()
+                })
+                .unwrap();
+            let reference = levels[anchor_idx];
+
+            let unit = if lufs { "LUFS" } else { "dBFS" };
+            println!(
+                "{} {} loudness trim ({} steps)",
+                id.name(),
+                macro_name,
+                steps
+            );
+            println!(
+                "reference: default value {:.4} at {reference:.2} {unit}\n",
+                values[anchor_idx]
+            );
+            println!(
+                "{:>8}  {:>8}  {:>8}  {:>8}  {:>10}",
+                "value", "level", "trim_db", "gain", "trimmed"
+            );
+            println!(
+                "{:─>8}  {:─>8}  {:─>8}  {:─>8}  {:─>10}",
+                "", "", "", "", ""
+            );
+            for i in 0..steps {
+                let trim_db = reference - levels[i];
+                let gain = 10.0_f32.powf(trim_db / 20.0);
+                let trimmed = levels[i] + trim_db;
+                println!(
+                    "{value:>8.4}  {level:>8.2}  {trim_db:>8.2}  {gain:>8.4}  {trimmed:>10.2}",
+                    value = values[i],
+                    level = levels[i],
+                );
+            }
+
+            // Paste-ready Rust for the machine's set_macros: an array of
+            // linear gains indexed by quantised macro value (step 0 = `from`,
+            // last = `to`).
+            println!(
+                "\npaste-ready `const` for {} ({} linear gains):",
+                id.name(),
+                steps
+            );
+            println!(
+                "// {}_{} loudness trim ({}): reference {reference:.2} {unit}",
+                id.name().to_uppercase().replace('-', "_"),
+                macro_name.to_uppercase(),
+                info.name,
+            );
+            print!(
+                "const {}_TRIM: [f32; {steps}] = [",
+                macro_name.to_uppercase()
+            );
+            for i in 0..steps {
+                let trim_db = reference - levels[i];
+                let gain = 10.0_f32.powf(trim_db / 20.0);
+                if i > 0 {
+                    print!(", ");
+                }
+                print!("{gain:.4}");
+            }
+            println!("];");
+        }
+
+        Command::Verify {
+            steps,
+            machines,
+            dump,
+        } => {
+            if let [machine, macro_name] = &dump[..] {
+                let arg = MachineArg::from_name(machine)
+                    .ok_or_else(|| format!("unknown machine '{machine}'"))?;
+                let id = arg.id();
+                let (idx, _) = id
+                    .macro_by_name(macro_name)
+                    .ok_or_else(|| format!("machine {id:?} has no macro '{macro_name}'"))?;
+                verify::dump_knob(id, idx, steps);
+                return Ok(());
+            }
+            let ids: Vec<MachineId> = if machines.is_empty() {
+                MachineId::ALL.to_vec()
+            } else {
+                machines.into_iter().map(|m| m.id()).collect()
+            };
+            let totals = verify::run(&ids, steps);
+            println!(
+                "\n{} machines, {} knobs: {} ok, {} failed",
+                ids.len(),
+                totals.checked,
+                totals.checked - totals.failed,
+                totals.failed,
+            );
+            std::process::exit(if totals.failed == 0 { 0 } else { 1 });
         }
 
         Command::Machine {
@@ -260,7 +527,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Play { bpm } => play_live(bpm)?,
 
         #[cfg(feature = "live")]
-        Command::Device { out, port, list } => device::run(&out, &port, list)?,
+        Command::Device {
+            out,
+            port,
+            list,
+            multi_out,
+        } => device::run(&out, &port, list, multi_out)?,
     }
 
     Ok(())
@@ -457,7 +729,7 @@ fn setup_kit_mix(engine: &mut DrumEngine) {
 
     // (track, pan, level, filter_mode, cutoff_hz, reso_q, drive)
     let configs: [(usize, f32, f32, SvfMode, f32, f32, f32); TRACKS] = [
-        (0, 0.00, 0.95, SvfMode::Off, 1000.0, 0.707, 1.0), // kick — centre
+        (0, 0.00, 0.95, SvfMode::Off, 1000.0, 0.707, 3.0), // kick — centre
         (1, -0.25, 0.75, SvfMode::Off, 1000.0, 0.707, 1.0), // snare — slightly L
         (2, 0.35, 0.45, SvfMode::Off, 1000.0, 0.707, 1.0), // closed hat — R
         (3, 0.40, 0.40, SvfMode::Off, 1000.0, 0.707, 1.0), // HH Basic metallic — R
@@ -487,26 +759,26 @@ fn setup_kit_mix(engine: &mut DrumEngine) {
     // Macro tweaks — a few beyond the defaults to get more musical results:
 
     // Kick: Driven with decay
-    engine.tracks[0].set_macro(3, 0.75); // DEC
-    engine.tracks[0].set_macro(4, 0.5); // DRIVE
+    engine.tracks[0].set_macro(SLOT_DECAY, 0.75); // DEC
+    engine.tracks[0].set_macro(SLOT_SHAPE, 0.5); // DRIVE
 
     // Clap: slightly more body, less pure noise (BAL default 0.80 noise-heavy)
-    engine.tracks[4].set_macro(6, 0.65); // BAL
+    engine.tracks[4].set_macro(SLOT_MIX, 0.65); // BAL
 
     // Tom: tune lower (~132 Hz, a mid tom) and add a bit more stick
-    engine.tracks[5].set_macro(0, 0.50); // TUNE → ~132 Hz
-    engine.tracks[5].set_macro(4, 0.40); // STICK
+    engine.tracks[5].set_macro(SLOT_TUNE, 0.50); // TUNE → ~132 Hz
+    engine.tracks[5].set_macro(SLOT_SHAPE, 0.40); // STICK
 
     // Cowbell: classic 808 tuning — ~540 Hz base, wider detune, short decay
-    engine.tracks[6].set_macro(0, 0.34); // TUNE → ~538 Hz
-    engine.tracks[6].set_macro(2, 0.86); // DET → ~1.43 ratio (the classic 540/800 pair)
-    engine.tracks[6].set_macro(1, 0.15); // DEC → ~85ms
+    engine.tracks[6].set_macro(SLOT_TUNE, 0.34); // TUNE → ~538 Hz
+    engine.tracks[6].set_macro(SLOT_SWEEP, 0.86); // DET → ~1.43 ratio (the classic 540/800 pair)
+    engine.tracks[6].set_macro(SLOT_DECAY, 0.15); // DEC → ~85ms
 
     // SY Tone: pitch it as a bassline — low note, moderate FM
-    engine.tracks[7].set_macro(0, 0.20); // TUNE → ~132 Hz (bass range)
-    engine.tracks[7].set_macro(4, 0.50); // MOD.AMT
-    engine.tracks[7].set_macro(2, 0.30); // FDBK
-    engine.tracks[7].set_macro(5, 0.40); // DEC → ~830ms (rings a bit)
+    engine.tracks[7].set_macro(SLOT_TUNE, 0.20); // TUNE → ~132 Hz (bass range)
+    engine.tracks[7].set_macro(SLOT_MOD_AMOUNT, 0.50); // MOD.AMT
+    engine.tracks[7].set_macro(SLOT_SWEEP_TIME, 0.30); // FDBK
+    engine.tracks[7].set_macro(SLOT_DECAY, 0.40); // DEC → ~830ms (rings a bit)
 
     // --- LFO modulation demo ---
     // Snare (track 1): slow sine LFO on a LP filter, adds movement.

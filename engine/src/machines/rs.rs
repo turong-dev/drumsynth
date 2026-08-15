@@ -139,7 +139,10 @@ impl Rs {
         };
 
         let tick = if noise_amp != 0.0 {
-            self.hp.tick(self.noise.tick()) * noise_amp
+            // The crack is the whole point of a rimshot — it should read
+            // against the body, not hide under it. 2.0 brings the
+            // highpassed-noise tick up to body level at NLEV = 1.
+            self.hp.tick(self.noise.tick()) * noise_amp * 2.0
         } else {
             0.0
         };

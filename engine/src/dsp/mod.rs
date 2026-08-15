@@ -8,6 +8,7 @@
 //! at UI rate. The hot path gets [`fast`], which trades accuracy for cycles.
 
 pub mod ahd;
+pub mod bt;
 pub mod env;
 pub mod fast;
 pub mod filter;
@@ -18,6 +19,7 @@ pub mod osc;
 pub mod svf;
 
 pub use ahd::AhdEnv;
+pub use bt::BridgedT;
 pub use env::DecayEnv;
 pub use filter::{OnePoleHp, OnePoleLp};
 pub use fx::SendFx;

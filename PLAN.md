@@ -71,8 +71,9 @@ DrumEngine
  |    +-- strip: TrackStrip          SVF (LP/HP/BP/notch) + filter env + AHD amp + drive + pan
  |    +-- mod: ModState              2 LFOs + routing table + 4 velocity-mod slots
  |    +-- choke/layer masks: u8
- +-- sends: SendFx                   Phase 5, bench-gated
- +-- midi: parser (exists) + note/CC map tables
++-- sends: SendFx                   Phase 5, bench-gated
+  +-- outs: OutputMode                 Phase 8-C; per-track Output routing → 8-ch bus
+  +-- midi: parser (exists) + note/CC map tables
 ```
 
 Key decisions:
@@ -294,14 +295,35 @@ the remaining ~32% alongside the FX cost.
 
 **8-A — Audio (SAI out)** — needs the PCM5102A hardware on hand.
 
-- [ ] SAI audio output (`TODO(sai)`): PCM5102A on BCLK/LRCLK/OUT1A, interleave
-      `process()` output to I2S, engine in a `.uninit` static via
-      `new_in_place`. This is the "bump teensy4-bsp to 0.6" trigger. Not the
-      Audio Shield: the SGTL5000 needs an I2C bootstrap on top of the same SAI
-      + DMA work, and the only Rust driver is a WIP `sgtl5000` crate (0.0.1,
-      effectively unmaintained). The shield only earns its keep if you want
-      its headphone amp or line-in ADC.
+- [x] SAI audio output: PCM5102A on BCLK/LRCLK/OUT1A, interleave `process()`
+      output to I2S, engine in a `.uninit` static via `new_in_place`. The
+      "bump teensy4-bsp to 0.6" trigger. Implementation in
+      `firmware/src/audio.rs`:
+  - 48 kHz clock chain (Teensy Audio Library numbers): PLL4 = 24e6 × (28 +
+    6720/10000) = 688,128,000 Hz; SAI1_CLK = PLL4/4/14 = 12,288,000 Hz; BCLK =
+    SAI1_CLK/4 = 3,072,000 Hz; 32-bit slots × 2 ch → LRCLK = 48,000 Hz.
+  - `Sai::without_pins` (asymmetric pin set: RX clock pads 20/21 + TX data pad
+    7, no MCLK pad) + `split(32, 2, Packing::None, i2s(bclk_div(4)))` with
+    `SyncMode::TxFollowRx` — the RX half is the async clock master, matching
+    the Teensy Audio Library. Sample is 16-bit left-justified in the 32-bit
+    word (MSB at bit 31).
+  - **FIFO-request interrupt, not DMA** (deviation from the earlier plan): the
+    SAI driver's DMA only reaches the lowest-numbered data line and imxrt-dma
+    has no half-transfer interrupt, so the circular double-buffer pattern isn't
+    available. `#[no_mangle] extern "C" fn SAI1()` (overrides the weak
+    `DefaultHandler` for vector 56) refills `write_frame_u32` until
+    `Status::FIFO_REQUEST` clears; watermark 16 of 32 words → ~333 µs between
+    interrupts. Revisit DMA in 8-C where 4 data lines are in play.
+  - Threading: the ISR owns the engine + sample counter; main loop wraps every
+    `schedule_midi` in `cortex_m::interrupt::free` (TimedQueue isn't
+    lock-free). `sample_counter()` is block-aligned, so `arrival_offset` is 0
+    for now — block boundary is the earliest a note can play.
+  - Wiring detail: SCK tied low (PCM5102 internal PLL); the SAI drives BCLK /
+    LRCLK directly, no MCLK pin wired.
 - [ ] Audio callback in ITCM, hot buffers in DTCM (deferred to here).
+      STILL DEFERRED — the ISR runs from flash/OCRAM and the `AudioState`
+      buffers sit in DTCM `.bss`; measure before moving (DWT on the ISR body).
+      Bench-gated by 8-C's whole output stage.
 
 **8-M — MIDI (USB device)** — the engine side is done; this is firmware.
 
@@ -330,6 +352,115 @@ the remaining ~32% alongside the FX cost.
       of playing + routed sends — the steady-state scenarios never exercise
       the CC recompute path. Numbers recorded on the bench (goal: still
       under ~70% of budget).
+
+**8-C — Multi-output (4× PCM5102A, 8 channels, per-track routing)** —
+optional, depends on 8-A.
+
+The Syntakt's analog/digital split is, as the plan already notes, "meaningless
+here" — but the *physical* part that *is* worth porting is individual outs to a
+mixer. Extend 8-A from one stereo pair to an 8-channel output stage with
+per-track routing, so any drum can leave the box on its own channel while the
+master/wet pair is still present.
+
+**Target topology — 8 channels total, 4 PCM5102A breakouts.** SAI1 on the
+i.MXRT1062 exposes exactly 4 TX data lines (OUT1A..OUT1D), so 4 I2S lanes =
+8 channels fit one peripheral cleanly — no SAI2, no second clock domain. All
+4 boards share BCLK + LRCLK; each gets its own TX data line.
+
+| board | ch | content |
+|---|---|---|
+| 0 | 0 / 1 | **master/wet** — stereo sum of all tracks routed to master, **post-send-FX** (delay + reverb wet land here) |
+| 1 | 2 / 3 | individually-assigned tracks (mono into one ch, or a stereo pair spread here) |
+| 2 | 4 / 5 | individually-assigned tracks |
+| 3 | 6 / 7 | individually-assigned tracks |
+
+The fixed point is the master stereo pair on 0/1. The other 6 channels are a
+pool the tracks are routed into — not a fixed 1:1 track-to-channel mapping,
+since 8 tracks > 6 spare channels and the user gets to choose which drums go
+out individually and which stay on the master bus.
+
+**Per-track output routing.** Each `Track` gets an `output` destination:
+
+- `Output::Master` (default) — the track's panned stereo sum feeds the
+  master bus exactly as it does today, FX sends active. Unchanged behaviour.
+- `Output::Channel(n)` where `n ∈ 2..=7` — the track's **dry, post-strip,
+  post-fader** mono sample (pan summed to mono) is written to channel `n`,
+  **and removed from the master sum**, FX sends forced to 0. This is the
+  Syntakt/Rytm convention: an individual-out track has left the main bus,
+  so its reverb/delay sends stop too — the dry drum leaves the box, the
+  mixer handles anything further.
+- `Output::Pair(a, b)` where `(a,b) ∈ {(2,3),(4,5),(6,7)}` — the track's
+  panned stereo sample feeds the two channels of a pair, FX sends forced to
+  0, removed from master. Same removal semantics as `Channel`; the only
+  difference is pan is preserved as a stereo position rather than summed.
+
+Two tracks may target the same `Channel`/`Pair` (sum mixes them on the way
+out — handy for layering), and `Output::Master` is always an option so unused
+individual channels simply stay silent. No new DSP — only a per-track
+destination switch and a wider output bus.
+
+**Engine side — cheap, do regardless of hardware.**
+- [ ] Per-track `output: Output` field on `Track` (default `Master`), set via
+      `Track::set_output`. `Output` is a small `Copy` enum — `Master`,
+      `Channel(u8)`, `Pair(u8, u8)` — fits the same "stored user state, one
+      recompute" pattern as the macros.
+- [ ] Output bus on `DrumEngine`: in `MasterOnly` mode, `[f32; 2*BLOCK]` (the
+      current stereo master, unchanged). In `Multi` mode, `[f32; 8*BLOCK]` —
+      ch0/1 master wet, ch2..7 individually-routed tracks. `process()` writes
+      each track into its destination buffer instead of (or alongside) the
+      master, per `Output`. The master-path code is the existing sum; the
+      individual path is one mono store + a skip of the master sum.
+- [ ] Output-stage config: `OutputMode { MasterOnly, Multi }` on `DrumEngine`.
+      Host renderer keeps `MasterOnly` so WAV renders are bit-identical to
+      today. Treat `Multi` as a runtime feature flag, the same way send FX was
+      bench-gated in Phase 5. Host can opt into `Multi` for per-channel render
+      dumps (eight mono WAVs) — useful for the Phase 10 golden-snapshot work.
+- [ ] Send-FX interaction: when a track's `output != Master`, force its
+      `eff_send_delay`/`eff_send_reverb` to 0 in `control()` for the block.
+      Store the user-facing send levels separately on the track so flipping
+      back to `Master` restores them without a re-CC. This is the one semantic
+      wrinkle the routing introduces; call it out in tests.
+- [ ] Tap point is **post-strip, post-fader, pre-send** (the same point sends
+      tap off) — filter, drive, amp env, and pan are all audible on the
+      individual out. For `Channel` (mono) pan is summed; for `Pair`/`Master`
+      pan is preserved. No new DSP, one existing tap reused.
+
+**Firmware side — the real work, hardware-gated.**
+- [ ] SAI1 TX: 4 data lines (OUT1A..OUT1D) on `audio`-class pins, one per
+      PCM5102A board. All 4 boards share BCLK + LRCLK (slaves, internal-PLL /
+      SCK-grounded mode); each gets its own TX + GND + 3V3. MCLK not needed.
+      One peripheral, one clock domain — simpler than the 5-board option this
+      replaced. This is the configuration 8-A's teensy4-bsp 0.6 bump lands on
+      for a single line; extend to 4 lines in the same driver surface.
+- [ ] Audio callback DMA: 8-channel interleave buffer (or 4 per-line stereo
+      buffers, whichever the BSP's DMA TCD layout prefers). Still ITCM, still
+      DTCM hot buffers — 8-A's deferral lifts for the whole output stage.
+- [ ] CC for output routing: pick one CC slot per track (e.g. a high `SLOT`
+      in the `SLOT_OUTPUT` bank, parallel to `SLOT_MACHINE`'s quantise-on-recc
+      pattern) so the Deluge can reassign outs in a kit. One CC value encodes
+      `Master` / `Channel(n)` / `Pair(a,b)` — a small lookup in `apply_cc`.
+      Settled in firmware, not engine — the engine takes `Output` directly.
+
+**Bench.**
+- [ ] Add `8 + MultiOut` scenario to `firmware/src/bin/bench.rs`: same `8 + FX`
+      load as Phase 5 plus per-track output-routing writes (6 tracks to
+      individual channels, 2 to master — the realistic mixer case). The extra
+      work is one mono store per routed track per sample; expected to be in
+      the noise of `8 + FX` given how cheap the send-accumulate path already
+      is. DMA cost is invisible to DWT — flag separately, scope if it matters.
+- [ ] Confirm the worst-case `Multi` routing (all 8 tracks to 6 channels, 2
+      sharing) costs no more than the all-master case — it should, since
+      master is the bus that runs the FX.
+
+**Why this scales safely.** The plan's whole budget story is per-sample DSP
+cost; routing adds stores, not multiplies, and the master path is exactly what
+the engine builds today — the 6 individual channels only carry tracks the user
+explicitly pulled *off* master, so total work is bounded by the track count,
+not the output count. 8 channels fitting SAI1's 4 TX lines is what makes the
+4-board count load-bearing: it's the largest individual-out stage that needs
+no second peripheral, and it matches the track count well enough that every
+drum can still get its own channel for a 6-channel mixer with the master pair
+carrying the wet sum of any leftovers.
 
 ### Phase 9 — Sample-accurate event timing
 
@@ -375,6 +506,337 @@ these close the loop on the macro philosophy.
 - [ ] Preset save/load to SD (the open M4 item) — pairs with Phase 6's SDIO
       kit loader.
 
+### Phase 11 — Analog-modelled (VA) machine family
+
+A second BD option (`BdVa`) and the family it opens up, based on a bridged-T
+biquad — the topology the TR-808 actually used for kick, toms, and the low
+half of the snare. Source: an external `va-bd-sample.rs` sketch (an
+`AnalogKickEngine` driving a `BridgedTBiquad`), evaluated against the
+engine's conventions and refit to the macro philosophy.
+
+**Why as a phase, not a single machine.** The bridged-T is the resonant
+network behind several 808 voices. Porting the biquad once and exposing it
+as a `dsp` primitive unblocks a small family (BD VA, VA tom, VA snare low
+half) for roughly the cost of porting BD VA alone. Catalogue goes 12 → 13
+now, with the rest available as later one-machine additions under the same
+phase.
+
+**Why bench-gated.** The sample drives the biquad retune every sample — a
+Taylor sin/cos + a divide inside the per-sample path. The whole project's
+budget history is "the per-sample transcendentals cost more than you think"
+(see Phase 0's `sinf` finding, Phase 5's 2× miss vs estimate). Before
+committing to per-sample retune we measure it; if it blows the budget we
+split it: precompute the static denominator in `set_macros`, only update
+the moving frequency term per sample. That split is the kind of decision
+that earns its own bench row.
+
+#### DSP primitive
+
+- [ ] `dsp/bt.rs` (`BridgedT`): direct-form-II biquad with BP-shaped
+      coefficients (b1 = 0). Methods: `new`, `set_coeffs(sr, hz, q)`
+      (setup-rate), `process(x)` (per-sample, 5 mul / 4 add as in the
+      sketch). Reads `SAMPLE_RATE` from the crate so the caller doesn't pass
+      it every call.
+- [ ] `set_coeffs` uses `fast::sin_turns` + the existing `1.0 / (1.0 + alpha)`
+      divide; rejects the inline Taylor sin/cos and the bespoke
+      `fast_inv_sqrt` from the sketch (unused and not needed — there is no
+      inverse sqrt in the coefficient path).
+- [ ] DF-II states flushed via `DENORMAL_FLOOR` like the one-poles (`env.rs`
+      and `filter.rs` set the pattern). Long resonance tails without FZ
+      assistance would otherwise denormalise.
+- [ ] `pub use` added in `dsp/mod.rs` next to `OnePoleLp`/`OnePoleHp`.
+- [ ] Tests: impulse response is bandpass-shaped around `hz`; peak moves
+      when `hz` moves; resonance narrows with higher `q`; NaN at extreme
+      `q=0`, `hz=sr/2`; reaches zero on silence.
+
+#### Machine 1 — BD VA
+
+- [ ] `machines/bd_va.rs` (`BdVa`): same shape as `BdClassic`/`BdFm` —
+      `new`, `set_macros`, `trigger(velocity)`, `reset`, `is_active`, `tick`,
+      `retune(semis)`. Machine struct owns one `BridgedT`, two `DecayEnv`s
+      (amp + pitch), cached coefficients.
+- [ ] Drop the sketch's manual `*= 0.992` / `*= 0.9992` multipliers in
+      favour of `DecayEnv` + `decay_coeff`. Gets flush-to-zero, `is_active`,
+      and the existing `DecayEnv`-based tests (silent-until-struck,
+      decays-to-silence, velocity-scales) for free.
+- [ ] Encode the sketch's baked constants as macro mappings, following the
+      canonical slot layout in `machines/mod.rs:88`:
+
+      | idx | CC  | name    | range         | maps to |
+      |-----|-----|---------|---------------|---------|
+      | 0   | 20  | TUNE    | 30..120 Hz    | biquad base `target_hz` |
+      | 1   | 21  | SWEEP   | 0..~3×       | pitch-env depth in Hz (sketch: +120) |
+      | 2   | 22  | SWP_T   | 5..105 ms     | pitch-env decay coefficient |
+      | 9   | 29  | Q       | 0.5..10       | biquad `decay_q` (sketch: 4.5/6.0) |
+      | 16  | 36  | LEVEL   | 0..1          | output level |
+      | 17  | 37  | PAN     | 0..1          | (per-track strip, ignored here) |
+      | 18  | 38  | DEC     | 50..1500 ms   | amp-env decay coefficient |
+      | 22  | 42  | SEND.DLY| 0..1          | |
+      | 23  | 43  | SEND.RVB| 0..1          | |
+
+      All other slots RESV. No FILTER cutoff slot — the resonator *is* the
+      filter, so only its resonance goes in the FILTER bank.
+
+      **Q lives at `SLOT_LPF` (9), not `SLOT_SHAPE` (20).** Slot 9 is
+      documented in `machines/mod.rs:106` as the "resonance / lowpass
+      cutoff family" — that docstring has been waiting for a resonance user
+      since Phase 1 (`HatClassic` and `Cp` use it for LPF cutoff). Q is a
+      family-wide parameter: every VA machine (`BdVa`, VA Tom, VA Snare low
+      half, VA Woodblock) is built on `BridgedT` and has the same
+      resonance parameter, so they all share slot 9 the way
+      `BdClassic`/`BdFm`/`Tom` share `SLOT_SWEEP`. Putting Q at 20 would
+      burn a slot constant per machine and violate the "same slot, same
+      meaning" rule that lets the firmware CC map stay stable.
+- [ ] `retune` scales `base_freq` by `fast::semitone_ratio(semis)`, same as
+      `bd_classic.rs:99`. Keeps Phase 7's transpose-then-recompute
+      discipline intact (re-applied in `set_macros` via stored
+      `freq_scale`).
+- [ ] Per-sample retune decision (bench-gated):
+      - **Option A (faithful to sketch):** call `set_coeffs` every sample
+        with the moving `current_hz`. Costs one divide + one `sin_turns`
+        + one `cos_turns`-via-sin per sample. The pitch only moves a few Hz
+        per sample after the transient, so most of this is wasted.
+      - **Option B (split):** compute the alpha/`a0_inv` denominator in
+        `set_macros` against a reference `hz`; per-sample, only the
+        `cos_w0` / `a1` term moves with `current_hz`. Cheaper, audibly
+        identical unless the sweep is extreme.
+        Bench both; ship the cheaper one if A/B is inaudible on a render.
+- [ ] Machine tests: silent-until-struck, velocity-scales, decays-to-
+      silence, pitch-falls-over-time (port from `bd_classic.rs:177`),
+      retune+recompute (port from `bd_classic.rs:206`).
+
+#### Plumbing
+
+- [ ] `machines/mod.rs`: `pub mod bd_va;` + `pub use bd_va::BdVa;`.
+- [ ] `MachineId`: add `BdVa` variant; `COUNT` 12 → 13; one arm each in
+      `ALL`, `name()` (`"bd-va"`), `label()` (`"BD VA"`).
+- [ ] `MachineSlot`: add `BdVa(BdVa)` variant + match arms on `new`, `id`,
+      `set_macros`, `trigger`, `retune`, `reset`, `is_active`, `tick` (8
+      match sites, all mechanical — see `machines/mod.rs:874-1023`).
+- [ ] `MACHINE_INFO`: one new `MachineInfo` row at index 12 with the macro
+      defaults tabled above. Slot order is part of the binary ABI — the
+      firmware CC map depends on it; BD VA is appended, not inserted.
+- [ ] Renderer `MachineArg` updated; `sweep bd-va <macro>` works for free
+      once the enum is in.
+- [ ] MIDI note map: BD VA shares the kick row (notes 35/36) — selection
+      via `SLOT_MACHINE` already quantises across `MachineId::ALL`, so no
+      firmware change.
+
+#### Bench
+
+- [ ] Add `8 + BD VA` scenario to `firmware/src/bin/bench.rs`: eight tracks,
+      three of them BD VA worst-case (high Q, long decay, full sweep) to
+      exercise the per-sample retune path. Goal: stay under ~70% of budget,
+      the same ceiling Phase 5 hit. If over, switch to Option B and re-measure.
+
+#### Follow-on machines (later, same phase scaffolding)
+
+Once `BridgedT` is a `dsp` primitive, these become one-machine additions
+under the same plumbing pattern — none requires new DSP, only macro
+mappings + a new module:
+
+- [ ] **VA Tom** — identical topology to BD VA, different tuning range and
+      a longer pitch sweep. Reuses `BridgedT`, two `DecayEnv`s. Distinct
+      from the existing sine-sweep `Tom` (cleaner attack, true resonator
+      ring).
+- [ ] **VA Snare low half** — pair of `BridgedT`s tuned a 4th apart for the
+      body, with `Noise` through `OnePoleHp` layered on top. Combines the
+      analog resonator family with the noise path that `sd_natural.rs`
+      already uses.
+- [ ] **VA Woodblock / Conga** — single `BridgedT`, short decay, high Q.
+      Catalogue's tonal-percussion gap; the existing `SyTone` is FM, not
+      modal.
+
+None of these needs to ship in Phase 11. The point of the phase is that
+porting the primitive once makes them cheap later.
+
+#### Out of scope here
+
+- `fast_inv_sqrt` from the sketch — unused; not added to `dsp/fast.rs`
+  unless something asks for it.
+- Sample machine (Phase 6) — still its own phase. The BD VA family is
+  fully synthesised, no samples.
+
+### Phase 12 — FX machines: sustained gesture voices
+
+Two non-percussive machines that grow the catalogue past one-shots: a
+**dub siren** and a **sweep FX**. Both are the Syntakt's "FX track"
+idea — a gesture that lasts seconds rather than a hit that rings out.
+Catalogue goes 13 → 15, appended (binary-ABI stable, no slot reordering).
+
+**Why a phase, not two ad-hoc machines.** Both raise the same one
+architectural question the catalogue has not hit yet: every existing
+machine is a `DecayEnv` one-shot, gated by `Track::is_active` for the
+budget early-out at `lib.rs:1381`/`lib.rs:1397`. A sustained sweep
+lasts seconds, so it would defeat that early-out if modelled as a
+gate held open by an external NoteOff (which the engine does not have
+— `MidiEvent`/`EngineEvent` carry NoteOn only). Both machines solve
+this the same way: a self-timed internal `AhdEnv` owns the gesture
+length, the machine reports `is_active` until the AHD idles, and the
+per-track early-out is preserved for free.
+
+`AhdEnv` already lives in `dsp/ahd.rs` (Phase 1, used by the per-track
+strip amp env). Phase 12 is the first time a *machine* uses it — no
+new DSP primitive, just a new consumer.
+
+**Why bench-gated, but lightly.** Sustained machines stay active for
+seconds, so they sit inside the "8 sounding worst-case" bench row
+rather than the idle row — but per-sample cost is one `SineOsc` + one
+LFO for the siren, one `Svf` + one LFO for the sweep, which is cheaper
+than `CyMetallic`'s ring-mod path. The real budget question is
+whether running a sweep alongside 7 short drums creates a new
+sustained-load worst case the bench has not measured. Phase 12 adds
+one bench row to find out; the same disposition as Phase 11's
+`8 + BD VA`.
+
+#### Machine 14 — Dub Siren
+
+`machines/dub_siren.rs` (`DubSiren`): a sine oscillator whose
+frequency is modulated by aninternal LFO, gated by a long self-timed
+`AhdEnv`. The classic dub-reggae siren: a slow warble that dives or
+rises, played back through long delay throws.
+
+Topology:
+
+```
+   internal LFO (tri/saw/sine) ──► pitch offset (octaves)
+   AhdEnv (gesture)            ──► amp
+   SineOsc (carrier)           ──► out
+```
+
+No new DSP — `SineOsc`, a small inline LFO (phase accumulator +
+`fast::sin_turns`), and `AhdEnv`. Retune scales the carrier base
+frequency only (the LFO depth is in octaves, so it travels with the
+note). SHAPE macro quantises the internal LFO waveform; dropping it
+and shipping a fixed sine LFO (the classic dub-siren shape) is a
+valid fallback if the quantise adds noise.
+
+Macro layout (canonical 4-bank, appended at index 13):
+
+| idx | CC  | name    | range        | maps to |
+|-----|-----|---------|--------------|---------|
+| 0   | 20  | TUNE    | 100..1000 Hz | osc base frequency |
+| 1   | 21  | DEPTH   | 0..3 oct     | LFO pitch-sweep width |
+| 2   | 22  | RATE    | 0.1..8 Hz     | siren LFO speed |
+| 5   | 25  | MACH    | 0..1          | machine selector |
+| 16  | 36  | LEVEL   | 0..1          | output level |
+| 17  | 37  | PAN     | 0..1          | (track-routed) |
+| 18  | 38  | DEC     | 0.5..6 s      | AHD gesture length (5% atk / 85% hold / 10% dec) |
+| 20  | 40  | SHAPE   | 0..1          | LFO waveform: tri ↔ saw ↔ sine (quantised) |
+| 22  | 42  | SEND.DLY| 0..1          | |
+| 23  | 43  | SEND.RVB| 0..1          | |
+| 26  | 46  | OUT     | 0..1          | track routing |
+
+All other slots RESV.
+
+#### Machine 15 — Sweep FX
+
+`machines/sweep_fx.rs` (`SweepFx`): white noise through an SVF whose
+cutoff is swept by an internal LFO, gated by a long self-timed
+`AhdEnv`. The "filter sweep" riser — the most-used gesture in
+electronic FX.
+
+Topology:
+
+```
+   internal LFO (tri)  ──► cutoff (octaves, exp2_approx)
+   AhdEnv (gesture)    ──► amp
+   Noise ──► Svf (LP/BP/HP) ──► out
+```
+
+Reuses `dsp::Svf` (already in the per-track strip path) *inside* a
+machine for the first time. The first `dsp::Svf` user outside `Strip`.
+Resonance lives at `SLOT_LPF` (9) — the family-wide resonance slot,
+the same disposition as BD VA's Q. Noise-only → `retune` no-ops (Hat
+Classic precedent).
+
+Macro layout (appended at index 14):
+
+| idx | CC  | name    | range         | maps to |
+|-----|-----|---------|---------------|---------|
+| 0   | 20  | RATE    | 0.1..5 Hz      | sweep LFO speed |
+| 1   | 21  | DEPTH   | 0..4 oct       | cutoff sweep width |
+| 2   | 22  | START   | 80..8000 Hz    | cutoff centre |
+| 5   | 25  | MACH    | 0..1           | machine selector |
+| 9   | 29  | RESO    | 0.5..12 Q      | SVF resonance (FILTER bank) |
+| 16  | 36  | LEVEL   | 0..1           | output level |
+| 17  | 37  | PAN     | 0..1           | (track-routed) |
+| 18  | 38  | DEC     | 0.5..6 s       | AHD gesture length |
+| 20  | 40  | MODE    | 0..1           | LP/BP/HP, quantised (bandpass default) |
+| 22  | 42  | SEND.DLY| 0..1           | |
+| 23  | 43  | SEND.RVB| 0..1           | |
+| 26  | 46  | OUT     | 0..1           | track routing |
+
+All other slots RESV.
+
+#### Plumbing (per the existing pattern — one machine = one module + match arms)
+
+- [ ] `machines/dub_siren.rs` + `machines/sweep_fx.rs`, same file
+      shape as `bd_va.rs`: `new`, `set_macros`, `trigger(velocity)`,
+      `reset`, `is_active`, `tick`, `retune(semis)`.
+- [ ] `machines/mod.rs`: `pub mod dub_siren;`/`pub mod sweep_fx;` +
+      `pub use` of `DubSiren`/`SweepFx`.
+- [ ] `MachineId`: add `DubSiren` (index 13) and `SweepFx` (14);
+      `COUNT` 13 → 15; two new arms each in `ALL`, `name()`
+      (`"dub-siren"`, `"sweep-fx"`), `label()` (`"Dub Siren"`,
+      `"Sweep FX"`).
+- [ ] `MachineSlot`: add `DubSiren(DubSiren)` and `SweepFx(SweepFx)`
+      variants + match arms on `new`, `id`, `set_macros`, `trigger`,
+      `retune`, `reset`, `is_active`, `tick` (16 match sites,
+      mechanical).
+- [ ] `MACHINE_INFO`: two new `MachineInfo` rows appended at indices
+      13 and 14, slot order per the tables above. Appended not
+      inserted — the firmware CC map depends on absolute index.
+- [ ] Renderer `MachineArg` updated; `sweep dub-siren <macro>` and
+      `sweep sweep-fx <macro>` work for free once the enum lands.
+- [ ] Machine tests, ported from `bd_va.rs:185` template:
+      silent-until-struck, velocity-scales-output, decays-to-silence
+      (with a longer window — 7 s — to cover the longest DEC),
+      retune-survives-recompute (dub-siren only; sweep-fx is
+      noise-only and `retune` no-ops), extreme-macros-do-not-produce-
+      nans.
+- [ ] Sustained-gesture test (new shape, applies to both): a gesture
+      at default DEC is still `is_active()` past 1 s, and reaches
+      `!is_active()` before 7 s. Pins the AHD-as-gesture contract
+      that the budget argument depends on.
+
+#### Bench
+
+- [x] Add `8 + sweep fx sustained` scenario to
+      `firmware/src/bin/bench.rs`: the existing 8-track sounding
+      pattern, with one track loaded as       `SweepFx` sustaining a 2 s
+      gesture (sweep depth at max, resonance high — the worst-case
+      SVF path). Goal: stay under ~70% of budget, the same ceiling
+      Phase 5/11 hit. The siren path is cheaper, so it is not benched
+      separately. First run: 83.4% — the per-sample `Svf::recalc`
+      (`libm::sinf`) blew the budget, so the Option B split (line 866)
+      was triggered: `Svf::set_cutoff` refreshes only the moving `c1`
+      via `fast::sin_turns`, the SweepFx analog of `BridgedT::set_hz`.
+      Re-measure after the split: 72.1% — within ~2 points of the
+      baseline `8+FX+CC` row, still over the nominal 70% ceiling
+      (the same 2-point overshoot every FX row carries); parked for a
+      later optimisation pass.
+- [x] Note the sustained-load caveat in the bench output: a
+      sustained machine defeats the per-track idle early-out for its
+      whole gesture, so a kit with a sweep-FX track idles at "7 idle
+      + 1 sounding" rather than "8 idle". This is the new fact
+      Phase 12 introduces to the budget model.
+
+#### Out of scope here
+
+- Real-time NoteOff / gate-release (the V2 sustained model). The
+  engine has no NoteOff path; Phase 12 commits to the self-timed
+  AHD model and pins it with the sustained-gesture test. External
+  gating is a separate, larger change that would touch
+  `MidiEvent`/`EngineEvent` and the `is_active` budget contract.
+- A `dub-siren` SHAPE macro beyond the tri/saw/sine quantise. A
+  dedicated "warble" curve (e.g. shapeable cubic) is sound design
+  work, not architecture — keep it for a later macro-polish phase.
+- Routing the sweeps' own output back into the engine's send-FX
+  loop. They are tracks like any other; their `SEND.DLY`/`SEND.RVB`
+  macros work the same as every other machine's, which is the
+  load-bearing property. No new send routing.
+
 ## Design guidance received (2026-08-10)
 
 A design-guidance review (`drum-machine-design.md`, untracked) landed after
@@ -399,7 +861,7 @@ The verdicts feed Phases 8–10 and the settled-decisions table below.
 | MIDI channel per voice (or note-number routing) | Both: one channel per track *and* a note map | Already satisfied |
 | Gate input circuit + firmware capture | Deferred by the advice itself; hardware-only | Parked — revisit only to close the last millisecond |
 | Set the FZ bit in FPSCR | Not set. The engine clamps via `DENORMAL_FLOOR` instead | **Take it** — one line in firmware init, protects the long FX tails too (Phase 8-M) |
-| Audio callback in ITCM, hot buffers in DTCM | Not done | Defer until SAI audio lands (Phase 8) |
+| Audio callback in ITCM, hot buffers in DTCM | Not done (ISR in flash/OCRAM, hot buffers in DTCM `.bss`) | Defer to Phase 8-C — measure first (DWT on the ISR body) |
 | Hard ceiling ~60% at max polyphony | Measured worst case (Phase 5) is 68.1% — above the advice's number, already flagged | Noted. Budget work concentrates on the delay buffer and `set_macro` (`expf`) |
 | PSRAM only if reverb/delay get long | Matches the plan's stance | Already satisfied |
 | Golden WAV snapshots against committed references | Not present | **Take it** — cheap, pins the sound across refactors (Phase 10) |
@@ -423,15 +885,24 @@ velocity→macro are done; preset save/load to SD is still open (Phase 10).
 | Sequencer | external (MIDI-driven); engine gains p-lock/sound-lock hooks |
 | Machine ordering | kit-first (Phase 2 before tonal machines) |
 | Sin table | mandatory, Phase 1 first task |
-| teensy4-bsp version | stay on 0.5 for bench; bump to 0.6 when SAI work begins (Phase 8) |
+| teensy4-bsp version | bumped to 0.6 (Phase 8-A) — brings `imxrt_hal::sai`; imxrt-hal 0.6, imxrt-ral 0.6.2, imxrt-usbd 0.4.2, usb-device 0.3.2, teensy4-pins 0.4.0 |
 | Macro mapping storage | code (`set_macros` per machine); curve-as-data model deferred, tuning workflow adopted (Phase 10) |
 | Sample-accurate trigger offsets | built — `TimedQueue` + `schedule_midi` (Phase 9); firmware sample-counter wiring in Phase 8-M |
 | Gate input | deferred (advice-consistent); `TimedEvent` plumbing built first (Phase 9) |
 | Transport | USB MIDI device on the Deluge's host port (Phase 8); DIN/gates never a requirement |
+| VA machine family | in scope as Phase 11; `BridgedT` lives in `dsp/` as a primitive, BD VA is the first machine, others (Tom, Snare low, Woodblock) follow under the same phase |
+| Per-sample biquad retune | bench-gated; Option A (every-sample) is the default, Option B (split static/moving coeff) is the fallback if the bench says over budget. Applied to SweepFx's SVF: the bench's `8+FX+SWFX` row hit 83.4% on Option A, so Option B shipped as `Svf::set_cutoff` (one `sin_turns` lookup per sample, `k` cached from the setup-rate `recalc`); re-measure 72.1% |
+| Multi-output | in scope as Phase 8-C, optional and hardware-gated; **8 channels total = 4× PCM5102A** (fits SAI1's 4 TX data lines, one clock domain). Ch 0/1 are the master/wet stereo pair (fixed); ch 2..7 are a per-track-routable pool. Each `Track` has an `Output` destination — `Master` (default, existing behaviour + FX sends), `Channel(n)` (dry mono into one ch), or `Pair(a,b)` (dry stereo into a pair) — an individual-out track is removed from the master sum and has its FX sends forced to 0 (Syntakt/Rytm convention). `OutputMode { MasterOnly, Multi }` on `DrumEngine`; host renders stay `MasterOnly` and bit-identical |
+| Individual-out tap point | post-fader, post-strip, **pre-send** — pan summed to mono on `Channel`, preserved on `Pair`/`Master`; no new DSP, the same tap the sends use, reused |
+| FX machines (sustained gestures) | in scope as Phase 12; **Dub Siren** (sine + internal pitch LFO, index 13) and **Sweep FX** (noise → SVF, cutoff swept by internal LFO, index 14) appended to the catalogue. Self-timed internal `AhdEnv` owns the gesture length — no NoteOff / external gate path added (engine carries NoteOn only; the per-track `is_active` budget early-out is preserved for the gesture's duration). Bench-gated against a new `8 + sweep fx sustained` row; sustained machines defeat the per-track idle early-out for their whole gesture, which is the new fact in the budget model |
+| Machine envelope for sustained voices | `AhdEnv` (Phase 1, used by the per-track strip amp env) becomes a per-machine DSP for the first time in Phase 12 — no new primitive; `DecayEnv` stays the one-shot default, `AhdEnv` is the gesture default |
 
 ## Hardware
 
 - Teensy 4.1 (600MHz Cortex-M7, 1MB RAM, microSD on SDIO)
-- PCM5102A I2S breakout (for audio output only — not needed for bench)
+- PCM5102A I2S breakout (for audio output only — not needed for bench). For
+  the optional multi-output stage (Phase 8-C): **up to 4 boards = 8 channels**,
+  one per SAI1 TX data line, sharing BCLK + LRCLK (one clock domain, no SAI2);
+  ch 0/1 master/wet, ch 2..7 per-track-routable individual dry outs.
 - The analog/digital track split on Syntakt is about physical circuits;
   meaningless here. Any machine loads on any track.

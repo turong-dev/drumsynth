@@ -78,6 +78,22 @@ impl Svf {
         self.k = (1.0 / q.max(0.5)).min(2.0);
     }
 
+    /// Refresh only the cutoff-dependent coefficient (`c1`), for a
+    /// cutoff that moves every sample. Sample rate.
+    ///
+    /// `k` (damping from Q) is untouched — Q is setup-rate, so a caller
+    /// that swept a cutoff per sample against a static Q (e.g. the SweepFX
+    /// machine's LFO) pays one [`crate::dsp::fast::sin_turns`] lookup
+    /// instead of the full [`recalc`](Self::recalc) (`libm::sinf`, ~1,200
+    /// cycles on the M7 — the same split `BridgedT::set_hz` makes for the
+    /// bridged-T). See the per-sample comment in `recalc`.
+    #[inline(always)]
+    pub fn set_cutoff(&mut self, cutoff_hz: f32, sample_rate: f32) {
+        let f = cutoff_hz.clamp(1.0, sample_rate * 0.49);
+        // sin(π·fc/fs) = sin_turns(fc / (2·fs)) — the table takes turns.
+        self.c1 = 2.0 * crate::dsp::fast::sin_turns(f * 0.5 / sample_rate);
+    }
+
     /// Choose the output mode without touching coefficients.
     #[inline]
     pub fn set_mode(&mut self, mode: SvfMode) {
@@ -214,5 +230,39 @@ mod tests {
             assert!(s.is_finite(), "SVF blew up");
             assert!(s.abs() < 10.0, "SVF runaway: {s}");
         }
+    }
+
+    /// `set_cutoff` must reproduce `recalc`'s integrator coefficient (the
+    /// only term the per-sample path changes) closely enough that the two
+    /// filters cannot be told apart on a sustained input.
+    #[test]
+    fn set_cutoff_matches_recalc_coefficient() {
+        for hz in [80.0f32, 500.0, 3_000.0, 8_000.0, 12_000.0] {
+            let mut a = Svf::new(SvfMode::Bp);
+            let mut b = Svf::new(SvfMode::Bp);
+            a.recalc(hz, 4.0, SAMPLE_RATE);
+            b.recalc(hz, 4.0, SAMPLE_RATE);
+            b.set_cutoff(hz, SAMPLE_RATE);
+            assert!(
+                (a.c1 - b.c1).abs() < 1e-5,
+                "c1 mismatch at {hz} Hz: {} vs {}",
+                a.c1,
+                b.c1
+            );
+        }
+    }
+
+    #[test]
+    fn set_cutoff_close_to_recalc_across_range() {
+        let mut a = Svf::new(SvfMode::Bp);
+        let mut b = Svf::new(SvfMode::Bp);
+        let mut max_err = 0.0f32;
+        for hz in (1..24_000).step_by(97) {
+            a.recalc(hz as f32, 3.0, SAMPLE_RATE);
+            b.recalc(hz as f32, 3.0, SAMPLE_RATE);
+            b.set_cutoff(hz as f32, SAMPLE_RATE);
+            max_err = max_err.max((a.c1 - b.c1).abs());
+        }
+        assert!(max_err < 1e-5, "max c1 error: {max_err}");
     }
 }

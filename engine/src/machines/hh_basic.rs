@@ -175,8 +175,10 @@ impl HhBasic {
         // Bandpass: HP then LP.
         let bandpassed = self.lp.tick(self.hp.tick(osc_bank));
 
-        // Main envelope + transient accent.
-        (bandpassed * amp) + (bandpassed * transient * 0.5) * self.level
+        // Main envelope + transient accent, scaled by the level. (The level
+        // must gate the whole signal, not just the transient, or the hat
+        // never actually goes quiet when LEVEL is turned down.)
+        (bandpassed * (amp + transient * 0.5)) * self.level
     }
 }
 

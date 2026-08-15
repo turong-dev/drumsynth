@@ -1,23 +1,20 @@
-//! Audio firmware. **Incomplete — see the SAI section below.**
-//!
-//! Flash `bench` first. This binary is the shape of the finished thing, but
-//! the SAI wiring is deliberately left as a marked gap rather than guessed at,
-//! because `imxrt_hal::sai` shipped on 26 July 2026 and its API is not
-//! something to write from memory.
+//! Audio firmware.
 //!
 //! # What is already decided
 //!
 //! Everything that matters architecturally:
 //!
 //! - the engine is constructed once, before interrupts are enabled
-//! - the audio callback does nothing but interleave and call `process`
+//! - the audio interrupt does nothing but interleave and call `process`
 //! - MIDI is parsed in the engine crate, so it is host-testable
 //! - parameter updates happen outside the callback, at CC rate
 //!
-//! # What is missing
+//! # What is where
 //!
-//! One function: getting a buffer of samples to the DAC on a clock. Search
-//! for `TODO(sai)`.
+//! The SAI1-to-PCM5102 audio path lives in the [`audio`] module: the 48 kHz
+//! clock chain, pad routing, SAI1 configuration, and the FIFO-request
+//! interrupt that pumps samples. This file wires it together and owns the
+//! MIDI transports.
 //!
 //! # Recommended hardware
 //!
@@ -39,11 +36,27 @@
 //!   pin 20 (LRCLK)  ──────► LCK
 //!   pin 7  (OUT1A)  ──────► DIN
 //!   3.3V            ──────► VIN
+//!   3.3V            ──────► A3V3   (if exposed — see below)
+//!   3.3V            ──────► XSMT   (if exposed — see below)
 //!   GND             ──────► GND
+//!   GND             ──────► SCK    (ties it low — internal PLL mode)
+//!   GND             ──────► AGND   (if exposed — see below)
 //! ```
 //!
 //! Most PCM5102A breakouts want SCK tied low to select internal PLL mode.
 //! Check the silkscreen on yours; some have a solder jumper for it already.
+//! On boards that break out more of the chip's own pins (rather than tying
+//! them internally), three more connections are not optional — miss any one
+//! and you get total, otherwise-unexplained silence despite BCLK/LRCLK/DATA
+//! all being correct: **AGND** (analog ground, separate from digital `GND`)
+//! and **A3V3** (analog supply, separate from digital `VIN`) both need
+//! their own wire — an unpowered or ungrounded analog stage stays silent
+//! regardless of how correct the digital side is — and **XSMT** (soft-mute)
+//! needs to be tied to 3.3V, since low or floating means muted. **FMT**
+//! (audio format select) also needs to be tied to GND if exposed: low
+//! selects I2S (what this firmware sends), high selects left-justified,
+//! and a floating/wrong FMT shifts every sample by one bit position. See
+//! [`audio`]'s module docs for the full breakdown.
 //!
 //! # MIDI CC map
 //!
@@ -61,6 +74,10 @@
 //!
 //! PITCH CC 25 is the machine selector: its value quantises over
 //! [`drum_engine::MachineId::ALL`] and loads that machine on the track.
+//! MOD CC 46 is the output-pair selector: its value quantises over the
+//! 4 [`drum_engine::OutPair`] variants (Master/Aux1/Aux2/Aux3) and routes
+//! the track's dry signal to that pair in `process_dry_wet`. Both jump
+//! instantly under CC rather than smoothing — discrete choices.
 //!
 //! MIDI channels are conventionally labelled 1..=16; on the wire the nibble
 //! is 0-based, so channel 1 = wire 0 = track 0, up to channel 8 = wire 7 =
@@ -81,6 +98,7 @@
 
 use teensy4_panic as _;
 
+mod audio;
 mod usb;
 
 use drum_engine::{
@@ -92,12 +110,6 @@ use drum_engine::{
 use embedded_hal::serial::Read as _;
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
-
-/// Interleaved stereo scratch buffer handed to the DMA.
-///
-/// Double the block size because it is L/R interleaved. Static rather than
-/// stack-allocated because DMA needs a stable address.
-static mut TX_BUFFER: [f32; BLOCK * 2] = [0.0; BLOCK * 2];
 
 /// The engine itself (~266 KB, almost all of it the send-FX delay/reverb
 /// buffers) — in OCRAM via a `.uninit` static, *not* the stack. `t4link.x`
@@ -111,13 +123,68 @@ static mut ENGINE_BUF: core::mem::MaybeUninit<DrumEngine> = core::mem::MaybeUnin
 fn main() -> ! {
     let board::Resources {
         mut gpio2,
-        pins,
+        mut pins,
         lpuart6,
         usb,
+        mut ccm,
+        mut ccm_analog,
+        sai1,
         ..
     } = board::t41(board::instances());
 
+    // SAFETY: `ENGINE_BUF` is `.uninit` OCRAM, written exactly once, here,
+    // before interrupts are enabled — single-threaded init, same
+    // requirement `new_in_place` documents. Raw-pointer construction
+    // (rather than `&mut ENGINE_BUF`) sidesteps the Rust 2024 warning on
+    // mutable-static references.
+    #[allow(unsafe_code)]
+    let engine: &'static mut DrumEngine = unsafe {
+        let p: *mut DrumEngine = core::ptr::addr_of_mut!(ENGINE_BUF).cast();
+        DrumEngine::new_in_place(p)
+    };
+
+    // SAI1 as an I2S master at exactly 48 kHz: the 48 kHz clock chain, pad
+    // routing, and SAI1 configuration live in the `audio` module. The SAI
+    // interrupt takes ownership of `engine` (the main loop keeps scheduling
+    // MIDI into it, guarded by `interrupt::free`). Interrupts stay masked
+    // until `audio::start()`.
+    //
+    // SAFETY: called exactly once, before interrupts are enabled; the engine
+    // is fully constructed. Runs before `board::led` / `board::lpuart` move
+    // `pins.p13` / `pins.p0` / `pins.p1` out of the struct.
+    #[allow(unsafe_code)]
+    unsafe {
+        audio::setup(
+            &mut ccm,
+            &mut ccm_analog,
+            sai1,
+            &mut pins,
+            core::ptr::addr_of_mut!(*engine),
+        );
+    }
+
     let led = board::led(&mut gpio2, pins.p13);
+
+    // Unmask the SAI1 interrupt and hand it the LED *immediately* after
+    // `setup()` enabled the transmitter/receiver — nothing else runs in
+    // between. `setup()` pre-fills only 15 frames (30 words) before
+    // enabling, which drains in ~312us at this bit rate; every line of init
+    // that used to sit between `setup()` and this call (LPUART, USB stack
+    // bring-up, FPSCR, parsers) easily eats more than that, so the FIFO was
+    // underrunning — and, on this SAI block, apparently halting its
+    // serializer outright rather than just flagging it — before the
+    // interrupt was ever unmasked to refill it. Writing more data in after
+    // the fact tops up the FIFO's contents but never restarts a halted
+    // clock, which is exactly the "runs briefly, then dead forever" symptom
+    // this reorder fixes. Everything else now happens after the ISR is
+    // already keeping the FIFO fed.
+    //
+    // SAFETY: everything the ISR touches — engine, SAI1, buffers, counter,
+    // LED — was initialized; call this exactly once.
+    #[allow(unsafe_code)]
+    unsafe {
+        audio::start(&led);
+    }
 
     // MIDI in on a hardware UART at the standard 31250 baud.
     //
@@ -151,47 +218,8 @@ fn main() -> ! {
         core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
     }
 
-    // SAFETY: `ENGINE_BUF` is `.uninit` OCRAM, written exactly once, here,
-    // before interrupts are enabled — single-threaded init, same
-    // requirement `new_in_place` documents. Raw-pointer construction
-    // (rather than `&mut ENGINE_BUF`) sidesteps the Rust 2024 warning on
-    // mutable-static references.
-    #[allow(unsafe_code)]
-    let engine: &'static mut DrumEngine = unsafe {
-        let p: *mut DrumEngine = core::ptr::addr_of_mut!(ENGINE_BUF).cast();
-        DrumEngine::new_in_place(p)
-    };
-
     let mut parser_usb = MidiParser::new();
     let mut parser_uart = MidiParser::new();
-
-    // TODO(sai): bring up the audio interface.
-    //
-    // Roughly:
-    //   1. Configure the SAI1 clock root in CCM for 48kHz. The MCLK divider
-    //      chain is the fiddly part — get this wrong and you get audio at the
-    //      wrong pitch, which at least tells you the data path works.
-    //   2. Configure SAI1 as transmitter: I2S mode, 32-bit slots, 2 channels,
-    //      master (the PCM5102A is a slave and wants BCLK and LRCLK from you).
-    //   3. Set up a DMA channel from TX_BUFFER to the SAI TX FIFO, in circular
-    //      double-buffered mode.
-    //   4. Enable the half-transfer and transfer-complete interrupts and call
-    //      `audio_callback` from each, filling whichever half is now free.
-    //
-    // Until that exists, the loop below runs the engine and throws the output
-    // away. Useless for listening, but it exercises the full MIDI-to-audio
-    // path and will surface any panic or timing problem before you have
-    // hardware attached to blame.
-
-    let mut left = [0.0f32; BLOCK];
-    let mut right = [0.0f32; BLOCK];
-
-    // Samples rendered so far. The next `process` block starts at this count.
-    // Before SAI this is a plain counter incremented once per block, so the
-    // offset below is always 0; once the audio interrupt owns it, the same
-    // arithmetic turns into the arrival-sample timing that `schedule_midi`
-    // was built for. Nothing else here needs to change for that.
-    let mut sample_counter: u64 = 0;
     let mut usb_midi_buf = [0u8; 64];
 
     loop {
@@ -205,7 +233,12 @@ fn main() -> ! {
                 if let Some(event) = parser_usb.push(b) {
                     // Shared with the host `device` harness — the Teensy and
                     // the Mac tuning rig interpret the same bytes identically.
-                    schedule_midi(engine, event, arrival_offset(sample_counter));
+                    let offset = arrival_offset(audio::sample_counter());
+                    // SAFETY: interrupts off while pushing to the TimedQueue,
+                    // so the SAI interrupt cannot observe the push half-made.
+                    cortex_m::interrupt::free(|_| {
+                        schedule_midi(engine, event, offset);
+                    });
                 }
             }
             i += 4;
@@ -216,15 +249,16 @@ fn main() -> ! {
         // burst of notes cannot delay an audio deadline.
         while let Ok(byte) = midi_uart.read() {
             if let Some(event) = parser_uart.push(byte) {
-                schedule_midi(engine, event, arrival_offset(sample_counter));
+                let offset = arrival_offset(audio::sample_counter());
+                // SAFETY: as above — never push mid-drain.
+                cortex_m::interrupt::free(|_| {
+                    schedule_midi(engine, event, offset);
+                });
             }
         }
 
-        // TODO(sai): this call moves into the DMA interrupt handler.
-        audio_callback(engine, &mut left, &mut right);
-        sample_counter += BLOCK as u64;
-
-        led.toggle();
+        // The LED blinks from inside the audio ISR (see `audio::TEST_TONE`);
+        // nothing here to do for it.
     }
 }
 
@@ -233,34 +267,9 @@ fn main() -> ! {
 /// The main loop renders in whole blocks, so an event that arrives while the
 /// engine is `sample_counter` samples in is scheduled to fire at that
 /// position in the *next* `process` block — the engine's `TimedQueue`
-/// contract, not a guess. Before SAI this is always 0 (the loop only reaches
-/// the drain points between blocks), which is exactly right: a block boundary
-/// is the earliest a note can play.
+/// contract, not a guess. The SAI interrupt counts in whole blocks, so the
+/// derived offset is always 0: a block boundary is the earliest a note can
+/// play, and `schedule_midi` with offset 0 already covers that case.
 fn arrival_offset(sample_counter: u64) -> usize {
     (sample_counter % BLOCK as u64) as usize
-}
-
-/// The whole of the audio interrupt.
-///
-/// Note what is *not* here: no allocation, no locking, no logging, no
-/// parameter maths, no branching on MIDI state. Everything expensive happened
-/// somewhere else. Keeping it this thin is what makes the cycle numbers from
-/// `bench` meaningful — the bench measures `process`, so `process` had better
-/// be substantially all of the work.
-#[inline]
-fn audio_callback(engine: &mut DrumEngine, left: &mut [f32; BLOCK], right: &mut [f32; BLOCK]) {
-    engine.process(left, right);
-
-    // Interleave into the DMA buffer. One linear pass, which is why the
-    // engine renders planar in the first place.
-    //
-    // SAFETY: single-threaded access. Once DMA is real this needs to write to
-    // whichever half the hardware is not currently reading, and the `static
-    // mut` should become a properly split double buffer.
-    #[allow(static_mut_refs)]
-    let tx = unsafe { &mut TX_BUFFER };
-    for i in 0..BLOCK {
-        tx[i * 2] = left[i];
-        tx[i * 2 + 1] = right[i];
-    }
 }

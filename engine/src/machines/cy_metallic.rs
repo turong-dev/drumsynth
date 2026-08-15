@@ -19,7 +19,7 @@
 //! | 0   | 20  | TUNE      | 200..1200 Hz  | osc A frequency |
 //! | 1   | 21  | TONE      | 0..1          | osc B/A ratio (1.3..3.0) |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 8   | 28  | NCOL      | 1000..8000 Hz | noise HP colour |
+//! | 8   | 28  | NCOL      | 1000..18000 Hz | noise HP colour |
 //! | 16  | 36  | DEC       | 100..2000 ms  | main decay (long — it's a cymbal) |
 //! | 17  | 37  | TDEC      | 5..100 ms     | transient (noise) decay |
 //! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
@@ -30,7 +30,9 @@
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
-use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE};
+use crate::machines::{
+    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE,
+};
 use crate::SAMPLE_RATE;
 
 /// CY Metallic machine.
@@ -70,7 +72,7 @@ impl CyMetallic {
         let ratio = 1.3 + 1.7 * macros[SLOT_SWEEP]; // TONE 1.3..3.0
         let transient_decay_s = 0.005 + 0.095 * macros[SLOT_DECAY_2]; // TDEC 5..100 ms
         let main_decay_s = 0.1 + 1.9 * macros[SLOT_DECAY]; // DEC 100..2000 ms
-        let noise_hp_hz = 1000.0 + 7000.0 * macros[SLOT_CUT]; // NCOL 1..8 kHz
+        let noise_hp_hz = 1000.0 + 17000.0 * macros[SLOT_CUT]; // NCOL 1..18 kHz
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(osc_a_hz * self.freq_scale);
@@ -139,7 +141,7 @@ impl CyMetallic {
             0.0
         };
 
-        let mixed = metallic * amp + stick * 0.5;
+        let mixed = metallic * amp + stick * 1.5;
         fast::soft_clip(mixed) * self.level
     }
 }

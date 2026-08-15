@@ -100,6 +100,32 @@ fn interp(p: f32) -> f32 {
     QUARTER[i0] + (QUARTER[i0 + 1] - QUARTER[i0]) * frac
 }
 
+/// Fast `1/x` for `x >= 2.0`: Newton iteration from an integer bit-hack seed.
+///
+/// The M7's `vdiv` has *data-dependent* latency (the hardware divider early-
+/// exits on operand magnitudes), so a branchless loop's timing ends up
+/// correlated with signal level — that is the measurable `8 FX idle` vs
+/// `8 + FX` bench delta. This implementation is division-free: a fixed
+/// sequence of multiplies and subtracts with identical latency for every
+/// input, converging to within ~1.5 ulp of `1/x` across the range this
+/// module actually uses (`[27, 108]`, the `soft_clip` denominator).
+///
+/// The seed uses the fast-inverse-square-root trick's reciprocal cousin:
+/// `0x7EF311C3 - bits` is an estimate of `1/x` accurate to ~2^-8, and each
+/// Newton step squares the error (2^-8 → 2^-16 → 2^-32 after three steps,
+/// landing well below f32's 24-bit mantissa). For `x < 2.0` the seed degrades,
+/// so the caller's domain must stay in the validated range — see [`soft_clip`].
+#[inline(always)]
+fn recip(x: f32) -> f32 {
+    // Domain note: this is only called with x >= 2.0 (soft_clip's
+    // denominator is 27 + 9x^2 >= 27). The seed's validity starts at ~2.
+    debug_assert!(x >= 2.0, "recip: seed valid only for x >= 2.0, got {x}");
+    let r0 = f32::from_bits(0x7EF3_11C3 - x.to_bits());
+    let r1 = r0 * (2.0 - x * r0);
+    let r2 = r1 * (2.0 - x * r1);
+    r2 * (2.0 - x * r2)
+}
+
 /// Soft saturation, roughly tanh-shaped.
 ///
 /// A rational approximation rather than the real thing: `libm::tanhf` is
@@ -112,10 +138,11 @@ fn interp(p: f32) -> f32 {
 pub fn soft_clip(x: f32) -> f32 {
     // x * (27 + x^2) / (27 + 9x^2) is the classic Padé-style tanh
     // approximation. Clamp first so that very large inputs cannot produce
-    // ratios that misbehave.
+    // ratios that misbehave. The reciprocal goes through [`recip`], which is
+    // division-free — no data-dependent `vdiv` on the M7.
     let x = x.clamp(-3.0, 3.0);
     let x2 = x * x;
-    x * (27.0 + x2) / (27.0 + 9.0 * x2)
+    x * (27.0 + x2) * recip(27.0 + 9.0 * x2)
 }
 
 /// Hard clip to `[-1, 1]`.
@@ -220,6 +247,23 @@ mod tests {
             let x = i as f32 * 0.001;
             approx::assert_relative_eq!(soft_clip(x), x, max_relative = 0.003);
         }
+    }
+
+    #[test]
+    fn soft_clip_reciprocal_is_within_2_ulp() {
+        // The division-free Newton `recip` must stay within ~2 ulp of the
+        // true 1/x across the whole soft_clip denominator domain [27, 108].
+        // This is what keeps the curve audibly identical to the rational
+        // approximation while removing the M7's data-dependent vdiv.
+        let mut max_ulp = 0.0f32;
+        for i in 0..200_000 {
+            let x = 27.0 + (i as f32) * 81.0 / 200_000.0;
+            let exact = 1.0 / x;
+            let approx = recip(x);
+            let ulp = ((approx - exact) / exact).abs() / 1.19e-7;
+            max_ulp = max_ulp.max(ulp);
+        }
+        assert!(max_ulp < 2.0, "recip escaped 2 ulp on soft_clip domain: {max_ulp}");
     }
 
     #[test]

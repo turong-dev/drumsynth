@@ -29,14 +29,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use teensy4_bsp as bsp;
 
-use bsp::hal::usbd::{BusAdapter, EndpointMemory, EndpointState, Instances, Speed};
+use bsp::usbd::{BusAdapter, EndpointMemory, EndpointState, Instances, Speed};
 use usb_device::bus::{UsbBus, UsbBusAllocator};
 use usb_device::class_prelude::{
     DescriptorWriter, EndpointIn, EndpointOut, InterfaceNumber, UsbClass,
 };
-use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbDeviceState, UsbVidPid};
+use usb_device::device::{
+    StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbDeviceState, UsbVidPid,
+};
 use usb_device::endpoint::EndpointAddress;
-use usb_device::{Result, UsbDirection};
+use usb_device::{LangID, Result, UsbDirection};
 
 // ---- static USB objects ---------------------------------------------------
 
@@ -300,9 +302,12 @@ pub unsafe fn init(usb: Instances<1>) {
 
     {
         let device = UsbDeviceBuilder::new(bus, VID_PID)
-            .manufacturer("drumkit")
-            .product(PRODUCT)
+            .strings(&[StringDescriptors::new(LangID::EN_US)
+                .manufacturer("drumkit")
+                .product(PRODUCT)])
+            .expect("too many string descriptor languages")
             .max_packet_size_0(64)
+            .expect("EP0 max packet size must be 8, 16, 32 or 64")
             .build();
 
         // The host may send a bulk transfer that is an exact multiple of the
