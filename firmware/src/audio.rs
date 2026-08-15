@@ -93,15 +93,22 @@
 //!
 //! # Threading
 //!
-//! The SAI interrupt owns the [`DrumEngine`], the interleaved sample buffers,
-//! and the sample counter. The main loop only pushes MIDI events and wraps
-//! every `schedule_midi` in `cortex_m::interrupt::free` so a push cannot be
-//! preempted by the ISR's drain. Nothing else runs in an interrupt context in
-//! this firmware — USB and UART MIDI are polled.
+//! The main loop owns the [`DrumEngine`]. The SAI interrupt plays from a
+//! double-buffered pair of pre-rendered blocks and never touches the engine:
+//! at each block boundary it flips to the buffer the main loop filled via
+//! [`render_next`], then raises `RENDER_PENDING` to ask for the next one.
+//!
+//! That split is the fix for the TX FIFO underruns [`UNDERRUNS`] counts: a
+//! whole `process()` block (150–450 µs) no longer runs inside the interrupt,
+//! where it could starve the ~16-frame TX FIFO (~167 µs of runway). The main
+//! loop gets the whole ~667 µs block period to render, and the interrupt
+//! preempts it freely to keep the FIFO fed, so neither side can starve the
+//! other. Nothing else runs in an interrupt context in this firmware — USB
+//! and UART MIDI are polled.
 
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use cortex_m::peripheral::NVIC;
 use drum_engine::{DrumEngine, BLOCK};
@@ -126,7 +133,8 @@ pub const SAMPLE_RATE_HZ: u32 = 48_000;
 ///
 /// | LED  | tone       | meaning                                          |
 /// |------|------------|--------------------------------------------------|
-/// | blinks | sounds    | SAI clock + ISR + DAC all work — MIDI/engine is the fault |
+/// | 1 Hz blink | sounds | SAI clock + ISR + DAC all work — MIDI/engine is the fault |
+/// | 10 Hz blink | (any) | TX FIFO underruns in the last second — the engine is outrunning the FIFO inside the ISR (see [`UNDERRUNS`]). "10 Hz" = 10 full on/off cycles per second (20 toggles) |
 /// | blinks | silent    | ISR pumps frames; DAC wiring / mode straps are wrong |
 /// | solid  | (any)     | ISR fires but spins (bit clock too fast / FIFO never satisfied) |
 /// | off    | —         | ISR never fires (dead clock, NVIC, or early hang)  |
@@ -134,23 +142,35 @@ pub const SAMPLE_RATE_HZ: u32 = 48_000;
 /// Set `false` for the real instrument.
 pub const TEST_TONE: bool = false;
 
-/// The engine, shared with the main loop.
-///
-/// Set once by [`setup`] before interrupts are enabled; read only by the SAI
-/// interrupt afterwards (and only when [`TEST_TONE`] is off). The main loop
-/// keeps its own `&'static mut` and wraps `schedule_midi` in
-/// `interrupt::free`, so the two contexts never overlap.
-static ENGINE: AtomicPtr<DrumEngine> = AtomicPtr::new(core::ptr::null_mut());
-
 /// The on-board LED, handed to the SAI interrupt by [`start`] so it can blink
 /// from inside the ISR (a main-loop blink would go dark if the loop were
 /// starved by a spinning ISR — exactly the failure we want to see).
 static LED: AtomicPtr<Output> = AtomicPtr::new(core::ptr::null_mut());
 
-/// Samples fully consumed by the DAC. The next block `process` renders
-/// starts at this count. Incremented in whole blocks by the SAI interrupt;
-/// read (relaxed) by the main loop to compute arrival offsets.
+/// Samples fully consumed by the DAC. Incremented in whole blocks by the SAI
+/// interrupt; read (relaxed) by the main loop to compute arrival offsets.
 static SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Set by the SAI interrupt at each block boundary: "the buffer I just left
+/// is free — render the next block into it." Cleared by [`render_next`].
+///
+/// `SeqCst` because it also hands the renderer the [`AudioState::play_slot`]
+/// flip: the ISR flips the slot *before* raising this, so a renderer that
+/// observes this set is guaranteed to see the post-flip slot and thus never
+/// write the buffer the ISR is playing.
+static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// SAI TX FIFO underruns detected since boot.
+///
+/// `TCSR.FEF` (transmit FIFO error — a W1C status flag) latches whenever the
+/// transmitter runs out of words to clock out. This counter is the direct
+/// measurement of the aliasing bug that [`render_next`] fixes: the engine's
+/// `process()` used to run inside this ISR and outrun the ~16-frame FIFO, and
+/// [`TEST_TONE`] was clean because it never called `process()`. It should now
+/// stay at zero (or near it) with the render moved to the main loop; the LED's
+/// fast alarm blink is the same signal, one second at a time. Incremented by
+/// the SAI interrupt; read (relaxed) by anything else.
+pub static UNDERRUNS: AtomicU32 = AtomicU32::new(0);
 
 /// The SAI transmitter, owned by the SAI interrupt after [`setup`].
 static mut SAI_TX: MaybeUninit<bsp::hal::sai::Tx> = MaybeUninit::uninit();
@@ -174,8 +194,16 @@ struct AudioState {
     /// Current rendered block, planar (unused while [`TEST_TONE`] is on).
     left: [f32; BLOCK],
     right: [f32; BLOCK],
+    /// Second block buffer — `play_slot == true` plays these. Rendered by the
+    /// main loop via [`render_next`] while the other slot plays.
+    left_b: [f32; BLOCK],
+    right_b: [f32; BLOCK],
     /// Next sample of the current block to transmit.
     block_pos: usize,
+    /// Which block buffer the ISR is currently transmitting: `false` = `left`
+    /// /`right`, `true` = `left_b`/`right_b`. Flipped by the ISR at every
+    /// block boundary, before it raises [`RENDER_PENDING`].
+    play_slot: bool,
     /// The test tone's own oscillator (only used while [`TEST_TONE`] is on).
     ///
     /// A real sine, not a square wave — deliberately the same
@@ -188,26 +216,38 @@ struct AudioState {
     tone_osc: drum_engine::dsp::osc::SineOsc,
     /// Samples since the last LED toggle.
     led_counter: u32,
+    /// Samples since the last LED *cadence* toggle (distinct from the
+    /// one-second window counter above, because the alarm toggles at 20 Hz
+    /// for a visible 10 Hz on/off blink).
+    led_blink_counter: u32,
+    /// TX FIFO underruns observed within the current one-second window, used
+    /// to switch the LED to its fast alarm blink. Cleared every window; the
+    /// monotonic total lives in [`UNDERRUNS`].
+    underrun_burst: u32,
 }
 
 static mut AUDIO: AudioState = AudioState {
     left: [0.0; BLOCK],
     right: [0.0; BLOCK],
+    left_b: [0.0; BLOCK],
+    right_b: [0.0; BLOCK],
     block_pos: 0,
+    play_slot: false,
     tone_osc: drum_engine::dsp::osc::SineOsc::new(),
     led_counter: 0,
+    led_blink_counter: 0,
+    underrun_burst: 0,
 };
 
-/// Configure SAI1 as an I2S master at exactly 48 kHz and hand the engine to
-/// the SAI interrupt.
+/// Configure SAI1 as an I2S master at exactly 48 kHz.
 ///
 /// Does **not** enable the SAI or unmask its interrupt — call [`start`] once
-/// the rest of the firmware is ready.
+/// the rest of the firmware is ready. The engine is not touched here: the
+/// main loop renders through [`render_next`].
 ///
 /// # Safety
 ///
-/// Call exactly once, from `main`, before interrupts are enabled, with a
-/// raw pointer to a fully-constructed, still-alive `engine`. All module
+/// Call exactly once, from `main`, before interrupts are enabled. All module
 /// statics are written here and must not be touched again until the SAI
 /// interrupt owns them.
 #[allow(unsafe_code, static_mut_refs)]
@@ -216,7 +256,6 @@ pub unsafe fn setup(
     ccm_analog: &mut bsp::ral::ccm_analog::CCM_ANALOG,
     sai1: bsp::ral::sai::SAI1,
     pins: &mut bsp::pins::t41::Pins,
-    engine: *mut DrumEngine,
 ) {
     // 1. Reconfigure the SAI1 clock root for 48 kHz. Gate the SAI off while
     //    its clock dividers change (the driver docs require it), then back on.
@@ -312,13 +351,12 @@ pub unsafe fn setup(
         (*addr_of_mut!(AUDIO)).tone_osc.set_freq(440.0);
     }
 
-    // 4. Hand the engine to the interrupt. Pre-fill the TX FIFO with a block
-    //    of silence *before* enabling, so the transmitter never underruns at
-    //    start-up (the reference `rtic_sai_pcm5102` example does the same;
-    //    here 15 frames × 2 words stays under the 32-word FIFO). Enable the
-    //    receiver first (it generates BCLK/LRCLK), then the transmitter. Both
-    //    stay running once the ISR keeps the FIFO fed.
-    ENGINE.store(engine, Ordering::Relaxed);
+    // 4. Pre-fill the TX FIFO with a block of silence *before* enabling, so
+    //    the transmitter never underruns at start-up (the reference
+    //    `rtic_sai_pcm5102` example does the same; here 15 frames × 2 words
+    //    stays under the 32-word FIFO). Enable the receiver first (it
+    //    generates BCLK/LRCLK), then the transmitter. Both stay running once
+    //    the ISR keeps the FIFO fed.
     for _ in 0..15 {
         tx.write_frame_u32(0, &[0, 0]);
     }
@@ -371,20 +409,74 @@ pub fn sample_counter() -> u64 {
     SAMPLE_COUNTER.load(Ordering::Relaxed) as u64
 }
 
+/// Total SAI TX FIFO underruns since boot.
+///
+/// See [`UNDERRUNS`]. Monotonic, never cleared. The LED's fast alarm blink
+/// is the same signal encoded visually, one second at a time.
+///
+/// Not currently read by this firmware (there is no serial link to print
+/// through); kept as the programmatic handle for a debugger or a future
+/// output channel.
+#[allow(dead_code)]
+pub fn underruns() -> u64 {
+    UNDERRUNS.load(Ordering::Relaxed) as u64
+}
+
+/// Render the next block into the buffer the SAI interrupt isn't playing.
+///
+/// The SAI interrupt flips between the two block buffers at every boundary
+/// and raises [`RENDER_PENDING`]; the main loop calls this once per loop
+/// pass, and it renders exactly when that flag is up, clearing it.
+///
+/// Rendering here — in the main loop, not the interrupt — is the fix for the
+/// TX FIFO underruns [`UNDERRUNS`] counts: `process()` takes 150–450 µs but
+/// the FIFO holds only ~16 frames (~167 µs), so a block rendered inside the
+/// ISR could never keep up. The main loop has the whole ~667 µs block period
+/// to render, and the ISR preempts it freely to keep the FIFO fed, so neither
+/// side can starve the other.
+///
+/// The renderer must finish before the next boundary (~667 µs later). The
+/// worst measured render is ~453 µs and starts within a few µs of the
+/// boundary, so it always clears the deadline; `TCR4.FCONT=1` makes a rare
+/// miss a one-block glitch rather than a halted clock.
+pub fn render_next(engine: &mut DrumEngine) {
+    if !RENDER_PENDING.swap(false, Ordering::SeqCst) {
+        return;
+    }
+
+    // SAFETY: the main loop is the only context that touches the engine and
+    // the render slots; the ISR reads only the slot `play_slot` points at
+    // (flipped *before* RENDER_PENDING was raised), so the slot chosen below
+    // is always the one the ISR just finished playing.
+    #[allow(unsafe_code, static_mut_refs)]
+    let st = unsafe { &mut *addr_of_mut!(AUDIO) };
+    let slot = cortex_m::interrupt::free(|_| !st.play_slot);
+    let (left, right) = if slot {
+        (&mut st.left_b, &mut st.right_b)
+    } else {
+        (&mut st.left, &mut st.right)
+    };
+    engine.process(left, right);
+}
+
 /// The SAI1 FIFO-pump interrupt.
 ///
 /// Fires whenever the TX FIFO drains to or below its 16-word watermark (or
 /// RX's own watermark trips — see `SAI_RX`). Refills one frame (L+R, 32-bit
-/// left-justified) per pass until the request flag clears, rendering a fresh
-/// block from the engine at each block boundary. Also drains and discards
-/// whatever RX collected, every pass, unconditionally — see `SAI_RX` for why
-/// that isn't optional.
+/// left-justified) per pass until the request flag clears, flipping to the
+/// other pre-rendered block buffer at each block boundary. Never calls into
+/// the engine — [`render_next`] does that in the main loop, and this ISR is
+/// what guarantees the FIFO keeps getting fed while it renders. Also drains
+/// and discards whatever RX collected, every pass, unconditionally — see
+/// `SAI_RX` for why that isn't optional — and counts TX FIFO underruns into
+/// [`UNDERRUNS`] (see the FIFO_ERROR check below; the LED fast-blinks while
+/// any occur).
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub unsafe extern "C" fn SAI1() {
     // SAFETY: this is the only context that touches these statics; setup ran
-    // before the interrupt was unmasked, and the main loop's schedule_midi is
-    // interrupt::free'd.
+    // before the interrupt was unmasked, and the main loop's render_next
+    // serializes its buffer access through the RENDER_PENDING handshake.
     let tx = unsafe { &mut *SAI_TX.as_mut_ptr() };
     let rx = unsafe { &mut *SAI_RX.as_mut_ptr() };
     let st = unsafe { &mut *addr_of_mut!(AUDIO) };
@@ -399,17 +491,25 @@ pub unsafe extern "C" fn SAI1() {
         rx.read_frame_u32(0, &mut discard);
     }
 
+    // Count TX FIFO underruns. FEF latches (W1C) whenever the transmitter
+    // ran dry — with the render moved to the main loop this should stay at
+    // zero, and any climb is a regression alarm — and it stays set until
+    // cleared, so one check per ISR pass is enough to catch any underrun
+    // since the previous pass. The LED alarm blink and the [`UNDERRUNS`]
+    // counter are both fed from here.
+    if tx.status().contains(Status::FIFO_ERROR) {
+        tx.clear_status(Status::FIFO_ERROR);
+        UNDERRUNS.fetch_add(1, Ordering::Relaxed);
+        st.underrun_burst = st.underrun_burst.saturating_add(1);
+    }
+
     while tx.status().contains(Status::FIFO_REQUEST) {
         if st.block_pos == BLOCK {
-            if !TEST_TONE {
-                // SAFETY: ENGINE was stored by setup before this ISR was
-                // unmasked, and the main loop cannot touch the engine while
-                // this ISR runs (interrupt::free) or concurrently (no other
-                // ISR).
-                let engine = unsafe { &mut *ENGINE.load(Ordering::Acquire) };
-                engine.process(&mut st.left, &mut st.right);
-            }
+            // Flip to the other pre-rendered buffer and ask the main loop for
+            // the next block. No engine work here — that was the underrun bug.
+            st.play_slot = !st.play_slot;
             st.block_pos = 0;
+            RENDER_PENDING.store(true, Ordering::SeqCst);
             SAMPLE_COUNTER.fetch_add(BLOCK as u32, Ordering::Relaxed);
         }
 
@@ -418,16 +518,34 @@ pub unsafe extern "C" fn SAI1() {
             // sine-based machines use, at half amplitude.
             let level = st.tone_osc.tick() * 0.5;
             (level, level)
+        } else if st.play_slot {
+            (st.left_b[st.block_pos], st.right_b[st.block_pos])
         } else {
             (st.left[st.block_pos], st.right[st.block_pos])
         };
 
-        // Blink the on-board LED at ~1 Hz from inside the ISR. A solid LED
-        // means the ISR is firing but spinning (bit clock too fast to keep
-        // the FIFO fed); a dark LED means it never fires at all.
+        // Blink the on-board LED from inside the ISR. The one-second window
+        // counter doubles as the alarm sampler: a window in which the TX
+        // FIFO underran at least once blinks fast (10 full on/off cycles per
+        // second, i.e. a toggle every 50 ms) instead of the usual 1 Hz, so
+        // the "yes, it is underrunning" signal is visible with no serial
+        // link, and it recovers on its own once a full second goes by clean.
+        // A solid LED still means the ISR is firing but spinning (bit clock
+        // too fast to keep the FIFO fed); a dark LED means it never fires at
+        // all.
         st.led_counter += 1;
         if st.led_counter >= SAMPLE_RATE_HZ {
             st.led_counter = 0;
+            st.underrun_burst = 0;
+        }
+        st.led_blink_counter += 1;
+        let cadence = if st.underrun_burst > 0 {
+            SAMPLE_RATE_HZ / 20
+        } else {
+            SAMPLE_RATE_HZ
+        };
+        if st.led_blink_counter >= cadence {
+            st.led_blink_counter = 0;
             if !led.is_null() {
                 // SAFETY: `start` handed us a pointer to a `main`-lifetime
                 // LED, and `toggle` is an atomic hardware write.

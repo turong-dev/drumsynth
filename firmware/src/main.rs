@@ -5,7 +5,9 @@
 //! Everything that matters architecturally:
 //!
 //! - the engine is constructed once, before interrupts are enabled
-//! - the audio interrupt does nothing but interleave and call `process`
+//! - the audio interrupt plays pre-rendered double-buffered blocks; the main
+//!   loop renders them via `audio::render_next` (a whole `process()` cannot
+//!   fit inside the ISR without underrunning the TX FIFO)
 //! - MIDI is parsed in the engine crate, so it is host-testable
 //! - parameter updates happen outside the callback, at CC rate
 //!
@@ -145,22 +147,17 @@ fn main() -> ! {
 
     // SAI1 as an I2S master at exactly 48 kHz: the 48 kHz clock chain, pad
     // routing, and SAI1 configuration live in the `audio` module. The SAI
-    // interrupt takes ownership of `engine` (the main loop keeps scheduling
-    // MIDI into it, guarded by `interrupt::free`). Interrupts stay masked
-    // until `audio::start()`.
+    // interrupt never touches the engine — it only plays the double-buffered
+    // blocks the main loop renders via `audio::render_next` below (that split
+    // is what fixed the FIFO underruns the old in-ISR `process()` caused).
+    // Interrupts stay masked until `audio::start()`.
     //
     // SAFETY: called exactly once, before interrupts are enabled; the engine
     // is fully constructed. Runs before `board::led` / `board::lpuart` move
     // `pins.p13` / `pins.p0` / `pins.p1` out of the struct.
     #[allow(unsafe_code)]
     unsafe {
-        audio::setup(
-            &mut ccm,
-            &mut ccm_analog,
-            sai1,
-            &mut pins,
-            core::ptr::addr_of_mut!(*engine),
-        );
+        audio::setup(&mut ccm, &mut ccm_analog, sai1, &mut pins);
     }
 
     let led = board::led(&mut gpio2, pins.p13);
@@ -179,8 +176,8 @@ fn main() -> ! {
     // this reorder fixes. Everything else now happens after the ISR is
     // already keeping the FIFO fed.
     //
-    // SAFETY: everything the ISR touches — engine, SAI1, buffers, counter,
-    // LED — was initialized; call this exactly once.
+    // SAFETY: everything the ISR touches — SAI1, buffers, counter, LED — was
+    // initialized; call this exactly once.
     #[allow(unsafe_code)]
     unsafe {
         audio::start(&led);
@@ -226,6 +223,10 @@ fn main() -> ! {
         // USB MIDI: the host sends 4-byte USB MIDI event packets, each a
         // status byte plus up to two data bytes. Feed those through the
         // same parser as the DIN socket — USB MIDI is just a transport.
+        //
+        // Polled on *every* pass: `usb::poll` also drives enumeration and
+        // the control transfers, so the device disappears from the host if
+        // the loop ever stops reaching it.
         let n = usb::poll(&mut usb_midi_buf);
         let mut i = 0;
         while i < n {
@@ -234,11 +235,7 @@ fn main() -> ! {
                     // Shared with the host `device` harness — the Teensy and
                     // the Mac tuning rig interpret the same bytes identically.
                     let offset = arrival_offset(audio::sample_counter());
-                    // SAFETY: interrupts off while pushing to the TimedQueue,
-                    // so the SAI interrupt cannot observe the push half-made.
-                    cortex_m::interrupt::free(|_| {
-                        schedule_midi(engine, event, offset);
-                    });
+                    schedule_midi(engine, event, offset);
                 }
             }
             i += 4;
@@ -250,12 +247,18 @@ fn main() -> ! {
         while let Ok(byte) = midi_uart.read() {
             if let Some(event) = parser_uart.push(byte) {
                 let offset = arrival_offset(audio::sample_counter());
-                // SAFETY: as above — never push mid-drain.
-                cortex_m::interrupt::free(|_| {
-                    schedule_midi(engine, event, offset);
-                });
+                schedule_midi(engine, event, offset);
             }
         }
+
+        // Render the audio: keep one block rendered ahead of the SAI
+        // interrupt. `render_next` does nothing unless the ISR raised
+        // `RENDER_PENDING` at a block boundary, so this costs a couple of
+        // loads on every other pass and a 150–450 µs `process()` once per
+        // block — inside the main loop, where the ISR can preempt it to keep
+        // the TX FIFO fed (see the `audio` module docs for why rendering in
+        // the ISR was the underrun bug).
+        audio::render_next(engine);
 
         // The LED blinks from inside the audio ISR (see `audio::TEST_TONE`);
         // nothing here to do for it.
