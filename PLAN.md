@@ -314,16 +314,35 @@ the remaining ~32% alongside the FX cost.
     `DefaultHandler` for vector 56) refills `write_frame_u32` until
     `Status::FIFO_REQUEST` clears; watermark 16 of 32 words → ~333 µs between
     interrupts. Revisit DMA in 8-C where 4 data lines are in play.
-  - Threading: the ISR owns the engine + sample counter; main loop wraps every
-    `schedule_midi` in `cortex_m::interrupt::free` (TimedQueue isn't
-    lock-free). `sample_counter()` is block-aligned, so `arrival_offset` is 0
-    for now — block boundary is the earliest a note can play.
+  - Threading (revised after the underrun fix): the **main loop owns the
+    engine**; the ISR only plays from a double-buffered pair of pre-rendered
+    blocks. At each block boundary it flips to the buffer the main loop
+    filled via `audio::render_next`, then raises `RENDER_PENDING`. Rendering
+    inside the ISR is why the aliasing bug happened — a whole `process()`
+    (150–450 µs) cannot fit beside the ~16-frame TX FIFO (~167 µs of runway);
+    the main loop has the full ~667 µs block period and the ISR preempts it
+    freely to keep the FIFO fed. `sample_counter()` is block-aligned, so
+    `arrival_offset` is 0 — block boundary is the earliest a note can play.
   - Wiring detail: SCK tied low (PCM5102 internal PLL); the SAI drives BCLK /
     LRCLK directly, no MCLK pin wired.
 - [ ] Audio callback in ITCM, hot buffers in DTCM (deferred to here).
       STILL DEFERRED — the ISR runs from flash/OCRAM and the `AudioState`
       buffers sit in DTCM `.bss`; measure before moving (DWT on the ISR body).
       Bench-gated by 8-C's whole output stage.
+- [ ] **Worst-case render-deadline measurement** — the regression tripwire for
+      the underrun bug. `bench` cannot see the bug: it times isolated
+      `process()` calls and never the interaction between the main-loop render
+      and the SAI ISR. Instrument the real path instead — `audio::render_next`
+      stamps `DWT::cycle_count()` at the block boundary (in the ISR, before
+      raising `RENDER_PENDING`) and again after `process()` returns, tracking
+      the worst boundary→done gap against the 400,000-cycle block period. All
+      DWT cycle counts, the same primitive `bench` already uses, plus one
+      atomic stamp in the ISR — nothing about the audio path changes. Report
+      worst gap, best margin below deadline, and how many blocks approached it;
+      output over the existing `imxrt_log` USB serial (bench's channel) from a
+      debug bin. Run under a full playing load (all 8 tracks + sends) so the
+      measured margin is the real one. If a future change pushes the worst gap
+      toward the deadline, this number and the LED's fast underrun blink agree.
 
 **8-M — MIDI (USB device)** — the engine side is done; this is firmware.
 
