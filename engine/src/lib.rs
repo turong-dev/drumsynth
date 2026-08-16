@@ -434,6 +434,22 @@ impl TimedQueue {
     }
 }
 
+/// Retrigger de-click crossfade length (samples). A hit landing on an
+/// already-sounding voice would otherwise step the output from the old tail
+/// to the new voice's attack; the output is instead crossfaded over this
+/// window (1 ms at 48 kHz).
+const DECLICK_SAMPLES: usize = 48;
+
+/// Inverse of [`DECLICK_SAMPLES`] — the crossfade advances this much per
+/// sample, reaching exactly 1.0 on the last sample of the window so the
+/// switch back to the raw signal is seamless.
+const DECLICK_STEP: f32 = 1.0 / DECLICK_SAMPLES as f32;
+
+/// Choke fade length (samples). A choked voice keeps ringing under a linear
+/// ramp to zero over this window (5 ms at 48 kHz) instead of being cut
+/// instantly, then is hard-reset.
+const CHOKE_SAMPLES: usize = 240;
+
 /// One channel of the kit.
 pub struct Track {
     /// Underlying synthesis model. Reassignable via [`Track::load_machine`].
@@ -466,6 +482,22 @@ pub struct Track {
     eff_send_delay: f32,
     /// Effective reverb send after modulation.
     eff_send_reverb: f32,
+
+    // ---- de-click / choke smoothing ----
+    /// Samples left in the retrigger crossfade window. 0 = bypassed.
+    declick_left: usize,
+    /// Crossfade progress 0..1, advanced by [`DECLICK_STEP`] per sample.
+    declick_t: f32,
+    /// Crossfade start points: the output at the moment of the retrigger.
+    declick_from_l: f32,
+    declick_from_r: f32,
+    /// Last output, synced every tick. Seeded into `declick_from_*` when a
+    /// retrigger arms the window, so the crossfade always starts from the
+    /// actual previous output.
+    declick_l: f32,
+    declick_r: f32,
+    /// Samples left in the choke fade-out window. 0 = no fade in progress.
+    choke_fade_left: usize,
 }
 
 impl Track {
@@ -498,6 +530,13 @@ impl Track {
             eff_level: strip.level,
             eff_send_delay: strip.send_delay,
             eff_send_reverb: strip.send_reverb,
+            declick_left: 0,
+            declick_t: 0.0,
+            declick_from_l: 0.0,
+            declick_from_r: 0.0,
+            declick_l: 0.0,
+            declick_r: 0.0,
+            choke_fade_left: 0,
         }
     }
 
@@ -761,22 +800,51 @@ impl Track {
     /// Begin a hit at `velocity` (0..=1.0). Fires LFO triggers and stores
     /// velocity for the control pass.
     pub fn trigger(&mut self, velocity: f32) {
+        let retrigger = self.slot.is_active();
         self.slot.trigger(velocity);
         self.amp_env.trigger(velocity);
         self.mod_state.trigger(velocity);
+        // A hit landing on an already-sounding voice would step the output
+        // from the old tail to the new attack; arm a short crossfade from
+        // the current output instead. A fresh hit from silence cancels any
+        // stale window and any in-progress choke fade.
+        self.choke_fade_left = 0;
+        if retrigger {
+            self.declick_from_l = self.declick_l;
+            self.declick_from_r = self.declick_r;
+            self.declick_left = DECLICK_SAMPLES;
+            self.declick_t = 0.0;
+        } else {
+            self.declick_left = 0;
+        }
     }
 
-    /// Force to silence immediately.
+    /// Force to silence immediately. Used by panic (kill switch) — chokes
+    /// use [`Track::choke`] so their cut is faded, not instant.
     pub fn reset(&mut self) {
         self.slot.reset();
         self.amp_env.reset();
         self.filter.reset();
         self.mod_state.reset();
+        self.declick_left = 0;
+        self.declick_t = 0.0;
+        self.choke_fade_left = 0;
     }
 
-    /// Still producing output?
+    /// Choke this voice: fade its output to zero over [`CHOKE_SAMPLES`]
+    /// rather than cutting it. The machine keeps ringing under the fade and
+    /// is hard-reset once the fade completes. A no-op when already silent or
+    /// already fading.
+    pub fn choke(&mut self) {
+        if self.slot.is_active() && self.choke_fade_left == 0 {
+            self.choke_fade_left = CHOKE_SAMPLES;
+        }
+    }
+
+    /// Still producing output? Also true for the tail of a [`Track::choke`]
+    /// fade, so the fading voice keeps rendering until it reaches silence.
     pub fn is_active(&self) -> bool {
-        self.slot.is_active()
+        self.slot.is_active() || self.choke_fade_left > 0
     }
 
     /// Per-block control pass. Advances LFOs, sums modulation onto base
@@ -948,7 +1016,40 @@ impl Track {
         let driven = dsp::fast::soft_clip(stage * self.eff_drive);
         let filtered = self.filter.tick(driven);
         let mixed = filtered * self.eff_level;
-        (mixed * self.pan_l, mixed * self.pan_r)
+        let mut l = mixed * self.pan_l;
+        let mut r = mixed * self.pan_r;
+
+        // Choke fade-out: linear ramp to silence, then hard-reset the voice.
+        if self.choke_fade_left > 0 {
+            self.choke_fade_left -= 1;
+            let g = self.choke_fade_left as f32 / CHOKE_SAMPLES as f32;
+            l *= g;
+            r *= g;
+            if self.choke_fade_left == 0 {
+                self.slot.reset();
+                self.amp_env.reset();
+                self.filter.reset();
+                self.mod_state.reset();
+                self.declick_left = 0;
+            }
+        }
+
+        // Retrigger de-click: sync the last output, then if a window is
+        // armed, crossfade from the pre-trigger output toward the new voice.
+        // The last sample of the window is pure `l`/`r` (t = 1), so the
+        // switch back to the raw signal is seamless.
+        self.declick_l = l;
+        self.declick_r = r;
+        if self.declick_left > 0 {
+            self.declick_left -= 1;
+            self.declick_t += DECLICK_STEP;
+            let t = self.declick_t.min(1.0);
+            let inv = 1.0 - t;
+            l = self.declick_from_l * inv + l * t;
+            r = self.declick_from_r * inv + r * t;
+        }
+
+        (l, r)
     }
 }
 
@@ -1087,12 +1188,13 @@ impl DrumEngine {
             }
             i += 1;
         }
-        // Reset choked tracks instantly. `id` read before reset so a track
-        // being choked can also be the layering source.
+        // Fade out choked tracks — a short fade instead of an instant cut, so
+        // the cut-off tail doesn't click. The fade completes on its own even
+        // if the choke source never triggers again.
         let mut j = 0;
         while j < TRACKS {
             if (choke & (1 << j)) != 0 && j != track {
-                self.tracks[j].reset();
+                self.tracks[j].choke();
             }
             j += 1;
         }
@@ -1740,6 +1842,13 @@ mod tests {
         e.tracks[0].strip.choke_mask = 1 << 1;
         e.trigger(1, 1.0); // OH starts
         e.trigger(0, 1.0); // CH starts → chokes 1
+        // The choke fades the OH out over CHOKE_SAMPLES rather than cutting
+        // instantly; run past the fade and confirm the voice has gone.
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for _ in 0..(CHOKE_SAMPLES / BLOCK + 2) {
+            e.process(&mut l, &mut r);
+        }
         assert!(!e.tracks[1].is_active(), "OH should have been choked");
         assert!(e.tracks[0].is_active(), "CH should still be active");
     }

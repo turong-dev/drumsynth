@@ -59,6 +59,21 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         bars: usize,
     },
+    /// Render a retrigger/choke stress test to a WAV file.
+    ///
+    /// Dense sample-accurate rolls on the kick, snare, and closed hat, plus
+    /// an open hat being choked over and over — the "lots of notes quickly"
+    /// scenario that used to produce clicks at the tail cuts. Regression
+    /// audition: render it, play it, and confirm the cut-off tails are faded
+    /// instead of stepped.
+    Stress {
+        /// Output path.
+        #[arg(short, long, default_value = "stress.wav")]
+        output: String,
+        /// Length in seconds.
+        #[arg(short, long, default_value_t = 6.0)]
+        seconds: f32,
+    },
     /// Render one file per value of a swept macro knob.
     ///
     /// `<machine>` is one of `bd-classic`, `sd-natural`, `hat-classic`.
@@ -296,6 +311,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
+        }
+
+        Command::Stress { output, seconds } => {
+            let samples = render_stress(seconds);
+            write_wav(&output, &samples)?;
+            let rendered = samples.len() as f32 / 2.0 / SAMPLE_RATE;
+            println!("wrote {output} ({rendered:.2}s)");
         }
 
         Command::Sweep {
@@ -709,6 +731,45 @@ fn render_pattern(pattern: &Pattern, bpm: f32, bars: usize) -> Vec<f32> {
             next_step_at += samples_per_step;
         }
 
+        engine.process(&mut l, &mut r);
+        for i in 0..BLOCK {
+            out.push(l[i]);
+            out.push(r[i]);
+        }
+    }
+
+    out
+}
+
+/// Render a retrigger/choke stress test: sample-accurate dense rolls that
+/// repeatedly land on sounding voices (the "lots of notes quickly" click
+/// scenario), including the closed-hat hitting on top of a ringing open hat
+/// so the choke fade is exercised every iteration.
+fn render_stress(seconds: f32) -> Vec<f32> {
+    let mut engine = DrumEngine::new();
+    setup_kit_mix(&mut engine);
+
+    let total_samples = (seconds * SAMPLE_RATE) as usize;
+    let total_blocks = total_samples / BLOCK;
+    let mut out = Vec::with_capacity(total_blocks * BLOCK * 2);
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+
+    // (track, trigger period in samples): kick ~137 Hz roll, snare roll,
+    // closed hat ~107 Hz roll (each hit chokes the ringing open hat), open
+    // hat re-triggered every ~38 ms so there is always a tail to cut, and a
+    // fast SyTone pulse.
+    let schedule = [(0, 350usize), (1, 300usize), (2, 450usize), (3, 1800usize), (7, 400usize)];
+    let mut next = [0usize; TRACKS];
+
+    for block in 0..total_blocks {
+        let block_start = block * BLOCK;
+        for &(track, period) in &schedule {
+            while next[track] < block_start + BLOCK {
+                engine.trigger(track, 1.0);
+                next[track] += period;
+            }
+        }
         engine.process(&mut l, &mut r);
         for i in 0..BLOCK {
             out.push(l[i]);
