@@ -24,7 +24,7 @@
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
-use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE};
+use crate::machines::{NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_LEVEL, SLOT_MACH_1, SLOT_MACH_0};
 use crate::SAMPLE_RATE;
 
 /// CB Classic machine.
@@ -62,10 +62,10 @@ impl CbClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 300.0 + 700.0 * macros[SLOT_TUNE]; // TUNE 300..1000 Hz
-        let decay_s = 0.03 + 0.37 * macros[SLOT_DECAY]; // DEC 30..400 ms
-        let detune = 1.0 + 0.5 * macros[SLOT_SWEEP]; // DET 1.0..1.5
-        let bpf_hz = 300.0 + 3700.0 * macros[SLOT_CUT]; // BPF 300..4000 Hz
+        let base_hz = 300.0 + 700.0 * macros[SLOT_MACH_0]; // TUNE 300..1000 Hz
+        let decay_s = 0.03 + 0.37 * macros[SLOT_MACH_5]; // DEC 30..400 ms
+        let detune = 1.0 + 0.5 * macros[SLOT_MACH_1]; // DET 1.0..1.5
+        let bpf_hz = 300.0 + 3700.0 * macros[SLOT_FILT_0]; // BPF 300..4000 Hz
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.freq_a = base_hz * self.freq_scale;

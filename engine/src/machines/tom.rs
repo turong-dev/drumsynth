@@ -28,7 +28,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -73,11 +73,11 @@ impl Tom {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 45.0 + 175.0 * macros[SLOT_TUNE]; // TUNE 45..220 Hz
-        let pitch_ratio = 1.0 + 4.0 * macros[SLOT_SWEEP]; // SWEEP 1×..5×
-        let pitch_decay_s = 0.02 + 0.18 * macros[SLOT_SWEEP_TIME]; // SWP_T 20..200 ms
-        let amp_decay_s = 0.1 + 0.8 * macros[SLOT_DECAY]; // DEC 100..900 ms
-        let stick_amount = macros[SLOT_SHAPE]; // STICK 0..1
+        let end_hz = 45.0 + 175.0 * macros[SLOT_MACH_0]; // TUNE 45..220 Hz
+        let pitch_ratio = 1.0 + 4.0 * macros[SLOT_MACH_1]; // SWEEP 1×..5×
+        let pitch_decay_s = 0.02 + 0.18 * macros[SLOT_MACH_2]; // SWP_T 20..200 ms
+        let amp_decay_s = 0.1 + 0.8 * macros[SLOT_MACH_5]; // DEC 100..900 ms
+        let stick_amount = macros[SLOT_MACH_7]; // STICK 0..1
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;

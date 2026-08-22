@@ -26,10 +26,10 @@
 //!
 //! | Bank | Slots | Group                 |
 //! |------|-------|-----------------------|
-//! | 0    | 0–7   | PITCH (tune, sweep, mod source, machine) |
-//! | 1    | 8–15  | FILTER (cutoff/HPF/BPF, resonance/LPF)   |
-//! | 2    | 16–23 | AMP (decay, level, shape, mix, sends)    |
-//! | 3    | 24–31 | MOD (FM/mod amplitude, env decay)        |
+//! | 0    | 0–7   | MACH (tune, sweep, FM, decay, shape) |
+//! | 1    | 8–15  | FILT (machine filter + strip SVF + strip AHD env) |
+//! | 2    | 16–23 | TRACK (machine select, output, pan, level, sends) |
+//! | 3    | 24–31 | MOD (FM mod amount/env + LFOs) |
 
 pub mod bd_classic;
 pub mod bd_fm;
@@ -82,65 +82,94 @@ pub const fn macro_index(bank: usize, index: usize) -> usize {
     bank * MACROS_PER_BANK + index
 }
 
-/// PITCH bank: tune, pitch sweep, and the FM mod source.
-pub const BANK_PITCH: usize = 0;
-/// FILTER bank: cutoff/HPF/BPF and resonance/LPF.
-pub const BANK_FILTER: usize = 1;
-/// AMP bank: envelope, level, shape, mix, and sends.
-pub const BANK_AMP: usize = 2;
-/// MOD bank: FM/mod amplitude and env decay.
+/// MACH bank: machine-specific synthesis controls. Numbered, not named —
+/// each machine assigns meaning via `MACHINE_INFO` and `set_macros`.
+pub const BANK_MACH: usize = 0;
+/// FILT bank: machine-internal filter (numbered) + strip SVF + strip AHD env.
+pub const BANK_FILT: usize = 1;
+/// TRACK bank: track-level routing and mixing (machine select, output, pan, level, sends).
+pub const BANK_TRACK: usize = 2;
+/// MOD bank: LFOs only.
 pub const BANK_MOD: usize = 3;
 
-// PITCH slots (bank 0). CC 20 + flat.
-/// PITCH bank: settled fundamental. CC 20.
-pub const SLOT_TUNE: usize = macro_index(BANK_PITCH, 0);
-/// PITCH bank: pitch-sweep depth. CC 21.
-pub const SLOT_SWEEP: usize = macro_index(BANK_PITCH, 1);
-/// PITCH bank: pitch-sweep time / modulator feedback. CC 22.
-pub const SLOT_SWEEP_TIME: usize = macro_index(BANK_PITCH, 2);
-/// PITCH bank: FM modulator ratio (BD FM only). CC 23.
-pub const SLOT_MOD_HZ: usize = macro_index(BANK_PITCH, 3);
-/// PITCH bank: FM modulator envelope decay (BD FM only). CC 24.
-pub const SLOT_MOD_DC: usize = macro_index(BANK_PITCH, 4);
-/// PITCH bank: machine selector, quantised over [`MachineId::ALL`]. CC 25.
-pub const SLOT_MACHINE: usize = macro_index(BANK_PITCH, 5);
+// MACH slots (bank 0). CC 20 + flat. Numbered — each machine lays out its
+// own parameters here. The name/abbrev/default for each slot is defined
+// per-machine in `MACHINE_INFO`.
+/// MACH bank slot 0. CC 20. Machine-specific.
+pub const SLOT_MACH_0: usize = macro_index(BANK_MACH, 0);
+/// MACH bank slot 1. CC 21. Machine-specific.
+pub const SLOT_MACH_1: usize = macro_index(BANK_MACH, 1);
+/// MACH bank slot 2. CC 22. Machine-specific.
+pub const SLOT_MACH_2: usize = macro_index(BANK_MACH, 2);
+/// MACH bank slot 3. CC 23. Machine-specific.
+pub const SLOT_MACH_3: usize = macro_index(BANK_MACH, 3);
+/// MACH bank slot 4. CC 24. Machine-specific.
+pub const SLOT_MACH_4: usize = macro_index(BANK_MACH, 4);
+/// MACH bank slot 5. CC 25. Machine-specific.
+pub const SLOT_MACH_5: usize = macro_index(BANK_MACH, 5);
+/// MACH bank slot 6. CC 26. Machine-specific.
+pub const SLOT_MACH_6: usize = macro_index(BANK_MACH, 6);
+/// MACH bank slot 7. CC 27. Machine-specific.
+pub const SLOT_MACH_7: usize = macro_index(BANK_MACH, 7);
 
-// FILTER slots (bank 1). CC 20 + flat.
-/// FILTER bank: cutoff / HPF / BPF frequency family. CC 28.
-pub const SLOT_CUT: usize = macro_index(BANK_FILTER, 0);
-/// FILTER bank: resonance / lowpass cutoff family. CC 29.
-pub const SLOT_LPF: usize = macro_index(BANK_FILTER, 1);
+// FILT slots (bank 1). CC 20 + flat.
+/// FILT bank: machine-internal filter slot 0. CC 28. Numbered — meaning
+/// varies per machine (HPF, BPF, etc.).
+pub const SLOT_FILT_0: usize = macro_index(BANK_FILT, 0);
+/// FILT bank: machine-internal filter slot 1. CC 29. Numbered — meaning
+/// varies per machine (LPF, resonance, Q, etc.).
+pub const SLOT_FILT_1: usize = macro_index(BANK_FILT, 1);
+/// FILT bank: per-track strip SVF cutoff (log-mapped 20 Hz..20 kHz). CC 30.
+/// Track-routed: drives [`crate::StripParams::f_cutoff_hz`], not the machine.
+pub const SLOT_STRIP_CUT: usize = macro_index(BANK_FILT, 2);
+/// FILT bank: per-track strip SVF resonance (0.5..20 Q). CC 31.
+/// Track-routed: drives [`crate::StripParams::f_reso_q`], not the machine.
+pub const SLOT_STRIP_RESO: usize = macro_index(BANK_FILT, 3);
+/// FILT bank: per-track strip AHD attack (0..1 s). CC 32.
+/// Track-routed: drives [`crate::StripParams::amp_attack_s`].
+pub const SLOT_STRIP_ATK: usize = macro_index(BANK_FILT, 4);
+/// FILT bank: per-track strip AHD hold (0..10 s). CC 33.
+/// Track-routed: drives [`crate::StripParams::amp_hold_s`].
+pub const SLOT_STRIP_HOLD: usize = macro_index(BANK_FILT, 5);
+/// FILT bank: per-track strip AHD decay (0.01..10 s). CC 34.
+/// Track-routed: drives [`crate::StripParams::amp_decay_s`].
+pub const SLOT_STRIP_DEC: usize = macro_index(BANK_FILT, 6);
 
-// AMP slots (bank 2). CC 20 + flat.
-/// AMP bank: per-machine output level. CC 36.
-pub const SLOT_LEVEL: usize = macro_index(BANK_AMP, 0);
-/// AMP bank: per-machine panning. CC 37.
-pub const SLOT_PAN: usize = macro_index(BANK_AMP, 1);
-/// AMP bank: amp-envelope decay time. CC 38.
-pub const SLOT_DECAY: usize = macro_index(BANK_AMP, 2);
-/// AMP bank: secondary/noise decay time. CC 39.
-pub const SLOT_DECAY_2: usize = macro_index(BANK_AMP, 3);
-/// AMP bank: voice-shaping amount (drive / stick / noise level). CC 40.
-pub const SLOT_SHAPE: usize = macro_index(BANK_AMP, 4);
-/// AMP bank: dry/wet or noise/body mix. CC 41.
-pub const SLOT_MIX: usize = macro_index(BANK_AMP, 5);
-/// AMP bank: delay send (track-routed). CC 42. Zero this (and
+// TRACK slots (bank 2). CC 20 + flat.
+/// TRACK bank: machine selector, quantised over [`MachineId::ALL`]. CC 36.
+/// Track-routed: swaps the machine on this track.
+pub const SLOT_MACHINE: usize = macro_index(BANK_TRACK, 0);
+/// TRACK bank: per-track output routing. 0..1 quantised over [`crate::OutPair`]
+/// (`Master`, `Aux1`, `Aux2`, `Aux3`). CC 37. Track-routed.
+pub const SLOT_OUT: usize = macro_index(BANK_TRACK, 1);
+/// TRACK bank: per-track panning. CC 38. Track-routed.
+pub const SLOT_PAN: usize = macro_index(BANK_TRACK, 2);
+/// TRACK bank: per-track output level. CC 39. Track-routed.
+pub const SLOT_LEVEL: usize = macro_index(BANK_TRACK, 3);
+/// TRACK bank: delay send (track-routed). CC 40. Zero this (and
 /// [`SLOT_SEND_REVERB`]) to take the send-FX bus out of the picture when
 /// isolating a single track's CPU cost.
-pub const SLOT_SEND_DELAY: usize = macro_index(BANK_AMP, 6);
-/// AMP bank: reverb send (track-routed). CC 43. See [`SLOT_SEND_DELAY`].
-pub const SLOT_SEND_REVERB: usize = macro_index(BANK_AMP, 7);
+pub const SLOT_SEND_DELAY: usize = macro_index(BANK_TRACK, 4);
+/// TRACK bank: reverb send (track-routed). CC 41. See [`SLOT_SEND_DELAY`].
+pub const SLOT_SEND_REVERB: usize = macro_index(BANK_TRACK, 5);
 
-// MOD slots (bank 3). CC 20 + flat.
-/// MOD bank: FM/mod depth. CC 44.
-pub const SLOT_MOD_AMOUNT: usize = macro_index(BANK_MOD, 0);
-/// MOD bank: FM/mod envelope decay. CC 45.
-pub const SLOT_MOD_ENV: usize = macro_index(BANK_MOD, 1);
-/// MOD bank: per-track output routing. 0..1 quantised over [`OutPair`]
-/// (`Master`, `Aux1`, `Aux2`, `Aux3`) — same shape as [`SLOT_MACHINE`]:
-/// jumps instantly under CC rather than smoothing, since routing is a
-/// discrete choice. Default `0.0` = `Master`. CC 46.
-pub const SLOT_OUT: usize = macro_index(BANK_MOD, 2);
+// MOD slots (bank 3). CC 20 + flat. LFOs only.
+/// MOD bank: LFO 1 rate. 0..0.5 = slow range (0.1..10 Hz), 0.5..1 = fast
+/// range (1..100 Hz), log-mapped within each half. CC 46. Track-routed.
+pub const SLOT_LFO1_RATE: usize = macro_index(BANK_MOD, 2);
+/// MOD bank: LFO 1 depth (0..1). CC 47. Track-routed.
+pub const SLOT_LFO1_DEPTH: usize = macro_index(BANK_MOD, 3);
+/// MOD bank: LFO 1 destination (quantised over [`crate::dsp::ModDest`]). CC 48.
+/// Track-routed.
+pub const SLOT_LFO1_DEST: usize = macro_index(BANK_MOD, 4);
+/// MOD bank: LFO 2 rate. Same split mapping as [`SLOT_LFO1_RATE`]. CC 49.
+/// Track-routed.
+pub const SLOT_LFO2_RATE: usize = macro_index(BANK_MOD, 5);
+/// MOD bank: LFO 2 depth (0..1). CC 50. Track-routed.
+pub const SLOT_LFO2_DEPTH: usize = macro_index(BANK_MOD, 6);
+/// MOD bank: LFO 2 destination (quantised over [`crate::dsp::ModDest`]). CC 51.
+/// Track-routed.
+pub const SLOT_LFO2_DEST: usize = macro_index(BANK_MOD, 7);
 
 /// Stable index for a macro knob. Stored as `usize` in arrays `[f32;
 /// NUM_MACROS]`, indexed by this enum so spread-by-name stays readable.
@@ -149,53 +178,53 @@ pub const SLOT_OUT: usize = macro_index(BANK_MOD, 2);
 /// and host render flags depend on absolute indices staying put.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Macro {
-    /// Macro knob slot 0 (PITCH 0).
+    /// Macro knob slot 0 (MACH 0).
     M0 = 0,
-    /// Macro knob slot 1 (PITCH 1).
+    /// Macro knob slot 1 (MACH 1).
     M1 = 1,
-    /// Macro knob slot 2 (PITCH 2).
+    /// Macro knob slot 2 (MACH 2).
     M2 = 2,
-    /// Macro knob slot 3 (PITCH 3).
+    /// Macro knob slot 3 (MACH 3).
     M3 = 3,
-    /// Macro knob slot 4 (PITCH 4).
+    /// Macro knob slot 4 (MACH 4).
     M4 = 4,
-    /// Macro knob slot 5 (PITCH 5).
+    /// Macro knob slot 5 (MACH 5).
     M5 = 5,
-    /// Macro knob slot 6 (PITCH 6).
+    /// Macro knob slot 6 (MACH 6).
     M6 = 6,
-    /// Macro knob slot 7 (PITCH 7).
+    /// Macro knob slot 7 (MACH 7).
     M7 = 7,
-    /// Macro knob slot 8 (FILTER 0).
+    /// Macro knob slot 8 (FILT 0).
     M8 = 8,
-    /// Macro knob slot 9 (FILTER 1).
+    /// Macro knob slot 9 (FILT 1).
     M9 = 9,
-    /// Macro knob slot 10 (FILTER 2).
+    /// Macro knob slot 10 (FILT 2).
     M10 = 10,
-    /// Macro knob slot 11 (FILTER 3).
+    /// Macro knob slot 11 (FILT 3).
     M11 = 11,
-    /// Macro knob slot 12 (FILTER 4).
+    /// Macro knob slot 12 (FILT 4).
     M12 = 12,
-    /// Macro knob slot 13 (FILTER 5).
+    /// Macro knob slot 13 (FILT 5).
     M13 = 13,
-    /// Macro knob slot 14 (FILTER 6).
+    /// Macro knob slot 14 (FILT 6).
     M14 = 14,
-    /// Macro knob slot 15 (FILTER 7).
+    /// Macro knob slot 15 (FILT 7).
     M15 = 15,
-    /// Macro knob slot 16 (AMP 0).
+    /// Macro knob slot 16 (TRACK 0).
     M16 = 16,
-    /// Macro knob slot 17 (AMP 1).
+    /// Macro knob slot 17 (TRACK 1).
     M17 = 17,
-    /// Macro knob slot 18 (AMP 2).
+    /// Macro knob slot 18 (TRACK 2).
     M18 = 18,
-    /// Macro knob slot 19 (AMP 3).
+    /// Macro knob slot 19 (TRACK 3).
     M19 = 19,
-    /// Macro knob slot 20 (AMP 4).
+    /// Macro knob slot 20 (TRACK 4).
     M20 = 20,
-    /// Macro knob slot 21 (AMP 5).
+    /// Macro knob slot 21 (TRACK 5).
     M21 = 21,
-    /// Macro knob slot 22 (AMP 6).
+    /// Macro knob slot 22 (TRACK 6).
     M22 = 22,
-    /// Macro knob slot 23 (AMP 7).
+    /// Macro knob slot 23 (TRACK 7).
     M23 = 23,
     /// Macro knob slot 24 (MOD 0).
     M24 = 24,
@@ -423,6 +452,44 @@ impl MachineId {
     }
 }
 
+
+// ---- Track-routed macro info ----
+// Same on every machine: defined once, referenced by every `MACHINE_INFO` row.
+// Editing a shared slot's name/abbrev/default here propagates to all 15 machines.
+
+/// MACH selector (TRACK 0). CC 36.
+const MACH_INFO: MacroInfo = mi("MACH", "MCH", 0.0);
+/// Strip SVF cutoff (FILT 2). CC 30. Default 1.0 = 20 kHz (fully open).
+const STRIP_CUT_INFO: MacroInfo = mi("STRIP.CUT", "SCUT", 1.0);
+/// Strip SVF resonance (FILT 3). CC 31. Default ~0.01 = Butterworth Q.
+const STRIP_RESO_INFO: MacroInfo = mi("STRIP.RESO", "SRES", 0.01);
+/// Strip AHD attack (FILT 4). CC 32. Default 0.0 = instant.
+const STRIP_ATK_INFO: MacroInfo = mi("STRIP.ATK", "SATK", 0.0);
+/// Strip AHD hold (FILT 5). CC 33. Default 1.0 = 10 s (long, machine shapes the hit).
+const STRIP_HOLD_INFO: MacroInfo = mi("STRIP.HOLD", "SHLD", 1.0);
+/// Strip AHD decay (FILT 6). CC 34. Default 1.0 = 10 s (long, machine shapes the hit).
+const STRIP_DEC_INFO: MacroInfo = mi("STRIP.DEC", "SDEC", 1.0);
+/// Strip pan (TRACK 2). CC 38. Default 0.5 = centre.
+const PAN_INFO: MacroInfo = mi("PAN", "PAN", 0.5);
+/// Delay send (TRACK 4). CC 40.
+const SEND_DLY_INFO: MacroInfo = mi("SEND.DLY", "SDY", 0.0);
+/// Reverb send (TRACK 5). CC 41.
+const SEND_RVB_INFO: MacroInfo = mi("SEND.RVB", "SRV", 0.0);
+/// Output routing (TRACK 1). CC 37. Default 0.0 = Master.
+const OUT_INFO: MacroInfo = mi("OUT", "OUT", 0.0);
+/// LFO 1 rate (MOD 2). CC 46. 0..0.5 slow, 0.5..1 fast.
+const LFO1_RATE_INFO: MacroInfo = mi("LFO1.RATE", "L1R", 0.0);
+/// LFO 1 depth (MOD 3). CC 47.
+const LFO1_DEPTH_INFO: MacroInfo = mi("LFO1.DEP", "L1D", 0.0);
+/// LFO 1 destination (MOD 4). CC 48. Default 0.0 = Macro(0).
+const LFO1_DEST_INFO: MacroInfo = mi("LFO1.DST", "L1S", 0.0);
+/// LFO 2 rate (MOD 5). CC 49. 0..0.5 slow, 0.5..1 fast.
+const LFO2_RATE_INFO: MacroInfo = mi("LFO2.RATE", "L2R", 0.0);
+/// LFO 2 depth (MOD 6). CC 50.
+const LFO2_DEPTH_INFO: MacroInfo = mi("LFO2.DEP", "L2D", 0.0);
+/// LFO 2 destination (MOD 7). CC 51. Default 0.0 = Macro(0).
+const LFO2_DEST_INFO: MacroInfo = mi("LFO2.DST", "L2S", 0.0);
+
 /// Per-machine metadata, indexed by [`MachineId::index`].
 struct MachineInfo {
     macros: [MacroInfo; NUM_MACROS],
@@ -432,556 +499,556 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 0: BD Classic
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.20),    // PITCH 0
-            mi("SWEEP", "SWP", 0.36),   // PITCH 1
-            mi("SWP_T", "SWT", 0.15),   // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.9),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.255),    // AMP 2
-            resv(),                     // AMP 3
-            mi("DRIVE", "DRV", 0.16),   // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.2),         // MACH 0
+            mi("SWEEP", "SWP", 0.36),       // MACH 1
+            mi("SWP_T", "SWT", 0.15),       // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.255),        // MACH 5
+            resv(),                         // MACH 6
+            mi("DRIVE", "DRV", 0.16),       // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.9),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 1: BD FM
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.20),    // PITCH 0
-            mi("SWEEP", "SWP", 0.30),   // PITCH 1
-            mi("SWP_T", "SWT", 0.15),   // PITCH 2
-            mi("MOD.HZ", "MDH", 0.43),  // PITCH 3
-            mi("MOD.DC", "MDD", 0.15),  // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.9),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.255),    // AMP 2
-            resv(),                     // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            mi("MOD.AMT", "MDA", 0.35), // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.2),         // MACH 0
+            mi("SWEEP", "SWP", 0.3),        // MACH 1
+            mi("SWP_T", "SWT", 0.15),       // MACH 2
+            mi("MOD.HZ", "MDH", 0.43),      // MACH 3
+            mi("MOD.DC", "MDD", 0.15),      // MACH 4
+            mi("DEC", "DEC", 0.255),        // MACH 5
+            mi("MOD.AMT", "MDA", 0.35),     // MACH 6
+            resv(),                         // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.9),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 2: BD VA
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.28),    // PITCH 0 — 30..120 Hz (55 Hz default)
-            mi("SWEEP", "SWP", 1.0),    // PITCH 1 — 0..120 Hz above base
-            mi("SWP_T", "SWT", 0.10),   // PITCH 2 — 5..55 ms (10 ms default)
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            mi("Q", "Q", 0.42),         // FILTER 1 — 0.5..10 (≈4.5 default = sketch)
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.9),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.255),    // AMP 2 — 50..1500 ms (matches BD family)
-            resv(),                     // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.28),        // MACH 0
+            mi("SWEEP", "SWP", 1.0),        // MACH 1
+            mi("SWP_T", "SWT", 0.1),        // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.255),        // MACH 5
+            resv(),                         // MACH 6
+            resv(),                         // MACH 7
+            resv(),                         // FILT 0
+            mi("Q", "Q", 0.42),             // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.9),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 3: Tom
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.35),    // PITCH 0
-            mi("SWEEP", "SWP", 0.40),   // PITCH 1
-            mi("SWP_T", "SWT", 0.40),   // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.85),   // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.40),     // AMP 2
-            resv(),                     // AMP 3
-            mi("STICK", "STK", 0.30),   // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.35),        // MACH 0
+            mi("SWEEP", "SWP", 0.4),        // MACH 1
+            mi("SWP_T", "SWT", 0.4),        // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.4),          // MACH 5
+            resv(),                         // MACH 6
+            mi("STICK", "STK", 0.3),        // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.85),       // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 4: SD Natural
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.28),    // PITCH 0
-            mi("RATIO", "RTO", 0.48),   // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("HPF", "HPF", 0.14),     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.7),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("BDEC", "BDC", 0.13),    // AMP 2
-            mi("NDEC", "NDC", 0.209),   // AMP 3
-            resv(),                     // AMP 4
-            mi("NMIX", "NM", 0.62),     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.28),        // MACH 0
+            mi("RATIO", "RTO", 0.48),       // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("BDEC", "BDC", 0.13),        // MACH 5
+            mi("NDEC", "NDC", 0.209),       // MACH 6
+            mi("NMIX", "NM", 0.62),         // MACH 7
+            mi("HPF", "HPF", 0.14),         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.7),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 5: SD FM
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.28),    // PITCH 0
-            mi("RAT", "RAT", 0.33),     // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.7),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("BDEC", "BDC", 0.13),    // AMP 2
-            mi("NDEC", "NDC", 0.209),   // AMP 3
-            resv(),                     // AMP 4
-            mi("NMIX", "NM", 0.62),     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            mi("MOD.AMT", "MDA", 0.30), // MOD 0
-            mi("MENV", "MEN", 0.15),    // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.28),        // MACH 0
+            mi("RAT", "RAT", 0.33),         // MACH 1
+            mi("MOD.AMT", "MDA", 0.3),      // MACH 2
+            mi("MENV", "MEN", 0.15),        // MACH 3
+            resv(),                         // MACH 4
+            mi("BDEC", "BDC", 0.13),        // MACH 5
+            mi("NDEC", "NDC", 0.209),       // MACH 6
+            mi("NMIX", "NM", 0.62),         // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.7),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
-    // 6: RS (rimshot)
+    // 6: RS
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.40),    // PITCH 0
-            mi("DET", "DET", 0.25),     // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("HPF", "HPF", 0.30),     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.75),   // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.30),     // AMP 2
-            mi("NDEC", "NDC", 0.30),    // AMP 3
-            mi("NLEV", "NLV", 0.40),    // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.4),         // MACH 0
+            mi("DET", "DET", 0.25),         // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.3),          // MACH 5
+            mi("NDEC", "NDC", 0.3),         // MACH 6
+            mi("NLEV", "NLV", 0.4),         // MACH 7
+            mi("HPF", "HPF", 0.3),          // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.75),       // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
-    // 7: CP (clap)
+    // 7: CP
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.30),    // PITCH 0
-            mi("RATIO", "RTO", 0.50),   // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("HPF", "HPF", 0.20),     // FILTER 0
-            mi("LPF", "LPF", 0.50),     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.7),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("BDEC", "BDC", 0.20),    // AMP 2
-            mi("NDEC", "NDC", 0.30),    // AMP 3
-            resv(),                     // AMP 4
-            mi("BAL", "BAL", 0.80),     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.3),         // MACH 0
+            mi("RATIO", "RTO", 0.5),        // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("BDEC", "BDC", 0.2),         // MACH 5
+            mi("NDEC", "NDC", 0.3),         // MACH 6
+            mi("BAL", "BAL", 0.8),          // MACH 7
+            mi("HPF", "HPF", 0.2),          // FILT 0
+            mi("LPF", "LPF", 0.5),          // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.7),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 8: Hat Classic
     MachineInfo {
         macros: [
-            resv(),                     // PITCH 0
-            resv(),                     // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("HPF", "HPF", 0.45),     // FILTER 0
-            mi("LPF", "LPF", 0.75),     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.4),    // AMP o
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.092),    // AMP 2
-            resv(),                     // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            resv(),                         // MACH 0
+            resv(),                         // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.092),        // MACH 5
+            resv(),                         // MACH 6
+            resv(),                         // MACH 7
+            mi("HPF", "HPF", 0.45),         // FILT 0
+            mi("LPF", "LPF", 0.75),         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.4),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 9: HH Basic
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.30),    // PITCH 0
-            mi("TONE", "TON", 0.50),    // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("BPF", "BPF", 0.50),     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.8),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.092),    // AMP 2
-            mi("TDEC", "TDC", 0.30),    // AMP 3
-            resv(),                     // AMP 4
-            mi("RST", "RST", 1.0),      // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.3),         // MACH 0
+            mi("TONE", "TON", 0.5),         // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.092),        // MACH 5
+            mi("TDEC", "TDC", 0.3),         // MACH 6
+            mi("RST", "RST", 1.0),          // MACH 7
+            mi("BPF", "BPF", 0.5),          // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.8),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 10: CY Metallic
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.20),    // PITCH 0
-            mi("TONE", "TON", 0.30),    // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("NCOL", "NCL", 0.30),    // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.5),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.30),     // AMP 2
-            mi("TDEC", "TDC", 0.25),    // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.2),         // MACH 0
+            mi("TONE", "TON", 0.3),         // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.3),          // MACH 5
+            mi("TDEC", "TDC", 0.25),        // MACH 6
+            resv(),                         // MACH 7
+            mi("NCOL", "NCL", 0.3),         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.5),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 11: CB Classic
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.40),    // PITCH 0
-            mi("DET", "DET", 0.86),     // PITCH 1
-            resv(),                     // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            mi("BPF", "BPF", 0.35),     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.55),   // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.15),     // AMP 2
-            resv(),                     // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.4),         // MACH 0
+            mi("DET", "DET", 0.86),         // MACH 1
+            resv(),                         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.15),         // MACH 5
+            resv(),                         // MACH 6
+            resv(),                         // MACH 7
+            mi("BPF", "BPF", 0.35),         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.55),       // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 12: SY Tone
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.50),    // PITCH 0
-            mi("RATIO", "RTO", 0.25),   // PITCH 1
-            mi("FDBK", "FDB", 0.20),    // PITCH 2
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.7),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.30),     // AMP 2
-            resv(),                     // AMP 3
-            resv(),                     // AMP 4
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            mi("MOD.AMT", "MDA", 0.40), // MOD 0
-            mi("MENV", "MEN", 0.25),    // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.5),         // MACH 0
+            mi("RATIO", "RTO", 0.25),       // MACH 1
+            mi("FDBK", "FDB", 0.2),         // MACH 2
+            mi("MOD.AMT", "MDA", 0.4),      // MACH 3
+            mi("MENV", "MEN", 0.25),        // MACH 4
+            mi("DEC", "DEC", 0.3),          // MACH 5
+            resv(),                         // MACH 6
+            resv(),                         // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.7),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 13: Dub Siren
     MachineInfo {
         macros: [
-            mi("TUNE", "TUN", 0.30),    // PITCH 0 — 100..1000 Hz (370 Hz default)
-            mi("DEPTH", "DPT", 0.50),   // PITCH 1 — 0..3 oct (1.5 oct default)
-            mi("RATE", "RTE", 0.20),    // PITCH 2 — 0.1..8 Hz (1.68 Hz default)
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            resv(),                     // FILTER 1
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.8),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.255),    // AMP 2 — 0.5..6 s (~1.9 s default)
-            resv(),                     // AMP 3
-            mi("SHAPE", "SHP", 0.5),    // AMP 4 — sine/tri/saw, default tri
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("TUNE", "TUN", 0.3),         // MACH 0
+            mi("DEPTH", "DPT", 0.5),        // MACH 1
+            mi("RATE", "RTE", 0.2),         // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.255),        // MACH 5
+            resv(),                         // MACH 6
+            mi("SHAPE", "SHP", 0.5),        // MACH 7
+            resv(),                         // FILT 0
+            resv(),                         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.8),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
     // 14: Sweep FX
     MachineInfo {
         macros: [
-            mi("RATE", "RTE", 0.20),    // PITCH 0 — 0.1..5 Hz (1.08 Hz default)
-            mi("DEPTH", "DPT", 0.50),   // PITCH 1 — 0..4 oct (2 oct default)
-            mi("START", "STR", 0.45),   // PITCH 2 — 80..8000 Hz (~3650 Hz default)
-            resv(),                     // PITCH 3
-            resv(),                     // PITCH 4
-            mi("MACH", "MCH", 0.0),     // PITCH 5
-            resv(),                     // PITCH 6
-            resv(),                     // PITCH 7
-            resv(),                     // FILTER 0
-            mi("RESO", "RES", 0.20),    // FILTER 1 — 0.5..12 Q (2.8 default, light)
-            resv(),                     // FILTER 2
-            resv(),                     // FILTER 3
-            resv(),                     // FILTER 4
-            resv(),                     // FILTER 5
-            resv(),                     // FILTER 6
-            resv(),                     // FILTER 7
-            mi("LEVEL", "LVL", 0.7),    // AMP 0
-            mi("PAN", "PAN", 0.5),      // AMP 1
-            mi("DEC", "DEC", 0.255),    // AMP 2 — 0.5..6 s (~1.9 s default)
-            resv(),                     // AMP 3
-            mi("MODE", "MOD", 0.0),     // AMP 4 — LP/BP/HP, default BP
-            resv(),                     // AMP 5
-            mi("SEND.DLY", "SDY", 0.0), // AMP 6
-            mi("SEND.RVB", "SRV", 0.0), // AMP 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            mi("OUT", "OUT", 0.0),      // MOD 2 — track routing (Master/Aux1/2/3)
-            resv(),                     // MOD 3
-            resv(),                     // MOD 4
-            resv(),                     // MOD 5
-            resv(),                     // MOD 6
-            resv(),                     // MOD 7
+            mi("RATE", "RTE", 0.2),         // MACH 0
+            mi("DEPTH", "DPT", 0.5),        // MACH 1
+            mi("START", "STR", 0.45),       // MACH 2
+            resv(),                         // MACH 3
+            resv(),                         // MACH 4
+            mi("DEC", "DEC", 0.255),        // MACH 5
+            resv(),                         // MACH 6
+            mi("MODE", "MOD", 0.0),         // MACH 7
+            resv(),                         // FILT 0
+            mi("RESO", "RES", 0.2),         // FILT 1
+            STRIP_CUT_INFO,                 // FILT 2
+            STRIP_RESO_INFO,                // FILT 3
+            STRIP_ATK_INFO,                 // FILT 4
+            STRIP_HOLD_INFO,                // FILT 5
+            STRIP_DEC_INFO,                 // FILT 6
+            resv(),                         // FILT 7
+            MACH_INFO,                      // TRACK 0
+            OUT_INFO,                       // TRACK 1
+            PAN_INFO,                       // TRACK 2
+            mi("LEVEL", "LVL", 0.7),        // TRACK 3
+            SEND_DLY_INFO,                  // TRACK 4
+            SEND_RVB_INFO,                  // TRACK 5
+            resv(),                         // TRACK 6
+            resv(),                         // TRACK 7
+            resv(),                         // MOD 0
+            resv(),                         // MOD 1
+            LFO1_RATE_INFO,                 // MOD 2
+            LFO1_DEPTH_INFO,                // MOD 3
+            LFO1_DEST_INFO,                 // MOD 4
+            LFO2_RATE_INFO,                 // MOD 5
+            LFO2_DEPTH_INFO,                // MOD 6
+            LFO2_DEST_INFO,                 // MOD 7
         ],
     },
 ];
@@ -1236,9 +1303,9 @@ mod tests {
     #[test]
     fn macro_by_name_finds_uppercase_exact() {
         let m = MachineId::BdClassic;
-        assert_eq!(m.macro_by_name("TUNE").map(|(i, _)| i), Some(SLOT_TUNE));
-        assert_eq!(m.macro_by_name("tune").map(|(i, _)| i), Some(SLOT_TUNE));
-        assert_eq!(m.macro_by_name("DEC").map(|(i, _)| i), Some(SLOT_DECAY));
+        assert_eq!(m.macro_by_name("TUNE").map(|(i, _)| i), Some(SLOT_MACH_0));
+        assert_eq!(m.macro_by_name("tune").map(|(i, _)| i), Some(SLOT_MACH_0));
+        assert_eq!(m.macro_by_name("DEC").map(|(i, _)| i), Some(SLOT_MACH_5));
         assert_eq!(m.macro_by_name("MISSING"), None);
     }
 
@@ -1247,24 +1314,37 @@ mod tests {
         assert_eq!(NUM_MACROS, 32);
         assert_eq!(NUM_BANKS, 4);
         assert_eq!(MACROS_PER_BANK, 8);
-        assert_eq!(SLOT_TUNE, 0);
-        assert_eq!(SLOT_SWEEP, 1);
-        assert_eq!(SLOT_SWEEP_TIME, 2);
-        assert_eq!(SLOT_MOD_HZ, 3);
-        assert_eq!(SLOT_MOD_DC, 4);
-        assert_eq!(SLOT_MACHINE, 5);
-        assert_eq!(SLOT_CUT, 8);
-        assert_eq!(SLOT_LPF, 9);
-        assert_eq!(SLOT_LEVEL, 16);
-        assert_eq!(SLOT_PAN, 17);
-        assert_eq!(SLOT_DECAY, 18);
-        assert_eq!(SLOT_DECAY_2, 19);
-        assert_eq!(SLOT_SHAPE, 20);
-        assert_eq!(SLOT_MIX, 21);
-        assert_eq!(SLOT_SEND_DELAY, 22);
-        assert_eq!(SLOT_SEND_REVERB, 23);
-        assert_eq!(SLOT_MOD_AMOUNT, 24);
-        assert_eq!(SLOT_MOD_ENV, 25);
+        // Bank 0: MACH (numbered)
+        assert_eq!(SLOT_MACH_0, 0);
+        assert_eq!(SLOT_MACH_1, 1);
+        assert_eq!(SLOT_MACH_2, 2);
+        assert_eq!(SLOT_MACH_3, 3);
+        assert_eq!(SLOT_MACH_4, 4);
+        assert_eq!(SLOT_MACH_5, 5);
+        assert_eq!(SLOT_MACH_6, 6);
+        assert_eq!(SLOT_MACH_7, 7);
+        // Bank 1: FILT
+        assert_eq!(SLOT_FILT_0, 8);
+        assert_eq!(SLOT_FILT_1, 9);
+        assert_eq!(SLOT_STRIP_CUT, 10);
+        assert_eq!(SLOT_STRIP_RESO, 11);
+        assert_eq!(SLOT_STRIP_ATK, 12);
+        assert_eq!(SLOT_STRIP_HOLD, 13);
+        assert_eq!(SLOT_STRIP_DEC, 14);
+        // Bank 2: TRACK
+        assert_eq!(SLOT_MACHINE, 16);
+        assert_eq!(SLOT_OUT, 17);
+        assert_eq!(SLOT_PAN, 18);
+        assert_eq!(SLOT_LEVEL, 19);
+        assert_eq!(SLOT_SEND_DELAY, 20);
+        assert_eq!(SLOT_SEND_REVERB, 21);
+        // Bank 3: MOD (LFOs only)
+        assert_eq!(SLOT_LFO1_RATE, 26);
+        assert_eq!(SLOT_LFO1_DEPTH, 27);
+        assert_eq!(SLOT_LFO1_DEST, 28);
+        assert_eq!(SLOT_LFO2_RATE, 29);
+        assert_eq!(SLOT_LFO2_DEPTH, 30);
+        assert_eq!(SLOT_LFO2_DEST, 31);
     }
 
     #[test]

@@ -51,7 +51,7 @@
 
 use crate::dsp::{decay_coeff, fast, BridgedT, DecayEnv};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_LPF, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_FILT_1, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -94,11 +94,11 @@ impl BdVa {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 30.0 + 90.0 * macros[SLOT_TUNE]; // TUNE 30..120 Hz
-        let sweep_depth = 120.0 * macros[SLOT_SWEEP]; // SWEEP 0..120 Hz above base
-        let pitch_decay_s = 0.005 + 0.05 * macros[SLOT_SWEEP_TIME]; // SWP_T 5..55 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_DECAY]; // DEC  50..1500 ms
-        let q = 0.5 + 9.5 * macros[SLOT_LPF]; // Q 0.5..10 (FILTER resonance slot)
+        let base_hz = 30.0 + 90.0 * macros[SLOT_MACH_0]; // TUNE 30..120 Hz
+        let sweep_depth = 120.0 * macros[SLOT_MACH_1]; // SWEEP 0..120 Hz above base
+        let pitch_decay_s = 0.005 + 0.05 * macros[SLOT_MACH_2]; // SWP_T 5..55 ms
+        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_MACH_5]; // DEC  50..1500 ms
+        let q = 0.5 + 9.5 * macros[SLOT_FILT_1]; // Q 0.5..10 (FILTER resonance slot)
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.base_hz = base_hz * self.freq_scale;
@@ -219,14 +219,14 @@ mod tests {
         // `sweep_macro_shortens_first_window_pitch`.
         let id = MachineId::BdVa;
         let mut low = id.default_macros();
-        low[SLOT_TUNE] = 0.0; // 30 Hz base
-        low[SLOT_SWEEP] = 0.0; // no pitch sweep — pure base-hz ring
-        low[SLOT_LPF] = 0.7; // higher Q for cleaner ring
+        low[SLOT_MACH_0] = 0.0; // 30 Hz base
+        low[SLOT_MACH_1] = 0.0; // no pitch sweep — pure base-hz ring
+        low[SLOT_FILT_1] = 0.7; // higher Q for cleaner ring
 
         let mut high = id.default_macros();
-        high[SLOT_TUNE] = 1.0; // 120 Hz base
-        high[SLOT_SWEEP] = 0.0;
-        high[SLOT_LPF] = 0.7;
+        high[SLOT_MACH_0] = 1.0; // 120 Hz base
+        high[SLOT_MACH_1] = 0.0;
+        high[SLOT_FILT_1] = 0.7;
 
         let crossings_in_50ms = |macros: &[f32; NUM_MACROS]| {
             let mut k = BdVa::new(macros);

@@ -23,7 +23,7 @@ pub use bt::BridgedT;
 pub use env::DecayEnv;
 pub use filter::{OnePoleHp, OnePoleLp};
 pub use fx::SendFx;
-pub use lfo::{Lfo, LfoMode, LfoWave, ModDest};
+pub use lfo::{Lfo, LfoMode, LfoRateMode, LfoWave, ModDest};
 pub use noise::Noise;
 pub use osc::SineOsc;
 pub use svf::{Svf, SvfMode};

@@ -31,7 +31,7 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -71,11 +71,11 @@ impl BdClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 30.0 + 90.0 * macros[SLOT_TUNE]; // TUNE 30..120 Hz
-        let pitch_ratio = 1.0 + 10.0 * macros[SLOT_SWEEP]; // SWEEP 1×..11×
-        let pitch_decay_s = 0.005 + 0.15 * macros[SLOT_SWEEP_TIME]; // SWP_T 5..155 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_DECAY]; // DEC  50..1500 ms
-        let drive = 1.0 + 5.0 * macros[SLOT_SHAPE]; // DRIVE 1..6
+        let end_hz = 30.0 + 90.0 * macros[SLOT_MACH_0]; // TUNE 30..120 Hz
+        let pitch_ratio = 1.0 + 10.0 * macros[SLOT_MACH_1]; // SWEEP 1×..11×
+        let pitch_decay_s = 0.005 + 0.15 * macros[SLOT_MACH_2]; // SWP_T 5..155 ms
+        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_MACH_5]; // DEC  50..1500 ms
+        let drive = 1.0 + 5.0 * macros[SLOT_MACH_7]; // DRIVE 1..6
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;

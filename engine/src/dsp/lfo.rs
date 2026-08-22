@@ -12,6 +12,30 @@
 use crate::BLOCK;
 use crate::SAMPLE_RATE;
 
+/// LFO rate range.
+///
+/// A single rate knob is easier to dial in if its travel is split into two
+/// ranges: slow for sweeps and fades, fast for tremolo/FX. The normalized
+/// `0..1` rate is mapped logarithmically across the chosen range.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LfoRateMode {
+    /// Slow range: 0.1 Hz to 10 Hz.
+    Slow,
+    /// Fast range: 1 Hz to 100 Hz.
+    Fast,
+}
+
+impl LfoRateMode {
+    /// Range bounds `(min_hz, max_hz)` for this mode.
+    #[inline]
+    const fn range(self) -> (f32, f32) {
+        match self {
+            Self::Slow => (0.1, 10.0),
+            Self::Fast => (1.0, 100.0),
+        }
+    }
+}
+
 /// LFO waveform.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LfoWave {
@@ -67,6 +91,36 @@ pub enum ModDest {
     None,
 }
 
+impl ModDest {
+    /// Quantise a normalised `0..1` macro value onto a [`ModDest`].
+    ///
+    /// Sixteen steps, evenly spaced: the eight macro knobs, then the strip
+    /// destinations, then [`ModDest::None`] as a final "off" position. This is
+    /// the mapping the LFO-destination macro slots use.
+    pub fn from_macro(v: f32) -> Self {
+        const DESTS: [ModDest; 16] = [
+            ModDest::Macro(0),
+            ModDest::Macro(1),
+            ModDest::Macro(2),
+            ModDest::Macro(3),
+            ModDest::Macro(4),
+            ModDest::Macro(5),
+            ModDest::Macro(6),
+            ModDest::Macro(7),
+            ModDest::FilterCutoff,
+            ModDest::FilterReso,
+            ModDest::Drive,
+            ModDest::Pan,
+            ModDest::Level,
+            ModDest::AmpDecay,
+            ModDest::SendDelay,
+            ModDest::SendReverb,
+        ];
+        let i = (v.clamp(0.0, 1.0) * (DESTS.len() - 1) as f32 + 0.5) as usize;
+        DESTS[i.min(DESTS.len() - 1)]
+    }
+}
+
 /// One LFO with a single destination and bipolar depth.
 #[derive(Clone, Copy)]
 pub struct Lfo {
@@ -77,6 +131,8 @@ pub struct Lfo {
     depth: f32,
     dest: ModDest,
     start_phase: f32,
+    rate_mode: LfoRateMode,
+    norm_rate: f32,
     // State (advanced per block)
     phase: f32,
     value: f32,
@@ -94,6 +150,8 @@ impl Lfo {
             depth: 0.0,
             dest: ModDest::None,
             start_phase: 0.0,
+            rate_mode: LfoRateMode::Slow,
+            norm_rate: 0.5,
             phase: 0.0,
             value: 0.0,
             active: true,
@@ -122,6 +180,54 @@ impl Lfo {
     /// Current destination.
     pub fn dest(&self) -> ModDest {
         self.dest
+    }
+
+    /// Current waveform.
+    pub fn wave(&self) -> LfoWave {
+        self.wave
+    }
+
+    /// Current trigger mode.
+    pub fn mode(&self) -> LfoMode {
+        self.mode
+    }
+
+    /// Current start phase, `0..1`.
+    pub fn start_phase(&self) -> f32 {
+        self.start_phase
+    }
+
+    /// Current rate range.
+    pub fn rate_mode(&self) -> LfoRateMode {
+        self.rate_mode
+    }
+
+    /// Current normalized rate `0..1` (used when the LFO was configured via
+    /// [`set_rate`](Self::set_rate)).
+    pub fn norm_rate(&self) -> f32 {
+        self.norm_rate
+    }
+
+    /// Current absolute speed in Hz.
+    pub fn speed_hz(&self) -> f32 {
+        self.speed_hz
+    }
+
+    /// Configure the LFO from a normalized rate knob plus a slow/fast range.
+    ///
+    /// `rate` is `0..1`; it is mapped logarithmically across the selected
+    /// range so the knob feels evenly spaced. This is the user-facing entry
+    /// point; [`set_params`](Self::set_params) remains available for direct
+    /// Hz values.
+    pub fn set_rate(&mut self, rate: f32, mode: LfoRateMode) {
+        self.norm_rate = rate.clamp(0.0, 1.0);
+        self.rate_mode = mode;
+        self.speed_hz = Self::map_norm_rate(self.norm_rate, mode);
+    }
+
+    fn map_norm_rate(rate: f32, mode: LfoRateMode) -> f32 {
+        let (min, max) = mode.range();
+        min * libm::powf(max / min, rate)
     }
 
     /// Is this LFO contributing (active and depth ≠ 0 and dest ≠ None)?
@@ -367,5 +473,61 @@ mod tests {
             0.0,
         );
         assert!(lfo.is_contributing(), "should contribute with depth + dest");
+    }
+
+    #[test]
+    fn set_rate_maps_to_expected_range() {
+        let mut lfo = Lfo::new();
+
+        lfo.set_rate(0.0, LfoRateMode::Slow);
+        approx::assert_abs_diff_eq!(lfo.speed_hz(), 0.1, epsilon = 1e-6);
+
+        lfo.set_rate(1.0, LfoRateMode::Slow);
+        approx::assert_abs_diff_eq!(lfo.speed_hz(), 10.0, epsilon = 1e-6);
+
+        lfo.set_rate(0.0, LfoRateMode::Fast);
+        approx::assert_abs_diff_eq!(lfo.speed_hz(), 1.0, epsilon = 1e-6);
+
+        lfo.set_rate(1.0, LfoRateMode::Fast);
+        approx::assert_abs_diff_eq!(lfo.speed_hz(), 100.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn set_rate_is_logarithmic() {
+        let mut lfo = Lfo::new();
+        lfo.set_rate(0.5, LfoRateMode::Slow);
+        let mid = lfo.speed_hz();
+        // Geometric midpoint of 0.1 and 10 is 1.0.
+        approx::assert_abs_diff_eq!(mid, 1.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn set_rate_clamps_and_cycles_faster_in_fast_mode() {
+        let mut slow = Lfo::new();
+        slow.set_rate(1.0, LfoRateMode::Slow);
+        let slow_hz = slow.speed_hz();
+
+        let mut fast = Lfo::new();
+        fast.set_rate(1.0, LfoRateMode::Fast);
+        let fast_hz = fast.speed_hz();
+
+        assert!(fast_hz > slow_hz, "fast mode max should exceed slow mode max");
+
+        // Same normalized rate in the two modes should produce different
+        // absolute frequencies.
+        let mut slow = Lfo::new();
+        slow.set_rate(0.5, LfoRateMode::Slow);
+        let mut fast = Lfo::new();
+        fast.set_rate(0.5, LfoRateMode::Fast);
+        assert!(fast.speed_hz() > slow.speed_hz() * 5.0, "fast 0.5 should be much faster than slow 0.5");
+    }
+
+    #[test]
+    fn set_rate_overrides_previous_params() {
+        let mut lfo = Lfo::new();
+        lfo.set_params(0.3, LfoWave::Sine, LfoMode::Free, 0.5, ModDest::FilterCutoff, 0.0);
+        lfo.set_rate(0.75, LfoRateMode::Slow);
+        assert_eq!(lfo.rate_mode(), LfoRateMode::Slow);
+        assert!(lfo.speed_hz() > 0.3, "set_rate should raise speed from 0.3");
     }
 }

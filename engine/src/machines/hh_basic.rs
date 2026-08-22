@@ -33,7 +33,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
 use crate::machines::{
-    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_SWEEP, SLOT_TUNE,
+    NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -84,13 +84,13 @@ impl HhBasic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 200.0 + 800.0 * macros[SLOT_TUNE]; // TUNE 200..1000 Hz
-        let tone_spread = 0.01 + 0.15 * macros[SLOT_SWEEP]; // TONE detune spread
-        let transient_decay_s = 0.005 + 0.075 * macros[SLOT_DECAY_2]; // TDEC 5..80 ms
-        let main_decay_s = 0.01 + 0.5 * macros[SLOT_DECAY]; // DEC 10..510 ms
-        let reset_on_trig = macros[SLOT_MIX] > 0.5; // RST threshold
+        let base_hz = 200.0 + 800.0 * macros[SLOT_MACH_0]; // TUNE 200..1000 Hz
+        let tone_spread = 0.01 + 0.15 * macros[SLOT_MACH_1]; // TONE detune spread
+        let transient_decay_s = 0.005 + 0.075 * macros[SLOT_MACH_6]; // TDEC 5..80 ms
+        let main_decay_s = 0.01 + 0.5 * macros[SLOT_MACH_5]; // DEC 10..510 ms
+        let reset_on_trig = macros[SLOT_MACH_7] > 0.5; // RST threshold
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
-        let bpf_hz = 2000.0 + 10000.0 * macros[SLOT_CUT]; // BPF 2..12 kHz
+        let bpf_hz = 2000.0 + 10000.0 * macros[SLOT_FILT_0]; // BPF 2..12 kHz
 
         // Build the frequency bank: base ratios with bipolar detune spread.
         // Even-indexed oscs go sharp, odd-indexed go flat (or vice versa).
@@ -227,7 +227,7 @@ mod tests {
     fn reset_on_trig_zeroes_phases() {
         let id = MachineId::HhBasic;
         let mut macros = id.default_macros();
-        macros[SLOT_MIX] = 1.0; // RST = reset
+        macros[SLOT_MACH_7] = 1.0; // RST = reset
         let mut h = HhBasic::new(&macros);
         // Run a bit to advance phases.
         h.trigger(1.0);

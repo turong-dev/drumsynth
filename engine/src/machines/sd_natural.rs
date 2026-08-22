@@ -30,7 +30,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_SWEEP, SLOT_TUNE,
+    NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -71,12 +71,12 @@ impl SdNatural {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 100.0 + 300.0 * macros[SLOT_TUNE]; // TUNE 100..400 Hz
-        let body_ratio = 1.0 + macros[SLOT_SWEEP]; // RATIO 1.0..2.0
-        let body_decay_s = 0.04 + 0.6 * macros[SLOT_DECAY]; // BDEC 40..640 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_DECAY_2]; // NDEC 30..830 ms
-        let noise_hp_hz = 400.0 + 3600.0 * macros[SLOT_CUT]; // HPF 400..4000 Hz
-        let noise_mix = macros[SLOT_MIX]; // NMIX 0..1
+        let body_hz = 100.0 + 300.0 * macros[SLOT_MACH_0]; // TUNE 100..400 Hz
+        let body_ratio = 1.0 + macros[SLOT_MACH_1]; // RATIO 1.0..2.0
+        let body_decay_s = 0.04 + 0.6 * macros[SLOT_MACH_5]; // BDEC 40..640 ms
+        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_MACH_6]; // NDEC 30..830 ms
+        let noise_hp_hz = 400.0 + 3600.0 * macros[SLOT_FILT_0]; // HPF 400..4000 Hz
+        let noise_mix = macros[SLOT_MACH_7]; // NMIX 0..1
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_a.set_freq(body_hz * self.freq_scale);
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn full_noise_mix_still_makes_sound() {
         let mut macros = MachineId::SdNatural.default_macros();
-        macros[SLOT_MIX] = 1.0; // NMIX
+        macros[SLOT_MACH_7] = 1.0; // NMIX
         let mut s = SdNatural::new(&macros);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn zero_noise_mix_still_makes_sound() {
         let mut macros = MachineId::SdNatural.default_macros();
-        macros[SLOT_MIX] = 0.0; // NMIX
+        macros[SLOT_MACH_7] = 0.0; // NMIX
         let mut s = SdNatural::new(&macros);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);

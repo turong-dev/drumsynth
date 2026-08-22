@@ -59,7 +59,7 @@
 
 use crate::dsp::{fast, AhdEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME, SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_0,
 };
 
 /// Internal LFO waveform, selected by the SHAPE macro.
@@ -132,11 +132,11 @@ impl DubSiren {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 100.0 + 900.0 * macros[SLOT_TUNE]; // TUNE 100..1000 Hz
-        let depth_oct = 3.0 * macros[SLOT_SWEEP]; // DEPTH 0..3 oct
-        let rate_hz = 0.1 + 7.9 * macros[SLOT_SWEEP_TIME]; // RATE 0.1..8 Hz
-        let total_s = 0.5 + 5.5 * macros[SLOT_DECAY]; // DEC 0.5..6 s
-        let shape = SirenShape::from_macro(macros[SLOT_SHAPE]);
+        let base_hz = 100.0 + 900.0 * macros[SLOT_MACH_0]; // TUNE 100..1000 Hz
+        let depth_oct = 3.0 * macros[SLOT_MACH_1]; // DEPTH 0..3 oct
+        let rate_hz = 0.1 + 7.9 * macros[SLOT_MACH_2]; // RATE 0.1..8 Hz
+        let total_s = 0.5 + 5.5 * macros[SLOT_MACH_5]; // DEC 0.5..6 s
+        let shape = SirenShape::from_macro(macros[SLOT_MACH_7]);
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.base_hz = base_hz * self.freq_scale;
@@ -311,11 +311,11 @@ mod tests {
         // window than a slow one — direct macro→lfo_inc check.
         let id = MachineId::DubSiren;
         let mut slow = id.default_macros();
-        slow[SLOT_SWEEP_TIME] = 0.0; // 0.1 Hz
-        slow[SLOT_SWEEP] = 0.5; // 1.5 oct depth — audible sweep
+        slow[SLOT_MACH_2] = 0.0; // 0.1 Hz
+        slow[SLOT_MACH_1] = 0.5; // 1.5 oct depth — audible sweep
         let mut fast_macros = id.default_macros();
-        fast_macros[SLOT_SWEEP_TIME] = 1.0; // 8 Hz
-        fast_macros[SLOT_SWEEP] = 0.5;
+        fast_macros[SLOT_MACH_2] = 1.0; // 8 Hz
+        fast_macros[SLOT_MACH_1] = 0.5;
 
         let crossings_in_500ms = |macros: &[f32; NUM_MACROS]| {
             let mut s = DubSiren::new(macros);
@@ -351,8 +351,8 @@ mod tests {
         // the measurement window — the retune check needs a stable
         // pitch to count crossings against.
         let mut base_macros = macros;
-        base_macros[SLOT_SWEEP_TIME] = 0.0; // 0.1 Hz
-        base_macros[SLOT_SWEEP] = 0.0; // no depth — pure carrier
+        base_macros[SLOT_MACH_2] = 0.0; // 0.1 Hz
+        base_macros[SLOT_MACH_1] = 0.0; // no depth — pure carrier
         let window = (0.05 * SAMPLE_RATE) as usize;
         let crossings = |semis: f32, recompute: bool| {
             let mut s = DubSiren::new(&base_macros);

@@ -29,7 +29,7 @@
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, OnePoleLp};
-use crate::machines::{NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_LEVEL, SLOT_LPF};
+use crate::machines::{NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_LEVEL, SLOT_FILT_1};
 use crate::SAMPLE_RATE;
 
 /// Hat Classic machine.
@@ -59,9 +59,9 @@ impl HatClassic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let decay_s = 0.01 + 0.5 * macros[SLOT_DECAY]; // DEC 10..510 ms
-        let hp_hz = 2000.0 + 9000.0 * macros[SLOT_CUT]; // HPF 2..11 kHz
-        let lp_hz = 4000.0 + 12000.0 * macros[SLOT_LPF]; // LPF 4..16 kHz
+        let decay_s = 0.01 + 0.5 * macros[SLOT_MACH_5]; // DEC 10..510 ms
+        let hp_hz = 2000.0 + 9000.0 * macros[SLOT_FILT_0]; // HPF 2..11 kHz
+        let lp_hz = 4000.0 + 12000.0 * macros[SLOT_FILT_1]; // LPF 4..16 kHz
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.env.set_coeff(decay_coeff(decay_s, SAMPLE_RATE));

@@ -28,7 +28,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_SHAPE, SLOT_SWEEP, SLOT_TUNE,
+    NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -67,12 +67,12 @@ impl Rs {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 200.0 + 600.0 * macros[SLOT_TUNE]; // TUNE 200..800 Hz
-        let detune = 1.0 + 0.08 * macros[SLOT_SWEEP]; // DET up to ~8%
-        let body_decay_s = 0.015 + 0.135 * macros[SLOT_DECAY]; // DEC 15..150 ms
-        let noise_decay_s = 0.005 + 0.055 * macros[SLOT_DECAY_2]; // NDEC 5..60 ms
-        let noise_level = macros[SLOT_SHAPE]; // NLEV 0..1
-        let hp_hz = 1000.0 + 5000.0 * macros[SLOT_CUT]; // HPF 1..6 kHz
+        let body_hz = 200.0 + 600.0 * macros[SLOT_MACH_0]; // TUNE 200..800 Hz
+        let detune = 1.0 + 0.08 * macros[SLOT_MACH_1]; // DET up to ~8%
+        let body_decay_s = 0.015 + 0.135 * macros[SLOT_MACH_5]; // DEC 15..150 ms
+        let noise_decay_s = 0.005 + 0.055 * macros[SLOT_MACH_6]; // NDEC 5..60 ms
+        let noise_level = macros[SLOT_MACH_7]; // NLEV 0..1
+        let hp_hz = 1000.0 + 5000.0 * macros[SLOT_FILT_0]; // HPF 1..6 kHz
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(body_hz * self.freq_scale);
@@ -198,7 +198,7 @@ mod tests {
         let id = MachineId::Rs;
         // Pure noise
         let mut m = id.default_macros();
-        m[SLOT_SHAPE] = 0.0;
+        m[SLOT_MACH_7] = 0.0;
         let mut s = Rs::new(&m);
         s.trigger(1.0);
         let body_only = peak_over(&mut s, 480);
@@ -206,7 +206,7 @@ mod tests {
         let body_peak = body_only;
 
         let mut m2 = id.default_macros();
-        m2[SLOT_SHAPE] = 1.0;
+        m2[SLOT_MACH_7] = 1.0;
         let mut s2 = Rs::new(&m2);
         s2.trigger(1.0);
         let body_and_tick = peak_over(&mut s2, 480);

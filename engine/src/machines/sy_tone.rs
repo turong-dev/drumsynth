@@ -29,8 +29,8 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_MOD_AMOUNT, SLOT_MOD_ENV, SLOT_SWEEP, SLOT_SWEEP_TIME,
-    SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_1, SLOT_MACH_2,
+    SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -74,12 +74,12 @@ impl SyTone {
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
         // Exponential pitch mapping: 55 Hz (A1) to 1760 Hz (A6).
         // macro 0 = 0 → 55 Hz, 1 → 1760 Hz. Use exp2 over 5 octaves.
-        let carrier_hz = 55.0 * crate::dsp::fast::exp2_approx(macros[SLOT_TUNE] * 5.0);
-        let mod_ratio = 1.0 + 3.0 * macros[SLOT_SWEEP]; // RATIO 1..4
-        let feedback = macros[SLOT_SWEEP_TIME]; // FDBK 0..1
-        let mod_decay_s = 0.005 + 0.195 * macros[SLOT_MOD_ENV]; // MENV 5..200 ms
-        let mod_amount = macros[SLOT_MOD_AMOUNT] * 3.0; // MOD.AMT 0..3
-        let amp_decay_s = 0.05 + 1.95 * macros[SLOT_DECAY]; // DEC 50..2000 ms
+        let carrier_hz = 55.0 * crate::dsp::fast::exp2_approx(macros[SLOT_MACH_0] * 5.0);
+        let mod_ratio = 1.0 + 3.0 * macros[SLOT_MACH_1]; // RATIO 1..4
+        let feedback = macros[SLOT_MACH_2]; // FDBK 0..1
+        let mod_decay_s = 0.005 + 0.195 * macros[SLOT_MACH_4]; // MENV 5..200 ms
+        let mod_amount = macros[SLOT_MACH_3] * 3.0; // MOD.AMT 0..3
+        let amp_decay_s = 0.05 + 1.95 * macros[SLOT_MACH_5]; // DEC 50..2000 ms
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.carrier.set_freq(carrier_hz * self.freq_scale);
@@ -260,8 +260,8 @@ mod tests {
     fn no_nans_from_feedback() {
         let id = MachineId::SyTone;
         let mut macros = id.default_macros();
-        macros[SLOT_SWEEP_TIME] = 1.0; // max feedback
-        macros[SLOT_MOD_AMOUNT] = 1.0; // max FM amount
+        macros[SLOT_MACH_2] = 1.0; // max feedback
+        macros[SLOT_MACH_3] = 1.0; // max FM amount
         let mut s = SyTone::new(&macros);
         s.trigger(1.0);
         for _ in 0..(2.0 * SAMPLE_RATE) as usize {

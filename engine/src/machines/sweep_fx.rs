@@ -18,10 +18,10 @@
 //!
 //! This is the first machine to use [`Svf`] inside a machine — until
 //! Phase 12, [`Svf`] was exclusively a per-track strip component.
-//! Resonance lives at [`SLOT_LPF`] (slot 9), the family-wide
+//! Resonance lives at [`SLOT_FILT_1`] (slot 9), the family-wide
 //! resonance slot — the same disposition as [`BdVa`](super::bd_va::BdVa)'s
 //! Q. [`Svf`] is the resonant network; the FILTER bank's cutoff slot
-//! ([`SLOT_CUT`], slot 8) is unused, since the cutoff is *swept*
+//! ([`SLOT_FILT_0`], slot 8) is unused, since the cutoff is *swept*
 //! rather than static.
 //!
 //! The internal LFO runs at sample rate for the same reason as the
@@ -57,8 +57,8 @@
 
 use crate::dsp::{fast, AhdEnv, Noise, Svf, SvfMode};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_LEVEL, SLOT_LPF, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME,
-    SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_LEVEL, SLOT_FILT_1, SLOT_MACH_7, SLOT_MACH_1, SLOT_MACH_2,
+    SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -142,12 +142,12 @@ impl SweepFx {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let rate_hz = 0.1 + 4.9 * macros[SLOT_TUNE]; // RATE 0.1..5 Hz
-        let depth_oct = 4.0 * macros[SLOT_SWEEP]; // DEPTH 0..4 oct
-        let start_hz = 80.0 + 7920.0 * macros[SLOT_SWEEP_TIME]; // START 80..8000 Hz
-        let q = 0.5 + 11.5 * macros[SLOT_LPF]; // RESO 0.5..12 Q (FILTER resonance slot)
-        let total_s = 0.5 + 5.5 * macros[SLOT_DECAY]; // DEC 0.5..6 s
-        let mode = SweepMode::from_macro(macros[SLOT_SHAPE]); // MODE LP/BP/HP
+        let rate_hz = 0.1 + 4.9 * macros[SLOT_MACH_0]; // RATE 0.1..5 Hz
+        let depth_oct = 4.0 * macros[SLOT_MACH_1]; // DEPTH 0..4 oct
+        let start_hz = 80.0 + 7920.0 * macros[SLOT_MACH_2]; // START 80..8000 Hz
+        let q = 0.5 + 11.5 * macros[SLOT_FILT_1]; // RESO 0.5..12 Q (FILTER resonance slot)
+        let total_s = 0.5 + 5.5 * macros[SLOT_MACH_5]; // DEC 0.5..6 s
+        let mode = SweepMode::from_macro(macros[SLOT_MACH_7]); // MODE LP/BP/HP
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = start_hz;
@@ -346,11 +346,11 @@ mod tests {
         // variation; a near-static sweep has near-constant peaks.
         let id = MachineId::SweepFx;
         let mut slow = id.default_macros();
-        slow[SLOT_TUNE] = 0.0; // RATE 0.1 Hz
-        slow[SLOT_SWEEP] = 0.5; // 2 oct depth — audible sweep
+        slow[SLOT_MACH_0] = 0.0; // RATE 0.1 Hz
+        slow[SLOT_MACH_1] = 0.5; // 2 oct depth — audible sweep
         let mut fast_macros = id.default_macros();
-        fast_macros[SLOT_TUNE] = 1.0; // RATE 5 Hz
-        fast_macros[SLOT_SWEEP] = 0.5;
+        fast_macros[SLOT_MACH_0] = 1.0; // RATE 5 Hz
+        fast_macros[SLOT_MACH_1] = 0.5;
 
         let window_peak = |macros: &[f32; NUM_MACROS]| {
             let mut s = SweepFx::new(macros);
@@ -426,10 +426,10 @@ mod tests {
         let base = id.default_macros();
         for &reso in &[0.0f32, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.7, 1.0] {
             let mut macros = base;
-            macros[SLOT_LPF] = reso;
-            macros[SLOT_SWEEP_TIME] = 1.0; // START 8 kHz
-            macros[SLOT_SWEEP] = 1.0; // DEPTH 4 oct
-            macros[SLOT_SHAPE] = 1.0; // HP — the highest output node
+            macros[SLOT_FILT_1] = reso;
+            macros[SLOT_MACH_2] = 1.0; // START 8 kHz
+            macros[SLOT_MACH_1] = 1.0; // DEPTH 4 oct
+            macros[SLOT_MACH_7] = 1.0; // HP — the highest output node
             let mut s = SweepFx::new(&macros);
             s.trigger(1.0);
             for _ in 0..(3.0 * SAMPLE_RATE) as usize {

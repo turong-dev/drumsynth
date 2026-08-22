@@ -30,8 +30,8 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_MIX, SLOT_MOD_AMOUNT, SLOT_MOD_ENV,
-    SLOT_SWEEP, SLOT_TUNE,
+    NUM_MACROS, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_MACH_7, SLOT_MACH_2, SLOT_MACH_3,
+    SLOT_MACH_1, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -78,13 +78,13 @@ impl SdFm {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let carrier_hz = 100.0 + 300.0 * macros[SLOT_TUNE]; // TUNE 100..400 Hz
-        let mod_ratio = 1.0 + 3.0 * macros[SLOT_SWEEP]; // RAT 1..4
-        let body_decay_s = 0.04 + 0.44 * macros[SLOT_DECAY]; // BDEC 40..480 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_DECAY_2]; // NDEC 30..830 ms
-        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MOD_ENV]; // MENV 5..105 ms
-        let mod_amount = macros[SLOT_MOD_AMOUNT] * 3.0; // AMT 0..3
-        let noise_mix = macros[SLOT_MIX].clamp(0.0, 1.0); // NMIX 0..1
+        let carrier_hz = 100.0 + 300.0 * macros[SLOT_MACH_0]; // TUNE 100..400 Hz
+        let mod_ratio = 1.0 + 3.0 * macros[SLOT_MACH_1]; // RAT 1..4
+        let body_decay_s = 0.04 + 0.44 * macros[SLOT_MACH_5]; // BDEC 40..480 ms
+        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_MACH_6]; // NDEC 30..830 ms
+        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MACH_3]; // MENV 5..105 ms
+        let mod_amount = macros[SLOT_MACH_2] * 3.0; // AMT 0..3
+        let noise_mix = macros[SLOT_MACH_7].clamp(0.0, 1.0); // NMIX 0..1
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.carrier.set_freq(carrier_hz * self.freq_scale);
@@ -195,7 +195,7 @@ mod tests {
     fn full_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
         let mut m = id.default_macros();
-        m[SLOT_MIX] = 1.0;
+        m[SLOT_MACH_7] = 1.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -205,7 +205,7 @@ mod tests {
     fn zero_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
         let mut m = id.default_macros();
-        m[SLOT_MIX] = 0.0;
+        m[SLOT_MACH_7] = 0.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
@@ -215,11 +215,11 @@ mod tests {
     fn fm_amount_changes_tone() {
         let id = MachineId::SdFm;
         let mut clean = id.default_macros();
-        clean[SLOT_MOD_AMOUNT] = 0.0;
-        clean[SLOT_MIX] = 0.0;
+        clean[SLOT_MACH_2] = 0.0;
+        clean[SLOT_MACH_7] = 0.0;
         let mut fm = id.default_macros();
-        fm[SLOT_MOD_AMOUNT] = 1.0;
-        fm[SLOT_MIX] = 0.0;
+        fm[SLOT_MACH_2] = 1.0;
+        fm[SLOT_MACH_7] = 0.0;
         let crossings = |macros: &[f32; NUM_MACROS]| {
             let mut s = SdFm::new(macros);
             s.trigger(1.0);

@@ -52,8 +52,11 @@ pub mod machines;
 pub mod midi;
 
 pub use machines::{
-    MachineId, MacroInfo, MACROS_PER_BANK, NUM_BANKS, NUM_MACROS, SLOT_LEVEL, SLOT_MACHINE,
-    SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    MachineId, MacroInfo, MACROS_PER_BANK, NUM_BANKS, NUM_MACROS, SLOT_FILT_0, SLOT_FILT_1,
+    SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST,
+    SLOT_LFO2_RATE, SLOT_LEVEL, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
+    SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
+    SLOT_STRIP_RESO,
 };
 
 use dsp::{Lfo, ModDest};
@@ -623,6 +626,35 @@ impl Track {
             self.macro_pending &= !(1 << SLOT_OUT);
             return;
         }
+        // Track-routed strip/LFO macros. These drive the per-track strip and
+        // modulation state, not the machine DSP, so they are intercepted
+        // before the generic machine-macro path below. Each stores the macro
+        // value and applies the derived parameter immediately.
+        if idx == SLOT_STRIP_CUT
+            || idx == SLOT_STRIP_RESO
+            || idx == SLOT_STRIP_ATK
+            || idx == SLOT_STRIP_HOLD
+            || idx == SLOT_STRIP_DEC
+        {
+            self.base_macros[idx] = v;
+            self.macro_smooth[idx] = v;
+            self.macro_pending &= !(1 << idx);
+            self.apply_strip_macros();
+            return;
+        }
+        if idx == SLOT_LFO1_RATE
+            || idx == SLOT_LFO1_DEPTH
+            || idx == SLOT_LFO1_DEST
+            || idx == SLOT_LFO2_RATE
+            || idx == SLOT_LFO2_DEPTH
+            || idx == SLOT_LFO2_DEST
+        {
+            self.base_macros[idx] = v;
+            self.macro_smooth[idx] = v;
+            self.macro_pending &= !(1 << idx);
+            self.apply_lfo_macros();
+            return;
+        }
         self.base_macros[idx] = v;
         // Keep the CC smoother in sync: a direct set is the new current
         // value, and any pending ramp to a stale target is cancelled.
@@ -709,6 +741,45 @@ impl Track {
         }
     }
 
+    /// Apply the strip-filter and AHD-envelope macro slots to the strip.
+    ///
+    /// Cutoff is log-mapped 20 Hz..20 kHz; resonance is linear 0.5..20 Q;
+    /// attack 0..1 s, hold 0..2 s, decay 0.01..3 s. Only the coefficients that
+    /// changed are recomputed, via [`set_strip`]'s dirty-flag logic.
+    fn apply_strip_macros(&mut self) {
+        let m = self.base_macros;
+        let new_strip = StripParams {
+            f_cutoff_hz: 20.0 * libm::powf(1000.0, m[SLOT_STRIP_CUT]),
+            f_reso_q: 0.5 + 19.5 * m[SLOT_STRIP_RESO],
+            amp_attack_s: m[SLOT_STRIP_ATK],
+            amp_hold_s: 10.0 * m[SLOT_STRIP_HOLD],
+            amp_decay_s: 0.01 + 9.99 * m[SLOT_STRIP_DEC],
+            ..self.strip
+        };
+        self.set_strip(&new_strip);
+    }
+
+    /// Apply the LFO macro slots to the two LFOs.
+    ///
+    /// Rate is split: 0..0.5 = slow range (0.1..10 Hz), 0.5..1 = fast range
+    /// (1..100 Hz), log-mapped within each half. Depth is 0..1. Destination is
+    /// quantised over [`ModDest`] via [`ModDest::from_macro`].
+    fn apply_lfo_macros(&mut self) {
+        let m = self.base_macros;
+        apply_one_lfo_macro(
+            &mut self.mod_state.lfos[0],
+            m[SLOT_LFO1_RATE],
+            m[SLOT_LFO1_DEPTH],
+            m[SLOT_LFO1_DEST],
+        );
+        apply_one_lfo_macro(
+            &mut self.mod_state.lfos[1],
+            m[SLOT_LFO2_RATE],
+            m[SLOT_LFO2_DEPTH],
+            m[SLOT_LFO2_DEST],
+        );
+    }
+
     /// Replace all base macros in one call.
     pub fn set_macros(&mut self, all: &[f32; NUM_MACROS]) {
         self.base_macros = *all;
@@ -730,6 +801,10 @@ impl Track {
         let i = (all[SLOT_OUT] * (PAIRS.len() - 1) as f32 + 0.5) as usize;
         self.strip.out = PAIRS[i];
         self.base_macros[SLOT_OUT] = i as f32 / (PAIRS.len() - 1) as f32;
+        // Strip filter / AHD env / LFO macros are track-routed too (see
+        // `set_macro`): apply them to the strip and mod state.
+        self.apply_strip_macros();
+        self.apply_lfo_macros();
         if !self.mod_state.has_active_mod() {
             self.slot.set_macros(&self.base_macros);
         }
@@ -786,6 +861,14 @@ impl Track {
         // of the variant, so MIDI feedback reports the value the user
         // expects.
         self.base_macros[SLOT_OUT] = params.out.index() as f32 / 3.0;
+        // Mirror the strip filter / AHD env params into their macro slots so a
+        // strip edit keeps the macro view consistent. Inverse of
+        // `apply_strip_macros`.
+        self.base_macros[SLOT_STRIP_CUT] = libm::logf(params.f_cutoff_hz / 20.0) / libm::logf(1000.0);
+        self.base_macros[SLOT_STRIP_RESO] = (params.f_reso_q - 0.5) / 19.5;
+        self.base_macros[SLOT_STRIP_ATK] = params.amp_attack_s;
+        self.base_macros[SLOT_STRIP_HOLD] = params.amp_hold_s / 10.0;
+        self.base_macros[SLOT_STRIP_DEC] = (params.amp_decay_s - 0.01) / 9.99;
         if !self.mod_state.has_active_mod() {
             self.eff_drive = params.drive;
             self.eff_level = params.level;
@@ -1063,6 +1146,24 @@ const MACRO_SMOOTH_K: f32 = 0.0851;
 /// its target once the residual is below this; ~0.01% of full scale is
 /// comfortably inaudible.
 const MACRO_SMOOTH_EPS: f32 = 1.0e-4;
+
+/// Apply one LFO's macro slots: rate (slow/fast split), depth, destination.
+fn apply_one_lfo_macro(lfo: &mut Lfo, rate_v: f32, depth_v: f32, dest_v: f32) {
+    let (mode, norm) = if rate_v < 0.5 {
+        (dsp::LfoRateMode::Slow, rate_v * 2.0)
+    } else {
+        (dsp::LfoRateMode::Fast, (rate_v - 0.5) * 2.0)
+    };
+    lfo.set_rate(norm, mode);
+    lfo.set_params(
+        lfo.speed_hz(),
+        lfo.wave(),
+        lfo.mode(),
+        depth_v,
+        ModDest::from_macro(dest_v),
+        lfo.start_phase(),
+    );
+}
 
 /// Equal-power pan.
 ///
@@ -1740,7 +1841,7 @@ mod tests {
         // A macro recompute (e.g. from a CC) must not drop the transpose.
         let mut e = DrumEngine::new();
         e.tracks[7].retune(12.0);
-        e.tracks[7].set_macro(crate::machines::SLOT_DECAY, 0.5); // DEC — recomputes coefficients
+        e.tracks[7].set_macro(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
         let after_recompute = crossings(&mut e);
         assert!(
             (after_recompute as i64 - octave as i64).abs() <= 2,
@@ -2849,5 +2950,93 @@ mod tests {
             aux2_max <= 10.0,
             "aux2 dry accumulated across blocks (no clipper on multi-out aux path): peak={aux2_max}"
         );
+    }
+
+    #[test]
+    fn strip_cutoff_macro_sets_filter_cutoff() {
+        let mut e = DrumEngine::new();
+        // Default strip filter is Off, so set a mode first.
+        let strip = StripParams {
+            f_mode: dsp::SvfMode::Lp,
+            f_cutoff_hz: 1000.0,
+            ..StripParams::default()
+        };
+        e.tracks[0].set_strip(&strip);
+        // Now drive cutoff via the macro slot.
+        e.tracks[0].set_macro(SLOT_STRIP_CUT, 0.0); // 20 Hz
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.f_cutoff_hz, 20.0, epsilon = 0.5);
+        e.tracks[0].set_macro(SLOT_STRIP_CUT, 1.0); // 20 kHz
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.f_cutoff_hz, 20_000.0, epsilon = 50.0);
+    }
+
+    #[test]
+    fn strip_reso_macro_sets_filter_resonance() {
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro(SLOT_STRIP_RESO, 0.0);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.f_reso_q, 0.5, epsilon = 1e-6);
+        e.tracks[0].set_macro(SLOT_STRIP_RESO, 1.0);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.f_reso_q, 20.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn strip_env_macros_set_ahd_timings() {
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro(SLOT_STRIP_ATK, 0.5);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_attack_s, 0.5, epsilon = 1e-6);
+        e.tracks[0].set_macro(SLOT_STRIP_HOLD, 0.5);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_hold_s, 5.0, epsilon = 1e-6);
+        e.tracks[0].set_macro(SLOT_STRIP_DEC, 0.5);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_decay_s, 5.005, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn lfo_rate_macro_slow_fast_split() {
+        let mut e = DrumEngine::new();
+        // 0.0 → slow range bottom (0.1 Hz)
+        e.tracks[0].set_macro(SLOT_LFO1_RATE, 0.0);
+        approx::assert_abs_diff_eq!(e.tracks[0].mod_state.lfos[0].speed_hz(), 0.1, epsilon = 1e-6);
+        // 0.5 → fast range bottom (1 Hz)
+        e.tracks[0].set_macro(SLOT_LFO1_RATE, 0.5);
+        approx::assert_abs_diff_eq!(e.tracks[0].mod_state.lfos[0].speed_hz(), 1.0, epsilon = 1e-6);
+        // 1.0 → fast range top (100 Hz)
+        e.tracks[0].set_macro(SLOT_LFO1_RATE, 1.0);
+        approx::assert_abs_diff_eq!(e.tracks[0].mod_state.lfos[0].speed_hz(), 100.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn lfo_depth_macro_sets_depth() {
+        let mut e = DrumEngine::new();
+        e.tracks[0].set_macro(SLOT_LFO1_DEPTH, 0.7);
+        approx::assert_abs_diff_eq!(e.tracks[0].mod_state.lfos[0].depth(), 0.7, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn lfo_dest_macro_quantises() {
+        let mut e = DrumEngine::new();
+        // 0.0 → Macro(0)
+        e.tracks[0].set_macro(SLOT_LFO1_DEST, 0.0);
+        assert_eq!(e.tracks[0].mod_state.lfos[0].dest(), ModDest::Macro(0));
+        // ~0.56 → FilterCutoff (index 8 of 16 → 8/15 ≈ 0.533)
+        e.tracks[0].set_macro(SLOT_LFO1_DEST, 0.56);
+        assert_eq!(e.tracks[0].mod_state.lfos[0].dest(), ModDest::FilterCutoff);
+    }
+
+    #[test]
+    fn strip_cutoff_macro_round_trips_through_set_strip() {
+        let mut e = DrumEngine::new();
+        let strip = StripParams {
+            f_mode: StripParams::default().f_mode,
+            f_cutoff_hz: 5000.0,
+            f_reso_q: 4.0,
+            amp_attack_s: 0.2,
+            amp_hold_s: 0.5,
+            amp_decay_s: 1.0,
+            ..StripParams::default()
+        };
+        e.tracks[0].set_strip(&strip);
+        // The macro slot should mirror the inverse mapping.
+        let m = e.tracks[0].base_macros[SLOT_STRIP_CUT];
+        let expected = libm::logf(5000.0 / 20.0) / libm::logf(1000.0);
+        approx::assert_abs_diff_eq!(m, expected, epsilon = 1e-5);
     }
 }

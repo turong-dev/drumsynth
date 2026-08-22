@@ -36,8 +36,8 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, OnePoleLp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_LPF, SLOT_MIX, SLOT_SWEEP,
-    SLOT_TUNE,
+    NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_FILT_1, SLOT_MACH_7, SLOT_MACH_1,
+    SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -92,13 +92,13 @@ impl Cp {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 150.0 + 250.0 * macros[SLOT_TUNE]; // TUNE 150..400 Hz
-        let body_ratio = 1.0 + 0.5 * macros[SLOT_SWEEP]; // RATIO 1.0..1.5
-        let body_decay_s = 0.05 + 0.2 * macros[SLOT_DECAY]; // BDEC 50..250 ms
-        let noise_decay_s = 0.1 + 0.5 * macros[SLOT_DECAY_2]; // NDEC 100..600 ms
-        let hp_hz = 800.0 + 3200.0 * macros[SLOT_CUT]; // HPF 800..4000 Hz
-        let lp_hz = 4000.0 + 8000.0 * macros[SLOT_LPF]; // LPF 4..12 kHz
-        let bal = macros[SLOT_MIX].clamp(0.0, 1.0); // BAL noise↔body
+        let body_hz = 150.0 + 250.0 * macros[SLOT_MACH_0]; // TUNE 150..400 Hz
+        let body_ratio = 1.0 + 0.5 * macros[SLOT_MACH_1]; // RATIO 1.0..1.5
+        let body_decay_s = 0.05 + 0.2 * macros[SLOT_MACH_5]; // BDEC 50..250 ms
+        let noise_decay_s = 0.1 + 0.5 * macros[SLOT_MACH_6]; // NDEC 100..600 ms
+        let hp_hz = 800.0 + 3200.0 * macros[SLOT_FILT_0]; // HPF 800..4000 Hz
+        let lp_hz = 4000.0 + 8000.0 * macros[SLOT_FILT_1]; // LPF 4..12 kHz
+        let bal = macros[SLOT_MACH_7].clamp(0.0, 1.0); // BAL noise↔body
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_hz = body_hz * self.freq_scale;

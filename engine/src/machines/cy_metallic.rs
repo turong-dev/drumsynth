@@ -31,7 +31,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_CUT, SLOT_DECAY, SLOT_DECAY_2, SLOT_LEVEL, SLOT_SWEEP, SLOT_TUNE,
+    NUM_MACROS, SLOT_FILT_0, SLOT_MACH_5, SLOT_MACH_6, SLOT_LEVEL, SLOT_MACH_1, SLOT_MACH_0,
 };
 use crate::SAMPLE_RATE;
 
@@ -68,11 +68,11 @@ impl CyMetallic {
 
     /// Recompute coefficients from macros. Setup rate.
     pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let osc_a_hz = 200.0 + 1000.0 * macros[SLOT_TUNE]; // TUNE 200..1200 Hz
-        let ratio = 1.3 + 1.7 * macros[SLOT_SWEEP]; // TONE 1.3..3.0
-        let transient_decay_s = 0.005 + 0.095 * macros[SLOT_DECAY_2]; // TDEC 5..100 ms
-        let main_decay_s = 0.1 + 1.9 * macros[SLOT_DECAY]; // DEC 100..2000 ms
-        let noise_hp_hz = 1000.0 + 17000.0 * macros[SLOT_CUT]; // NCOL 1..18 kHz
+        let osc_a_hz = 200.0 + 1000.0 * macros[SLOT_MACH_0]; // TUNE 200..1200 Hz
+        let ratio = 1.3 + 1.7 * macros[SLOT_MACH_1]; // TONE 1.3..3.0
+        let transient_decay_s = 0.005 + 0.095 * macros[SLOT_MACH_6]; // TDEC 5..100 ms
+        let main_decay_s = 0.1 + 1.9 * macros[SLOT_MACH_5]; // DEC 100..2000 ms
+        let noise_hp_hz = 1000.0 + 17000.0 * macros[SLOT_FILT_0]; // NCOL 1..18 kHz
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(osc_a_hz * self.freq_scale);
