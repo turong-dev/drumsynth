@@ -20,11 +20,11 @@
 //! | 1   | 21  | TONE      | 0..1          | osc B/A ratio (1.3..3.0) |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | NCOL      | 1000..18000 Hz | noise HP colour |
-//! | 16  | 36  | DEC       | 100..2000 ms  | main decay (long — it's a cymbal) |
-//! | 17  | 37  | TDEC      | 5..100 ms     | transient (noise) decay |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | DEC       | 100..2000 ms  | main decay (long — it's a cymbal) |
+//! | 19  | 39  | TDEC      | 5..100 ms     | transient (noise) decay |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

@@ -15,10 +15,10 @@
 //! | 1   | 21  | DET       | 1.0..1.5      | osc B/A ratio |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | BPF       | 300..4000 Hz  | bandpass center |
-//! | 16  | 36  | DEC       | 30..400 ms    | decay |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | DEC       | 30..400 ms    | decay |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

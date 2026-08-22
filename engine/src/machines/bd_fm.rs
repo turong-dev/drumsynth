@@ -31,8 +31,8 @@
 //! | 3   | 23  | MOD.HZ    | 1×..8×      | modulator relative to carrier |
 //! | 4   | 24  | MOD.DC    | 5..105 ms   | mod-envelope decay |
 //! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | DEC       | 50..1500 ms | amp-decay time |
-//! | 18  | 38  | LEVEL     | 0..1        | per-machine output level |
+//! | 16  | 36  | LEVEL     | 0..1        | per-machine output level |
+//! | 18  | 38  | DEC       | 50..1500 ms | amp-decay time |
 //! | 24  | 44  | MOD.AMT   | 0..4        | FM depth in carrier cycles |
 //!
 //! All other slots are RESV (default 0.0) and ignored — the voice is

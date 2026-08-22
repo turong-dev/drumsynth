@@ -18,12 +18,12 @@
 //! | 1   | 21  | RATIO     | 1.0..2.0      | second tone relative to first |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | HPF       | 400..4000 Hz  | noise highpass |
-//! | 16  | 36  | BDEC      | 40..640 ms    | body decay |
-//! | 17  | 37  | NDEC      | 30..830 ms    | noise decay |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 20  | 40  | NMIX      | 0..1          | body↔rattle crossfade |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | BDEC      | 40..640 ms    | body decay |
+//! | 19  | 39  | NDEC      | 30..830 ms    | noise decay |
+//! | 21  | 41  | NMIX      | 0..1          | body↔rattle crossfade |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

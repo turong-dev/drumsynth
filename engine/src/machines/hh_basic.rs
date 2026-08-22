@@ -21,12 +21,12 @@
 //! | 1   | 21  | TONE      | 0..1           | bipolar — shrill to deep detune spread |
 //! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | BPF       | 2000..12000 Hz | bandpass center |
-//! | 16  | 36  | DEC       | 10..510 ms     | main decay |
-//! | 17  | 37  | TDEC      | 5..80 ms       | transient decay (initial bright tick) |
-//! | 18  | 38  | LEVEL     | 0..1           | per-machine output level |
-//! | 20  | 40  | RST       | 0..1           | osc reset on trigger (0=free, 1=reset) |
-//! | 21  | 41  | SEND.DLY  | 0..1           | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1           | per-machine output level |
+//! | 18  | 38  | DEC       | 10..510 ms     | main decay |
+//! | 19  | 39  | TDEC      | 5..80 ms       | transient decay (initial bright tick) |
+//! | 21  | 41  | RST       | 0..1           | osc reset on trigger (0=free, 1=reset) |
+//! | 22  | 42  | SEND.DLY  | 0..1           | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1           | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

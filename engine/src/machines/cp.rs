@@ -23,13 +23,13 @@
 //! |-----|-----|-----------|--------------|-------|
 //! | 0   | 20  | TUNE      | 150..400 Hz  | body pitch |
 //! | 1   | 21  | RATIO     | 1.0..1.5     | body osc ratio |
-//! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | 5   | 25  | MACH      | 0..1         | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | HPF       | 800..4000 Hz | noise highpass colour |
 //! | 9   | 29  | LPF       | 4..12 kHz    | noise lowpass top |
-//! | 16  | 36  | BDEC      | 50..250 ms   | body decay |
-//! | 17  | 37  | NDEC      | 100..600 ms  | noise (burst + tail) decay |
-//! | 18  | 38  | LEVEL     | 0..1         | per-machine output level |
-//! | 20  | 40  | BAL       | 0..1         | noise↔body balance |
+//! | 16  | 36  | LEVEL     | 0..1         | per-machine output level |
+//! | 18  | 38  | BDEC      | 50..250 ms   | body decay |
+//! | 19  | 39  | NDEC      | 100..600 ms  | noise (burst + tail) decay |
+//! | 21  | 41  | BAL       | 0..1         | noise↔body balance |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

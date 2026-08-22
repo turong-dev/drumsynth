@@ -19,12 +19,12 @@
 //! | 0   | 20  | TUNE      | 30..120 Hz   | settled fundamental |
 //! | 1   | 21  | SWEEP     | 1×..11×      | start-to-end pitch ratio |
 //! | 2   | 22  | SWP_T     | 5..155 ms    | pitch-sweep decay time |
-//! | 5   | 25  | MACH      | 0..1        | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | DEC       | 50..1500 ms  | amp-decay time |
-//! | 18  | 38  | LEVEL     | 0..1         | per-machine output level |
-//! | 19  | 39  | DRIVE     | 1.0..6.0     | saturation amount |
-//! | 21  | 41  | SEND.DLY  | 0..1         | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1         | reverb send (track-routed) |
+//! | 5   | 25  | MACH      | 0..1         | machine selector (quantised over MachineId::ALL) |
+//! | 16  | 36  | LEVEL     | 0..1         | per-machine output level |
+//! | 18  | 38  | DEC       | 50..1500 ms  | amp-decay time |
+//! | 20  | 40  | DRIVE     | 1.0..6.0     | saturation amount |
+//! | 22  | 42  | SEND.DLY  | 0..1         | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1         | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored — the voice is
 //! sine-only with no transient layer.

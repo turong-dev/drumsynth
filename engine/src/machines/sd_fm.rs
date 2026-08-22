@@ -16,12 +16,12 @@
 //! | 0   | 20  | TUNE      | 100..400 Hz   | carrier pitch |
 //! | 1   | 21  | RAT       | 1.0..4.0      | modulator-to-carrier ratio |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | BDEC      | 40..480 ms    | body decay |
-//! | 17  | 37  | NDEC      | 30..830 ms    | noise decay |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 20  | 40  | NMIX      | 0..1          | body↔rattle crossfade |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | BDEC      | 40..480 ms    | body decay |
+//! | 19  | 39  | NDEC      | 30..830 ms    | noise decay |
+//! | 21  | 41  | NMIX      | 0..1          | body↔rattle crossfade |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //! | 24  | 44  | AMT       | 0..3          | FM amount in carrier cycles |
 //! | 25  | 45  | MENV      | 5..105 ms     | mod-envelope decay (FM thins over time) |
 //!

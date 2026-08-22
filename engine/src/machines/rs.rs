@@ -16,12 +16,12 @@
 //! | 1   | 21  | DET       | 1.0..1.08     | osc2 relative to osc1 (up to ~8%) |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | HPF       | 1000..6000 Hz | noise tick colour |
-//! | 16  | 36  | DEC       | 15..150 ms    | body decay — intentionally short |
-//! | 17  | 37  | NDEC      | 5..60 ms      | noise-tick decay (shorter than body) |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 19  | 39  | NLEV      | 0..1          | tick level |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | DEC       | 15..150 ms    | body decay — intentionally short |
+//! | 19  | 39  | NDEC      | 5..60 ms      | noise-tick decay (shorter than body) |
+//! | 20  | 40  | NLEV      | 0..1          | tick level |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

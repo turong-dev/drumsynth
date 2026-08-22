@@ -19,10 +19,10 @@
 //! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
 //! | 8   | 28  | HPF       | 2000..11000 Hz | highpass colour |
 //! | 9   | 29  | LPF       | 4000..16000 Hz | lowpass top; takes the fizz off |
-//! | 16  | 36  | DEC       | 10..510 ms     | decay time; <100 ms reads as closed |
-//! | 18  | 38  | LEVEL     | 0..1           | per-machine output level |
-//! | 21  | 41  | SEND.DLY  | 0..1           | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1           | per-machine output level |
+//! | 18  | 38  | DEC       | 10..510 ms     | decay time; <100 ms reads as closed |
+//! | 22  | 42  | SEND.DLY  | 0..1           | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1           | reverb send (track-routed) |
 //!
 //! Noise-only, so the PITCH bank is RESV (default 0.0) and ignored apart
 //! from the track-routed machine selector at slot 5.

@@ -17,11 +17,11 @@
 //! | 1   | 21  | SWEEP     | 1×..5×        | start-to-end pitch ratio |
 //! | 2   | 22  | SWP_T     | 20..200 ms    | pitch-sweep decay (slower than kick) |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | DEC       | 100..900 ms   | amp decay (rings longer than a kick) |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 19  | 39  | STICK     | 0..1          | initial noise-click amount |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | DEC       | 100..900 ms   | amp decay (rings longer than a kick) |
+//! | 20  | 40  | STICK     | 0..1          | initial noise-click amount |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

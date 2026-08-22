@@ -18,10 +18,10 @@
 //! | 1   | 21  | RATIO     | 1.0..4.0      | modulator/carrier ratio |
 //! | 2   | 22  | FDBK      | 0..1          | modulator feedback (adds complexity) |
 //! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | DEC       | 50..2000 ms   | amp decay |
-//! | 18  | 38  | LEVEL     | 0..1          | per-machine output level |
-//! | 21  | 41  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 22  | 42  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
+//! | 18  | 38  | DEC       | 50..2000 ms   | amp decay |
+//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
+//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
 //! | 24  | 44  | MOD.AMT   | 0..3          | FM depth in carrier cycles |
 //! | 25  | 45  | MENV      | 5..200 ms     | modulation envelope decay |
 //!
