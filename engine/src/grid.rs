@@ -206,6 +206,12 @@ pub struct Grid {
     global_velocity: u8,
     /// Last LED values sent, used for dirty-tracking.
     leds: [u8; NUM_PADS],
+    /// True when the LED buffer no longer matches the model. Set by input
+    /// events and by hold-state transitions; cleared by a successful render.
+    dirty: bool,
+    /// Fine-tune state at the last render, so a held pad crossing the hold
+    /// threshold triggers a redraw without re-rendering on every idle loop.
+    in_fine_tune_last: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -246,6 +252,8 @@ impl Grid {
             held_mask: 0,
             global_velocity: DEFAULT_VELOCITY,
             leds: [0u8; NUM_PADS],
+            dirty: true,
+            in_fine_tune_last: false,
         }
     }
 
@@ -254,6 +262,7 @@ impl Grid {
     /// LED feedback is **not** emitted here; call [`Self::render`] afterwards
     /// to push any changed LEDs through the supplied callback.
     pub fn process_event(&mut self, event: GridEvent, now_ms: u32, engine: &mut DrumEngine) {
+        self.dirty = true;
         match event {
             GridEvent::PadDown { x, y } => self.on_pad_down(x, y, now_ms, engine),
             GridEvent::PadUp { x, y } => self.on_pad_up(x, y, now_ms, engine),
@@ -270,12 +279,20 @@ impl Grid {
     where
         F: FnMut(u8, u8, u8) -> bool,
     {
-        let mut next = [0u8; NUM_PADS];
-
         let in_fine_tune = match self.held {
             Some(h) => h.is_hold(now_ms),
             None => false,
         };
+
+        // Skip the expensive LED recompute when nothing has changed and no
+        // held pad has crossed the hold threshold since the last render.
+        if !self.dirty && in_fine_tune == self.in_fine_tune_last {
+            return;
+        }
+        self.in_fine_tune_last = in_fine_tune;
+        self.dirty = false;
+
+        let mut next = [0u8; NUM_PADS];
 
         if in_fine_tune {
             render_fine_tune(self, engine, &mut next);
@@ -286,15 +303,19 @@ impl Grid {
             }
         }
 
+        let mut send_failed = false;
         for i in 0..NUM_PADS {
             if next[i] != self.leds[i] {
                 let x = (i % WIDTH) as u8;
                 let y = (i / WIDTH) as u8;
                 if send(MIDIGRID_CHANNEL, y * 16 + x, next[i]) {
                     self.leds[i] = next[i];
+                } else {
+                    send_failed = true;
                 }
             }
         }
+        self.dirty = send_failed;
     }
 }
 
