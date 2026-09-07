@@ -1217,4 +1217,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn full_refresh_sends_all_pads() {
+        let mut grid = Grid::new();
+        let mut engine = DrumEngine::new();
+
+        // Initial render at t=0 — only changed pads are emitted.
+        let mut first = [(0u8, 0u8, 0u8); 128];
+        let n1 = collect_events(&mut grid, &mut engine, 0, &mut first);
+
+        // Second render after the refresh interval — force_all should emit
+        // one message for every pad regardless of prior state.
+        let mut second = [(0u8, 0u8, 0u8); 128];
+        let n2 = collect_events(&mut grid, &mut engine, REFRESH_MS + 1, &mut second);
+
+        assert!(
+            n2 >= NUM_PADS,
+            "full refresh should send all {NUM_PADS} pads, got {n2}; first render sent {n1}"
+        );
+
+        // Every message must be on the grid channel and cover all note numbers.
+        let mut seen = [false; NUM_PADS];
+        for i in 0..n2 {
+            assert_eq!(second[i].0, MIDIGRID_CHANNEL);
+            let note = second[i].1 as usize;
+            assert!(note < NUM_PADS);
+            seen[note] = true;
+        }
+        assert!(seen.iter().all(|&b| b), "full refresh did not cover every pad");
+    }
+
 }
