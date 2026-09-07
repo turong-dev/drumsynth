@@ -130,6 +130,18 @@ impl<'a, B: UsbBus> MidiClass<'a, B> {
             Err(e) => Err(e),
         }
     }
+
+    /// Write one 4-byte USB MIDI event packet to the host.
+    ///
+    /// Returns `Ok(4)` when the packet was accepted, `Ok(0)` when the
+    /// endpoint is busy (`WouldBlock`), or the underlying error otherwise.
+    pub fn write(&mut self, packet: &[u8; 4]) -> Result<usize> {
+        match self.bulk_in.write(packet) {
+            Ok(n) => Ok(n),
+            Err(usb_device::UsbError::WouldBlock) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<B: UsbBus> UsbClass<B> for MidiClass<'_, B> {
@@ -370,4 +382,31 @@ pub fn poll(dst: &mut [u8]) -> usize {
         }
     }
     total
+}
+
+/// Send one 4-byte USB MIDI event packet to the host.
+///
+/// Returns `true` when the packet was accepted. If the bulk IN endpoint is
+/// currently busy, the packet is dropped and `false` is returned. Callers
+/// can rely on the next render pass to retry changed LEDs.
+///
+/// # Safety
+///
+/// Only call from the same single execution context that called [`init`],
+/// after `init` has returned. Not reentrant.
+#[allow(unsafe_code, static_mut_refs)]
+pub fn send_midi(packet: &[u8; 4]) -> bool {
+    // Safety: init has run; this is called from one context, never
+    // reentrantly, so the mutable statics are uniquely borrowed here.
+    let device = unsafe { DEVICE.assume_init_mut() };
+    let midi = unsafe { MIDI.assume_init_mut() };
+
+    if device.state() != UsbDeviceState::Configured {
+        return false;
+    }
+
+    match midi.write(packet) {
+        Ok(4) => true,
+        _ => false,
+    }
 }

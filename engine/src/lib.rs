@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod dsp;
+pub mod grid;
 pub mod machines;
 pub mod midi;
 

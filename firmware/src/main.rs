@@ -104,6 +104,7 @@ mod audio;
 mod usb;
 
 use drum_engine::{
+    grid::{Grid, GridParser, MIDIGRID_CHANNEL},
     midi::{schedule_midi, MidiParser},
     DrumEngine, BLOCK,
 };
@@ -217,6 +218,9 @@ fn main() -> ! {
 
     let mut parser_usb = MidiParser::new();
     let mut parser_uart = MidiParser::new();
+    let mut parser_grid_usb = GridParser::new();
+    let mut parser_grid_uart = GridParser::new();
+    let mut grid = Grid::new();
     let mut usb_midi_buf = [0u8; 64];
 
     loop {
@@ -227,10 +231,22 @@ fn main() -> ! {
         // Polled on *every* pass: `usb::poll` also drives enumeration and
         // the control transfers, so the device disappears from the host if
         // the loop ever stops reaching it.
+        let now_ms = (audio::sample_counter() / 48) as u32;
+
+        // USB MIDI: the host sends 4-byte USB MIDI event packets, each a
+        // status byte plus up to two data bytes. Feed those through the
+        // same parser as the DIN socket — USB MIDI is just a transport.
+        //
+        // Channel 16 is reserved for the Monome Grid; feed it to the grid
+        // parser as well so pad presses/releases become control-surface
+        // gestures rather than drum triggers.
         let n = usb::poll(&mut usb_midi_buf);
         let mut i = 0;
         while i < n {
             for &b in &usb_midi_buf[i + 1..i + 4] {
+                if let Some(event) = parser_grid_usb.push(b) {
+                    grid.process_event(event, now_ms, engine);
+                }
                 if let Some(event) = parser_usb.push(b) {
                     // Shared with the host `device` harness — the Teensy and
                     // the Mac tuning rig interpret the same bytes identically.
@@ -245,11 +261,21 @@ fn main() -> ! {
         // this belongs in a UART interrupt pushing into a queue, so that a
         // burst of notes cannot delay an audio deadline.
         while let Ok(byte) = midi_uart.read() {
+            if let Some(event) = parser_grid_uart.push(byte) {
+                grid.process_event(event, now_ms, engine);
+            }
             if let Some(event) = parser_uart.push(byte) {
                 let offset = arrival_offset(audio::sample_counter());
                 schedule_midi(engine, event, offset);
             }
         }
+
+        // Render grid LED feedback. Only the USB path carries the midigrid
+        // class; DIN MIDI has no LED return.
+        grid.render(engine, now_ms, |_ch, note, vel| {
+            let packet = [0x09, 0x90 | MIDIGRID_CHANNEL, note, vel];
+            usb::send_midi(&packet)
+        });
 
         // Render the audio: keep one block rendered ahead of the SAI
         // interrupt. `render_next` does nothing unless the ISR raised
