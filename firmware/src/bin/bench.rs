@@ -80,7 +80,7 @@ use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
 use drum_engine::machines::{
-    MachineId, SLOT_DECAY, SLOT_LPF, SLOT_SHAPE, SLOT_SWEEP, SLOT_SWEEP_TIME,
+    MachineId, SLOT_FILT_1, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
 };
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
 use teensy4_bsp as bsp;
@@ -221,8 +221,8 @@ fn main() -> ! {
 
         // --- Phase 11 regate: 8 tracks with BdVa on track 0, worst case ---
         // Swap track 0 (BdClassic in the default kit) for BdVa configured
-        // for its heaviest path — full pitch sweep (SLOT_SWEEP=1), deep
-        // decay (SLOT_DECAY=1), max Q (SLOT_LPF=1). This forces
+        // for its heaviest path — full pitch sweep (SLOT_MACH_1=1), deep
+        // decay (SLOT_MACH_5=1), max Q (SLOT_FILT_1=1). This forces
         // `BridgedT::set_coeffs` to execute every sample with the maximum
         // pitch deflection (the full 0..120 Hz sweep range active), which
         // is the Option A path the Plan flagged as bench-gated. Every
@@ -466,10 +466,10 @@ fn measure_with_bdva(
     // Swap to BdVa and configure the worst case. Macros applied via
     // `set_macro` so the strip and the engine both see the change.
     engine.tracks[0].load_machine(MachineId::BdVa);
-    engine.tracks[0].set_macro(SLOT_SWEEP, 1.0); // 0..120 Hz pitch deflection
-    engine.tracks[0].set_macro(SLOT_SWEEP_TIME, 1.0); // 55 ms (sustains the sweep)
-    engine.tracks[0].set_macro(SLOT_DECAY, 1.0); // 1500 ms amp decay
-    engine.tracks[0].set_macro(SLOT_LPF, 1.0); // Q = 10 (max resonance)
+    engine.tracks[0].set_macro(SLOT_MACH_1, 1.0); // 0..120 Hz pitch deflection
+    engine.tracks[0].set_macro(SLOT_MACH_2, 1.0); // 55 ms (sustains the sweep)
+    engine.tracks[0].set_macro(SLOT_MACH_5, 1.0); // 1500 ms amp decay
+    engine.tracks[0].set_macro(SLOT_FILT_1, 1.0); // Q = 10 (max resonance)
 
     let mut total: u64 = 0;
     let mut peak: u32 = 0;
@@ -538,11 +538,11 @@ fn measure_with_sweepfx_sustained(
     // (MODE=1), start cutoff at the top of its range (START=1, 8 kHz),
     // and a long gesture (DEC=1, ≈6 s) so it never idles mid-run.
     engine.tracks[0].load_machine(MachineId::SweepFx);
-    engine.tracks[0].set_macro(SLOT_SWEEP, 1.0); // DEPTH 4 oct
-    engine.tracks[0].set_macro(SLOT_LPF, 1.0); // RESO Q≈8
-    engine.tracks[0].set_macro(SLOT_SHAPE, 1.0); // MODE HP
-    engine.tracks[0].set_macro(SLOT_SWEEP_TIME, 1.0); // START 8 kHz
-    engine.tracks[0].set_macro(SLOT_DECAY, 1.0); // DEC ≈6 s gesture
+    engine.tracks[0].set_macro(SLOT_MACH_1, 1.0); // DEPTH 4 oct
+    engine.tracks[0].set_macro(SLOT_FILT_1, 1.0); // RESO Q≈8
+    engine.tracks[0].set_macro(SLOT_MACH_7, 1.0); // MODE HP
+    engine.tracks[0].set_macro(SLOT_MACH_2, 1.0); // START 8 kHz
+    engine.tracks[0].set_macro(SLOT_MACH_5, 1.0); // DEC ≈6 s gesture
 
     // Punch in the same sends as the other FX scenarios: snare (1) →
     // reverb, clap (4) → delay.
