@@ -40,6 +40,11 @@ const HOLD_MS: u32 = 300;
 /// drumsynth boot sync back up without requiring a specific power-on order.
 pub const REFRESH_MS: u32 = 1000;
 
+/// Minimum time between LED renders. Events that arrive faster are coalesced
+/// into the next render. This paces USB bulk-IN traffic and prevents a run of
+/// failed sends from starving the audio interrupt.
+const RENDER_INTERVAL_MS: u32 = 16;
+
 /// Default fixed velocity for audition / trigger pads (0..=127).
 const DEFAULT_VELOCITY: u8 = 100;
 
@@ -261,7 +266,9 @@ impl Grid {
             leds: [0u8; NUM_PADS],
             dirty: true,
             in_fine_tune_last: false,
-            last_render_ms: 0,
+            // `u32::MAX` means "never rendered yet"; the first render bypasses
+            // the rate limiter so boot feedback is immediate.
+            last_render_ms: u32::MAX,
         }
     }
 
@@ -303,6 +310,15 @@ impl Grid {
         if !self.dirty && in_fine_tune == self.in_fine_tune_last {
             return;
         }
+
+        // Rate-limit renders so a run of failed USB sends (or a flood of input
+        // events) cannot starve the audio interrupt. The first render after
+        // boot bypasses this because `last_render_ms` starts at `u32::MAX`.
+        let since_last = now_ms.saturating_sub(self.last_render_ms);
+        if since_last < RENDER_INTERVAL_MS && self.last_render_ms != u32::MAX {
+            return;
+        }
+
         self.in_fine_tune_last = in_fine_tune;
         self.dirty = false;
         self.last_render_ms = now_ms;
@@ -318,20 +334,19 @@ impl Grid {
             }
         }
 
+        let mut send_failed = false;
         for i in 0..NUM_PADS {
             if next[i] != self.leds[i] {
                 let x = (i % WIDTH) as u8;
                 let y = (i / WIDTH) as u8;
                 if send(MIDIGRID_CHANNEL, y * 16 + x, next[i]) {
                     self.leds[i] = next[i];
+                } else {
+                    send_failed = true;
                 }
-                // If a send failed (endpoint busy / not configured) we leave
-                // the LED entry as-is. The next event or 1 Hz refresh will
-                // recompute `next` and retry any pads that still differ. We
-                // do NOT keep `dirty` true here: that would cause a render on
-                // every loop iteration and starve the audio interrupt.
             }
         }
+        self.dirty = send_failed;
     }
 }
 
