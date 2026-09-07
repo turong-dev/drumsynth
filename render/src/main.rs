@@ -4,12 +4,14 @@
 //! `drum-engine` crate the firmware does, so anything you tune here is
 //! already validated by the time it reaches hardware.
 //!
-//! Three modes:
+//! Modes:
 //!
 //! ```text
-//! render  — write a demo pattern to a WAV file
-//! sweep   — write one WAV per value of a parameter, for A/B-ing
-//! play    — real-time playback (requires --features live)
+//! render   — write a demo pattern to a WAV file
+//! sweep    — write one WAV per value of a parameter, for A/B-ing
+//! play     — real-time playback (requires --features live)
+//! device   — MIDI-in / audio-out device (requires --features live)
+//! monitor  — MIDI input monitor (requires --features live)
 //! ```
 //!
 //! The sweep mode is the one that earns its keep. Rendering sixteen kicks
@@ -34,6 +36,11 @@ mod verify;
 /// rest of the host audio stack.
 #[cfg(feature = "live")]
 mod device;
+
+/// The MIDI input monitor. Also behind the `live` feature because it needs
+/// `midir` for port enumeration and connection.
+#[cfg(feature = "live")]
+mod monitor;
 
 /// The 8-track kit you get from `DrumEngine::new()`.
 #[derive(Parser)]
@@ -242,6 +249,31 @@ enum Command {
         /// stereo wet). The device must support 18ch @ 48kHz F32.
         #[arg(long)]
         multi_out: bool,
+    },
+    /// Monitor a MIDI input port, printing each message with a timestamp.
+    ///
+    /// Useful for checking what a controller or sequencer is sending before
+    /// the bytes reach the engine. `--channel` filters to one MIDI channel
+    /// (1–16). `--hex` also shows the raw bytes. `--realtime` shows clock
+    /// and transport bytes (hidden by default to keep dense drum streams
+    /// readable).
+    #[cfg(feature = "live")]
+    Monitor {
+        /// MIDI input port name (substring match) or numeric index.
+        #[arg(short, long)]
+        port: Option<String>,
+        /// MIDI channel to filter on, 1–16.
+        #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=16))]
+        channel: Option<u8>,
+        /// Print available input ports and exit.
+        #[arg(long)]
+        list: bool,
+        /// Also print raw message bytes in hex.
+        #[arg(long)]
+        hex: bool,
+        /// Show real-time messages (clock, start, stop, continue).
+        #[arg(long)]
+        realtime: bool,
     },
 }
 
@@ -589,6 +621,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             list,
             multi_out,
         } => device::run(&out, &port, list, multi_out)?,
+
+        #[cfg(feature = "live")]
+        Command::Monitor {
+            port,
+            channel,
+            list,
+            hex,
+            realtime,
+        } => monitor::run(&port, channel, list, hex, realtime)?,
     }
 
     Ok(())

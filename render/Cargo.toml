@@ -16,12 +16,14 @@ clap = { version = "4", features = ["derive"] }
 cpal = { version = "0.15", optional = true }
 midir = { version = "0.11", optional = true }
 rtrb = { version = "0.3", optional = true }
+ctrlc = { version = "3.4", optional = true }
 
 [features]
 default = []
 # cargo run --features live -- play
 # cargo run --features live -- device
-live = ["dep:cpal", "dep:midir", "dep:rtrb"]
+# cargo run --features live -- monitor
+live = ["dep:cpal", "dep:midir", "dep:rtrb", "dep:ctrlc"]
 
 # The device-mode integration test exercises real CoreMIDI virtual ports, so
 # it needs the live stack.
