@@ -43,7 +43,13 @@ pub const REFRESH_MS: u32 = 1000;
 /// Minimum time between LED renders. Events that arrive faster are coalesced
 /// into the next render. This paces USB bulk-IN traffic and prevents a run of
 /// failed sends from starving the audio interrupt.
-const RENDER_INTERVAL_MS: u32 = 16;
+const RENDER_INTERVAL_MS: u32 = 8;
+
+/// Maximum number of LED packets emitted in a single render call. Pacing the
+/// USB bulk-IN traffic this way avoids saturating a small endpoint FIFO or the
+/// grid's serial bridge. Any remaining pads retry on the next render (at most
+/// `RENDER_INTERVAL_MS` later).
+const MAX_SENDS_PER_RENDER: usize = 8;
 
 /// Default fixed velocity for audition / trigger pads (0..=127).
 const DEFAULT_VELOCITY: u8 = 100;
@@ -227,6 +233,9 @@ pub struct Grid {
     /// True when the periodic refresh fired; forces a full LED state dump on
     /// the next render so a reconnecting grid resyncs.
     refresh_pending: bool,
+    /// During a forced refresh, the next pad index to send. `NUM_PADS as u8`
+    /// means the refresh is complete.
+    refresh_pos: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -273,6 +282,7 @@ impl Grid {
             // the rate limiter so boot feedback is immediate.
             last_render_ms: u32::MAX,
             refresh_pending: false,
+            refresh_pos: NUM_PADS as u8,
         }
     }
 
@@ -308,6 +318,7 @@ impl Grid {
         if now_ms.saturating_sub(self.last_render_ms) >= REFRESH_MS {
             self.dirty = true;
             self.refresh_pending = true;
+            self.refresh_pos = 0;
         }
 
         // Skip the expensive LED recompute when nothing has changed and no
@@ -327,8 +338,7 @@ impl Grid {
         self.in_fine_tune_last = in_fine_tune;
         self.dirty = false;
         self.last_render_ms = now_ms;
-        let force_all = self.refresh_pending;
-        self.refresh_pending = false;
+        let refresh_active = self.refresh_pos < NUM_PADS as u8;
 
         let mut next = [0u8; NUM_PADS];
 
@@ -342,19 +352,55 @@ impl Grid {
         }
 
         let mut send_failed = false;
-        for i in 0..NUM_PADS {
-            let changed = next[i] != self.leds[i];
-            if changed || force_all {
+        let mut budget_exceeded = false;
+        let mut sent_this_render = 0usize;
+
+        if refresh_active {
+            // Forced refresh: walk the pads in order and emit them in small
+            // batches. This avoids swamping the USB bulk-IN endpoint / the
+            // grid's serial bridge with 128 messages at once.
+            let start = self.refresh_pos as usize;
+            let end = (start + MAX_SENDS_PER_RENDER).min(NUM_PADS);
+            for i in start..end {
                 let x = (i % WIDTH) as u8;
                 let y = (i / WIDTH) as u8;
                 if send(MIDIGRID_CHANNEL, y * 16 + x, next[i]) {
                     self.leds[i] = next[i];
+                    self.refresh_pos += 1;
+                } else {
+                    send_failed = true;
+                    break;
+                }
+            }
+            if self.refresh_pos >= NUM_PADS as u8 {
+                self.refresh_pending = false;
+            } else {
+                budget_exceeded = true;
+            }
+        }
+
+        // Outside (or after) a refresh, send any pads whose value changed.
+        if !refresh_active || !budget_exceeded {
+            for i in 0..NUM_PADS {
+                if next[i] == self.leds[i] {
+                    continue;
+                }
+                if sent_this_render >= MAX_SENDS_PER_RENDER {
+                    budget_exceeded = true;
+                    break;
+                }
+                let x = (i % WIDTH) as u8;
+                let y = (i / WIDTH) as u8;
+                if send(MIDIGRID_CHANNEL, y * 16 + x, next[i]) {
+                    self.leds[i] = next[i];
+                    sent_this_render += 1;
                 } else {
                     send_failed = true;
                 }
             }
         }
-        self.dirty = send_failed;
+
+        self.dirty = send_failed || budget_exceeded;
     }
 }
 
@@ -1235,24 +1281,32 @@ mod tests {
         let mut first = [(0u8, 0u8, 0u8); 128];
         let n1 = collect_events(&mut grid, &mut engine, 0, &mut first);
 
-        // Second render after the refresh interval — force_all should emit
-        // one message for every pad regardless of prior state.
-        let mut second = [(0u8, 0u8, 0u8); 128];
-        let n2 = collect_events(&mut grid, &mut engine, REFRESH_MS + 1, &mut second);
+        // Full refresh is paced across multiple renders because of the
+        // MAX_SENDS_PER_RENDER budget. Keep rendering every RENDER_INTERVAL_MS
+        // until every pad has been covered.
+        let mut seen = [false; NUM_PADS];
+        let mut total = 0usize;
+        let mut t = REFRESH_MS + 1;
+        for _ in 0..(NUM_PADS / MAX_SENDS_PER_RENDER + 4) {
+            let mut buf = [(0u8, 0u8, 0u8); 128];
+            let n = collect_events(&mut grid, &mut engine, t as u32, &mut buf);
+            total += n;
+            for i in 0..n {
+                assert_eq!(buf[i].0, MIDIGRID_CHANNEL);
+                let note = buf[i].1 as usize;
+                assert!(note < NUM_PADS);
+                seen[note] = true;
+            }
+            if seen.iter().all(|&b| b) {
+                break;
+            }
+            t += RENDER_INTERVAL_MS + 1;
+        }
 
         assert!(
-            n2 >= NUM_PADS,
-            "full refresh should send all {NUM_PADS} pads, got {n2}; first render sent {n1}"
+            total >= NUM_PADS,
+            "full refresh should send all {NUM_PADS} pads, got {total}; first render sent {n1}"
         );
-
-        // Every message must be on the grid channel and cover all note numbers.
-        let mut seen = [false; NUM_PADS];
-        for i in 0..n2 {
-            assert_eq!(second[i].0, MIDIGRID_CHANNEL);
-            let note = second[i].1 as usize;
-            assert!(note < NUM_PADS);
-            seen[note] = true;
-        }
         assert!(seen.iter().all(|&b| b), "full refresh did not cover every pad");
     }
 
