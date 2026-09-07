@@ -224,6 +224,9 @@ pub struct Grid {
     in_fine_tune_last: bool,
     /// Timestamp of the last full LED render, used for periodic refresh.
     last_render_ms: u32,
+    /// True when the periodic refresh fired; forces a full LED state dump on
+    /// the next render so a reconnecting grid resyncs.
+    refresh_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -269,6 +272,7 @@ impl Grid {
             // `u32::MAX` means "never rendered yet"; the first render bypasses
             // the rate limiter so boot feedback is immediate.
             last_render_ms: u32::MAX,
+            refresh_pending: false,
         }
     }
 
@@ -303,6 +307,7 @@ impl Grid {
         // messages) should still converge to the current state.
         if now_ms.saturating_sub(self.last_render_ms) >= REFRESH_MS {
             self.dirty = true;
+            self.refresh_pending = true;
         }
 
         // Skip the expensive LED recompute when nothing has changed and no
@@ -322,6 +327,8 @@ impl Grid {
         self.in_fine_tune_last = in_fine_tune;
         self.dirty = false;
         self.last_render_ms = now_ms;
+        let force_all = self.refresh_pending;
+        self.refresh_pending = false;
 
         let mut next = [0u8; NUM_PADS];
 
@@ -336,7 +343,8 @@ impl Grid {
 
         let mut send_failed = false;
         for i in 0..NUM_PADS {
-            if next[i] != self.leds[i] {
+            let changed = next[i] != self.leds[i];
+            if changed || force_all {
                 let x = (i % WIDTH) as u8;
                 let y = (i / WIDTH) as u8;
                 if send(MIDIGRID_CHANNEL, y * 16 + x, next[i]) {
