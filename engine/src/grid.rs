@@ -35,6 +35,11 @@ pub const NUM_PADS: usize = WIDTH * HEIGHT;
 /// A pad press must last this long before it becomes a fine-tune overlay.
 const HOLD_MS: u32 = 300;
 
+/// Full grid LED state is re-rendered at least this often, even when no input
+/// events occur. This lets a grid that was powered on or reconnected after the
+/// drumsynth boot sync back up without requiring a specific power-on order.
+pub const REFRESH_MS: u32 = 1000;
+
 /// Default fixed velocity for audition / trigger pads (0..=127).
 const DEFAULT_VELOCITY: u8 = 100;
 
@@ -212,6 +217,8 @@ pub struct Grid {
     /// Fine-tune state at the last render, so a held pad crossing the hold
     /// threshold triggers a redraw without re-rendering on every idle loop.
     in_fine_tune_last: bool,
+    /// Timestamp of the last full LED render, used for periodic refresh.
+    last_render_ms: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -254,6 +261,7 @@ impl Grid {
             leds: [0u8; NUM_PADS],
             dirty: true,
             in_fine_tune_last: false,
+            last_render_ms: 0,
         }
     }
 
@@ -284,6 +292,12 @@ impl Grid {
             None => false,
         };
 
+        // Periodic refresh: a grid that was connected after boot (or missed
+        // messages) should still converge to the current state.
+        if now_ms.saturating_sub(self.last_render_ms) >= REFRESH_MS {
+            self.dirty = true;
+        }
+
         // Skip the expensive LED recompute when nothing has changed and no
         // held pad has crossed the hold threshold since the last render.
         if !self.dirty && in_fine_tune == self.in_fine_tune_last {
@@ -291,6 +305,7 @@ impl Grid {
         }
         self.in_fine_tune_last = in_fine_tune;
         self.dirty = false;
+        self.last_render_ms = now_ms;
 
         let mut next = [0u8; NUM_PADS];
 
@@ -1177,4 +1192,5 @@ mod tests {
             }
         }
     }
+
 }
