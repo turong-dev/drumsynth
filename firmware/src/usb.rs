@@ -135,6 +135,7 @@ impl<'a, B: UsbBus> MidiClass<'a, B> {
     ///
     /// Returns `Ok(4)` when the packet was accepted, `Ok(0)` when the
     /// endpoint is busy (`WouldBlock`), or the underlying error otherwise.
+    #[allow(dead_code)]
     pub fn write(&mut self, packet: &[u8; 4]) -> Result<usize> {
         match self.bulk_in.write(packet) {
             Ok(n) => Ok(n),
@@ -395,6 +396,7 @@ pub fn poll(dst: &mut [u8]) -> usize {
 /// Only call from the same single execution context that called [`init`],
 /// after `init` has returned. Not reentrant.
 #[allow(unsafe_code, static_mut_refs)]
+#[allow(dead_code)]
 pub fn send_midi(packet: &[u8; 4]) -> bool {
     // Safety: init has run; this is called from one context, never
     // reentrantly, so the mutable statics are uniquely borrowed here.

@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Teensy 4.1 target for drum-engine."
 
+[features]
+default = ["grid"]
+grid = ["drum-engine/grid"]
+
 # NOTE ON VERSIONS
 #
 # teensy4-bsp 0.6.0 bundles imxrt-hal 0.6.0, which is where the SAI driver

@@ -48,6 +48,7 @@
 #![warn(missing_docs)]
 
 pub mod dsp;
+#[cfg(feature = "grid")]
 pub mod grid;
 pub mod machines;
 pub mod midi;

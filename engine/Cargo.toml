@@ -22,3 +22,5 @@ default = []
 # Enable to get #[derive(Debug)] on parameter structs. Costs code size on
 # target, useful when poking at things from the host renderer.
 debug-params = []
+# Enable the Monome Grid / midigrid control surface integration.
+grid = []
