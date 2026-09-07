@@ -43,7 +43,7 @@ pub const REFRESH_MS: u32 = 1000;
 /// Minimum time between LED renders. Events that arrive faster are coalesced
 /// into the next render. This paces USB bulk-IN traffic and prevents a run of
 /// failed sends from starving the audio interrupt.
-const RENDER_INTERVAL_MS: u32 = 8;
+const RENDER_INTERVAL_MS: u32 = 4;
 
 /// Maximum number of LED packets emitted in a single render call. Pacing the
 /// USB bulk-IN traffic this way avoids saturating a small endpoint FIFO or the
