@@ -49,7 +49,7 @@ const RENDER_INTERVAL_MS: u32 = 4;
 /// USB bulk-IN traffic this way avoids saturating a small endpoint FIFO or the
 /// grid's serial bridge. Any remaining pads retry on the next render (at most
 /// `RENDER_INTERVAL_MS` later).
-const MAX_SENDS_PER_RENDER: usize = 8;
+const MAX_SENDS_PER_RENDER: usize = 16;
 
 /// Default fixed velocity for audition / trigger pads (0..=127).
 const DEFAULT_VELOCITY: u8 = 100;
