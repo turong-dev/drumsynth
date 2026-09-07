@@ -723,6 +723,12 @@ fn machine_page_widget(row: usize, machine: MachineId) -> Option<Widget> {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// Default dim brightness for inactive UI chrome (clearly visible on a
+/// varibright grid, but not distracting).
+const DIM: u8 = 48;
+/// Full brightness for active values / selected controls.
+const BRIGHT: u8 = 127;
+
 fn render_mixer(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS]) {
     // Left half: 8 vertical level faders.
     for track in 0..crate::TRACKS {
@@ -732,28 +738,30 @@ fn render_mixer(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS]) {
 
     // Row 0, cols 8–15: track select buttons.
     for x in 8..16 {
-        let vel = if x - 8 == grid.selected_track && grid.screen == Screen::Parameter {
-            127
+        let track = x - 8;
+        let selected = track == grid.selected_track;
+        let vel = if selected {
+            BRIGHT
         } else {
-            16
+            DIM
         };
         set_pad(next, x, 0, vel);
     }
 
     // Row 7, cols 8–15: audition pads.
     for x in 8..16 {
-        set_pad(next, x, 7, 16);
+        set_pad(next, x, 7, DIM);
     }
 }
 
 fn render_parameter(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS]) {
     // Back button.
-    set_pad(next, 0, 0, 16);
+    set_pad(next, 0, 0, DIM);
 
     // Page tabs, cols 12–15.
     for x in 12..16 {
         let page = x - 12;
-        let vel = if page == grid.page { 127 } else { 16 };
+        let vel = if page == grid.page { BRIGHT } else { DIM };
         set_pad(next, x, 0, vel);
     }
 
@@ -769,7 +777,7 @@ fn render_parameter(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS])
 
     // Audition strip, row 7.
     for x in 0..16 {
-        set_pad(next, x, 7, 16);
+        set_pad(next, x, 7, DIM);
     }
 }
 
@@ -796,7 +804,7 @@ fn render_fine_tune(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS])
 
             // Horizontal fine-tune strip in the held row.
             for x in 0..16 {
-                let vel = if x <= offset { 127 } else { 0 };
+                let vel = if x <= offset { BRIGHT } else { 0 };
                 set_pad(next, x, held.y, vel);
             }
         }
@@ -831,7 +839,7 @@ fn render_fine_tune(grid: &Grid, engine: &DrumEngine, next: &mut [u8; NUM_PADS])
             // Top row (y=0) = +7, bottom row (y=7) = +0.
             for y in 0..HEIGHT as u8 {
                 let step = 7 - y;
-                let vel = if step <= offset { 127 } else { 0 };
+                let vel = if step <= offset { BRIGHT } else { 0 };
                 set_pad(next, held.x, y, vel);
             }
         }
@@ -856,9 +864,9 @@ fn render_unipolar(row: usize, value: u8, next: &mut [u8; NUM_PADS]) {
     let y = row as u8;
     for x in 0..WIDTH {
         let vel = if x < active_col {
-            127
+            BRIGHT
         } else if x == active_col {
-            32 + fine_offset * 11
+            48 + fine_offset * 10
         } else {
             0
         };
@@ -873,7 +881,7 @@ fn render_bipolar(row: usize, value: u8, next: &mut [u8; NUM_PADS]) {
 
     if pan_offset == 0 {
         for x in 0..WIDTH {
-            let vel = if x == 7 || x == 8 { 32 } else { 0 };
+            let vel = if x == 7 || x == 8 { DIM } else { 0 };
             set_pad(next, x as u8, y, vel);
         }
         return;
@@ -883,11 +891,11 @@ fn render_bipolar(row: usize, value: u8, next: &mut [u8; NUM_PADS]) {
         // Fill leftward from column 7.
         let target_col = 7 + (pan_offset / 8); // pan_offset/8 is negative or zero
         let fine = (8 + (pan_offset % 8)) % 8;
-        let edge_vel = 32 + (fine as u8 * 11);
+        let edge_vel = 48 + (fine as u8 * 10);
         for x in 0..WIDTH {
             let col = x as i16;
             let vel = if col > target_col && col <= 7 {
-                127
+                BRIGHT
             } else if col == target_col {
                 edge_vel
             } else {
@@ -899,11 +907,11 @@ fn render_bipolar(row: usize, value: u8, next: &mut [u8; NUM_PADS]) {
         // Fill rightward from column 8.
         let target_col = 8 + (pan_offset / 8);
         let fine = (pan_offset % 8) as u8;
-        let edge_vel = 32 + (fine * 11);
+        let edge_vel = 48 + (fine * 10);
         for x in 0..WIDTH {
             let col = x as i16;
             let vel = if col < target_col && col >= 8 {
-                127
+                BRIGHT
             } else if col == target_col {
                 edge_vel
             } else {
@@ -927,9 +935,9 @@ fn render_enum(row: usize, count: u8, value: u8, next: &mut [u8; NUM_PADS]) {
     for x in 0..WIDTH {
         let cluster = x / cluster_size;
         let vel = if cluster == active {
-            127
+            BRIGHT
         } else if x % cluster_size == 0 || x % cluster_size == cluster_size - 1 {
-            16
+            DIM
         } else {
             0
         };
@@ -940,7 +948,7 @@ fn render_enum(row: usize, count: u8, value: u8, next: &mut [u8; NUM_PADS]) {
 fn render_bitmask(row: usize, mask: u16, next: &mut [u8; NUM_PADS]) {
     let y = row as u8;
     for x in 0..WIDTH {
-        let vel = if (mask & (1 << x)) != 0 { 127 } else { 0 };
+        let vel = if (mask & (1 << x)) != 0 { BRIGHT } else { 0 };
         set_pad(next, x as u8, y, vel);
     }
 }
@@ -954,10 +962,11 @@ fn render_vertical_fader(col: usize, value: u8, next: &mut [u8; NUM_PADS]) {
     for y in 0..HEIGHT as u8 {
         let vel = if y > active_row {
             // Below leading edge (closer to bottom): full.
-            127
+            BRIGHT
         } else if y == active_row {
             // Leading edge: varibright based on fine offset within 16-CC band.
-            32 + fine_offset * 6
+            // Bottom-most row at value 0 still gets a visible cursor.
+            48 + fine_offset * 5
         } else {
             // Above leading edge: off.
             0
