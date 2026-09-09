@@ -43,13 +43,13 @@ pub const REFRESH_MS: u32 = 1000;
 /// Minimum time between LED renders. Events that arrive faster are coalesced
 /// into the next render. This paces USB bulk-IN traffic and prevents a run of
 /// failed sends from starving the audio interrupt.
-const RENDER_INTERVAL_MS: u32 = 4;
+const RENDER_INTERVAL_MS: u32 = 2;
 
 /// Maximum number of LED packets emitted in a single render call. Pacing the
 /// USB bulk-IN traffic this way avoids saturating a small endpoint FIFO or the
 /// grid's serial bridge. Any remaining pads retry on the next render (at most
 /// `RENDER_INTERVAL_MS` later).
-const MAX_SENDS_PER_RENDER: usize = 16;
+const MAX_SENDS_PER_RENDER: usize = 32;
 
 /// Default fixed velocity for audition / trigger pads (0..=127).
 const DEFAULT_VELOCITY: u8 = 100;
