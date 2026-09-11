@@ -138,6 +138,11 @@ fn main() -> ! {
     let mut left = [0.0f32; BLOCK];
     let mut right = [0.0f32; BLOCK];
 
+    // One shared resonator, standing in for a send-bus effect. Struck a third
+    // of the way along, all 24 modes — the same configuration the per-track
+    // spike used, so the two numbers are comparable.
+    let mut res_send_fx = mi_drum_engine::stages::Resonator::new(0.3, 24);
+
     // Give the host a moment to enumerate and for you to attach a terminal.
     // Without this you miss the header every time.
     delay_blocking(&mut poller, &mut pit, 3_000);
@@ -194,6 +199,14 @@ fn main() -> ! {
         // if two of the cheapest stages do not fit, three certainly do not.
         let chain = measure_with_stage(engine, &mut left, &mut right, STAGE_LPG_DRIVE);
         report("6 + LPG+DR", chain, &mut poller, &mut pit);
+
+        // The resonator as a *shared send*, which is what it was always meant
+        // to be: one instance fed by the tracks, not one per track. The
+        // per-track scenario above measures six of them and is over budget by
+        // 44 points; this measures the configuration that was actually
+        // planned.
+        let res_send = measure_resonator_send(engine, &mut left, &mut right, &mut res_send_fx);
+        report("6 + RES SND", res_send, &mut poller, &mut pit);
 
         log::info!("");
 
@@ -354,6 +367,56 @@ fn measure_with_stage(
     }
 
     stats
+}
+
+/// Worst case plus one shared resonator on a send bus.
+///
+/// The resonator runs once per engine block over `BLOCK` samples, fed the
+/// master sum — which is what a send effect costs, as against the per-track
+/// scenario's six instances each running over their own voice block. Both the
+/// engine and the resonator are inside the timed region, so the delta against
+/// `6 sounding` is the whole cost of adding it.
+///
+/// A real send would also pay the bus summing and the wet/dry mix, but
+/// `SendFx` already does that for delay and reverb and the FX scenarios show
+/// it costing essentially nothing. This isolates the resonator itself.
+fn measure_resonator_send(
+    engine: &mut MiDrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+    resonator: &mut mi_drum_engine::stages::Resonator,
+) -> Stats {
+    let mut wet = [0.0f32; BLOCK];
+
+    engine.process(left, right);
+
+    let mut total: u64 = 0;
+    let mut peak: u32 = 0;
+
+    for _ in 0..RUNS {
+        retrigger(engine, TRACKS);
+
+        let start = DWT::cycle_count();
+        engine.process(left, right);
+        // Mono send feed, as a send bus would be.
+        resonator.process(0.01, 0.3, 0.5, 0.3, left, &mut wet);
+        let end = DWT::cycle_count();
+        let elapsed = end.wrapping_sub(start);
+
+        total += elapsed as u64;
+        if elapsed > peak {
+            peak = elapsed;
+        }
+
+        core::hint::black_box(&*left);
+        core::hint::black_box(&*right);
+        core::hint::black_box(&wet);
+    }
+
+    Stats {
+        avg: (total / RUNS as u64) as u32,
+        peak,
+    }
 }
 
 /// The FX bookkeeping floor: buses constructed and tanks advanced every block

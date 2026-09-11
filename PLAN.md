@@ -1160,11 +1160,11 @@ sound renders bit-identically to Phase 13.5.
 |---|---|---|---|
 | **Source** | Plaits engine (13.5) | Dust, ClockedNoise, Particle, FractalRandom, SmoothRandom as *modulation or excitation* sources feeding the voice | `plaits/dsp/noise/` |
 | **Env** | `AhdEnv` | `LPGEnvelope` (vactrol model — the non-linear decay that makes Plaits sound like Plaits), `DecayEnvelope`, Peaks `Excitation` (pulse/click, for exciting a resonator) | `plaits/dsp/envelope.h`, `peaks/drums/excitation.h` |
-| **Colour** (filter) | core `Svf` TPT | stmlib `Svf` / `NaiveSvf` / `ModifiedSvf` (different non-linearities, cheaper or dirtier), Peaks `Svf`, **`Resonator`** (24-mode modal bank — the filter becomes a struck object), **`String`** (Karplus-Strong; the filter becomes a plucked string) | `stmlib/dsp/filter.h`, `peaks/drums/svf.h`, `physical_modelling/resonator.h`, `string.h` |
+| **Colour** (filter) | core `Svf` TPT | stmlib `Svf` / `NaiveSvf` / `ModifiedSvf` (different non-linearities, cheaper or dirtier), Peaks `Svf`. ~~`Resonator`~~ and ~~`String`~~ moved out — see the send row and the spike below; at 32k cycles per track per block a modal bank is not a per-track stage | `stmlib/dsp/filter.h`, `peaks/drums/svf.h` |
 | **Env+Colour fused** | — | **`LowPassGate`** — Buchla LPG, one stage doing both. Selecting it forces the other selector to `Fused` | `plaits/dsp/fx/low_pass_gate.h` |
 | **Drive** | `fast::soft_clip` | `Overdrive` (gain-compensated), `SampleRateReducer` (bitcrush/SRR), stmlib `SoftLimit`, `Limiter` | `plaits/dsp/fx/overdrive.h`, `sample_rate_reducer.h`, `stmlib/dsp/dsp.h`, `limiter.h` |
 | **LFO** | core `Lfo` | `CosineOscillator` (cheap recursive), Peaks `Lfo` (needs vendoring), Peaks `MultistageEnvelope` as a loopable envelope-LFO (needs vendoring) | `stmlib/dsp/cosine_oscillator.h`, *(not yet vendored)* |
-| **Send FX** | core `SendFx` | `FxEngine` + `Diffuser` (the Rings/Clouds reverb kernel), `Ensemble` (chorus) | `plaits/dsp/fx/fx_engine.h`, `diffuser.h`, `ensemble.h` |
+| **Send FX** | core `SendFx` | **`Resonator`** (24-mode modal bank as a shared resonant body — measured at +4.7 points as a send against +47.9 as six per-track instances), `String` (Karplus-Strong body), `FxEngine` + `Diffuser` (the Rings/Clouds reverb kernel), `Ensemble` (chorus) | `physical_modelling/resonator.h`, `string.h`, `plaits/dsp/fx/fx_engine.h`, `diffuser.h`, `ensemble.h` |
 | **Param smoothing** | `MACRO_SMOOTH_K` one-pole | `ParameterInterpolator` (per-block linear ramp — what every MI stage expects on its inputs) | `stmlib/dsp/parameter_interpolator.h` |
 
 The headline combinations this unlocks, as a sanity check that the catalog is
@@ -1497,9 +1497,11 @@ rather than to be a catalog.
 | **+ LPG and Overdrive** | **292,075** | **73.0%** | +28,953 | 4,826 cy |
 | + Resonator | 455,107 | **113.8%** | +191,985 | 31,998 cy |
 
-**This invalidates the phase as specified.** Phase 14 proposes env, colour and
-drive as independently selectable stages. The budget allows **one**. Two of
-the cheapest stages already exceed the ~70% ceiling, and three is not close.
+**This invalidates the phase as specified** — for *per-track* stages. Phase 14
+proposes env, colour and drive as independently selectable per-track stages.
+The budget allows **one**. Two of the cheapest already exceed the ~70% ceiling,
+and three is not close. Shared send stages are a different economy entirely
+(see 2), and the reason for the gap is itself actionable (see 3).
 
 Three things follow:
 
@@ -1510,22 +1512,46 @@ Three things follow:
    decision, not an implementation detail, and it belongs in the spec before
    any of 14.0 is built.
 
-2. **`Resonator` is not a stage on this device.** At 31,998 cycles per track
-   per block it is three-quarters the cost of a whole Plaits voice (43,752)
-   and blows the budget by 44 points on its own. It is affordable on one or
-   two tracks at most, which makes it a *machine* — a voice you choose — far
-   more naturally than a stage every track can switch on.
+2. **`Resonator` is not a per-track stage — it is a send.** This plan had it
+   in the Colour row, which is six instances; the intent all along was one
+   shared send effect, and the plan simply never said so. Measured both ways:
 
-3. **The cheap stages look too expensive, and that is worth chasing.** LPG is
-   a gain multiply plus a one-pole SVF: ~64 cycles per sample once the
-   24-against-32 block ratio is accounted for. On a 600 MHz dual-issue M7 that
-   should be nearer 10–20. Candidate causes, none yet tested: the stage
-   objects live in the engine struct and therefore in OCRAM, where the
-   placement rule says per-sample data-dependent access belongs in DTCM; no
-   inlining across the FFI boundary; `ParameterInterpolator` running per
-   sample. If there is a 3–4x overhead to reclaim here, two stages fit and
-   conclusion 1 softens considerably. **Measure this before redesigning the
-   phase around the current numbers.**
+   | configuration | peak cy | % budget | delta |
+   |---|---|---|---|
+   | 6 sounding | 263,405 | 65.9% | — |
+   | 6 per-track resonators | 455,149 | 113.8% | +191,744 |
+   | **1 shared resonator send** | 282,360 | **70.6%** | **+18,955** |
+
+   **10.1x cheaper as a send**, which is more than the 6x the instance count
+   implies. The extra factor is per-call setup: `Resonator::Process`
+   recomputes all 24 mode coefficients on every call, so six voices calling on
+   24-sample blocks pay that setup ~8 times per engine block while a send pays
+   it once over 32 samples.
+
+   At 70.6% it sits on the ceiling rather than under it — but that is against
+   the pessimal case of all six tracks retriggering every block, and a real
+   send also gets the bus summing and wet/dry mix nearly free (the FX
+   scenarios show those costing essentially nothing). Affordable, with the
+   caveat stated.
+
+3. **The cheap stages look too expensive, and the send result says why.** LPG
+   is a gain multiply plus a one-pole SVF: ~64 cycles per sample once the
+   24-against-32 block ratio is accounted for, where 10–20 would be expected
+   on a dual-issue M7. The resonator's 10x-not-6x send advantage points
+   straight at the cause — **per-call setup, not per-sample work**.
+   `LowPassGate::Process` calls `set_f_q` every call and `Overdrive::Process`
+   recomputes its pre/post gain pair every call, and at 24-sample voice blocks
+   against 32-sample engine blocks every stage pays that ~1.33 times per block
+   per track.
+
+   This is now the highest-value thing to measure, because it bears directly
+   on the segment design in 14.0: if stages ran once per engine block instead
+   of once per voice block, the setup amortises over 32 samples instead of 24
+   and is paid 6 times rather than 8. Untested secondary causes: the stage
+   objects live in the engine struct and therefore OCRAM, where the placement
+   rule wants DTCM for per-sample data-dependent access; and no inlining
+   across the FFI boundary. **Measure before redesigning the phase around the
+   current per-track numbers.**
 
 Memory moved less alarmingly: ITCM 71.1% (+2,832), OCRAM 89.9% (+13,512 —
 mostly the resonator's 2 KB per track). OCRAM remains the binding region.

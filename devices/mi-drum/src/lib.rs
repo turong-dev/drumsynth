@@ -46,6 +46,10 @@ use mi_dsp::stages::{Lpg, Overdrive, Resonator};
 /// enough to make *concurrent* renders reproducible.
 pub use mi_dsp::{seed_random, DEFAULT_RANDOM_SEED};
 
+/// The MI processing stages, re-exported so callers (firmware benches, the
+/// host renderer) can construct one without depending on `mi-dsp` directly.
+pub use mi_dsp::stages;
+
 /// How many tracks the engine owns.
 pub const TRACKS: usize = 6;
 
