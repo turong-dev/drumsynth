@@ -16,6 +16,11 @@ grid = ["drum-engine/grid"]
 # that, and they should not be unbuildable without it.
 mi-drum = ["dep:mi-drum-engine"]
 
+# Self-terminating bench: run one scenario sweep, print `=== BENCH END ===`,
+# then `bkpt #251` into HalfKay so `tools/benchloop.py` can reflash without a
+# button press. Off by default so `./flash.sh bench` still free-runs.
+autoboot = []
+
 # NOTE ON VERSIONS
 #
 # teensy4-bsp 0.6.0 bundles imxrt-hal 0.6.0, which is where the SAI driver

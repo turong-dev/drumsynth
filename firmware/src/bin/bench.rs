@@ -240,8 +240,54 @@ fn main() -> ! {
         report("8+FX+SWFX ", swfx);
 
         log::info!("");
-        poller.poll();
-        delay_blocking(&mut poller, &mut pit, 2_000);
+
+        // With `autoboot`, one sweep per flash: emit a sentinel the host
+        // harness can key on, drain the log, then drop into HalfKay so the
+        // next `teensy_loader_cli -w` catches the board with no button press.
+        // Without the feature the bench free-runs, which is what you want
+        // when watching it in a terminal.
+        #[cfg(feature = "autoboot")]
+        {
+            log::info!("=== BENCH END ===");
+            // imxrt-log is a ring buffer drained by `poll()`. The sentinel has
+            // to reach the host before the core stops executing, so pump the
+            // poller for a while rather than rebooting straight away.
+            delay_blocking(&mut poller, &mut pit, 500);
+            reboot_to_bootloader();
+        }
+
+        #[cfg(not(feature = "autoboot"))]
+        {
+            poller.poll();
+            delay_blocking(&mut poller, &mut pit, 2_000);
+        }
+    }
+}
+
+/// Reboot into the Teensy 4 HalfKay bootloader.
+///
+/// The Teensy 4.x carries a separate MKL02 chip as its bootloader. It watches
+/// the i.MX RT's debug interface and takes over when the core executes
+/// `bkpt #251` — the same mechanism Teensyduino's `_reboot_Teensyduino_` and
+/// the `teensy4-selfrebootor` crate use.
+///
+/// This exists because `teensy_loader_cli`'s own reboot paths do not work
+/// here: `-s` prints "Soft reboot is not implemented for OSX", and `-r` wants
+/// a second Teensy running rebootor. `imxrt-log`'s USB backend discards every
+/// host-to-device byte (`class.read_packet(&mut [])`), so there is no command
+/// channel into this binary either.
+#[cfg(feature = "autoboot")]
+fn reboot_to_bootloader() -> ! {
+    #[allow(unsafe_code)]
+    unsafe {
+        core::arch::asm!("bkpt #251");
+    }
+    // Only reached if the bootloader chip did not take over. Spin instead of
+    // returning: falling back into the report loop would look like a reboot
+    // that "worked" and then came back, which is the most confusing possible
+    // failure mode for the host harness to diagnose.
+    loop {
+        core::hint::spin_loop();
     }
 }
 
