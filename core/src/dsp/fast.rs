@@ -54,6 +54,23 @@ pub fn sin_turns(turns: f32) -> f32 {
 ///
 /// Built once at compile time by a Taylor series — see [`build_quarter`].
 /// Lives in rodata, ~2 KB.
+/// On the Teensy this lives in DTCM, not `.rodata`.
+///
+/// `t4link.x` aliases `REGION_RODATA` to OCRAM, which is reached over the AXI
+/// bus with no L1 data cache enabled. This table is gathered one to six times
+/// per sample per voice at a data-dependent index — close to the worst access
+/// pattern for uncached memory there is. `REGION_DATA` is DTCM, so naming
+/// `.data` moves it there; the runtime copies it out of flash at startup.
+///
+/// Gated on `target_os = "none"`, because section names are platform
+/// specific: `.data` is meaningless to the Mach-O linker and the host build
+/// of this crate (renderer, tests) must keep the default placement.
+// `link_section` trips the crate-level `deny(unsafe_code)`. The placement is
+// sound: this is an immutable table with a const initialiser, and `.data` is
+// exactly where a non-zero initialised static would go anyway — only the
+// region alias differs.
+#[allow(unsafe_code)]
+#[cfg_attr(target_os = "none", link_section = ".data")]
 static QUARTER: [f32; 513] = build_quarter();
 
 /// Compile-time quarter-wave sine via Taylor to the x^13 term.
