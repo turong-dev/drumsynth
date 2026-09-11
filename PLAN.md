@@ -325,10 +325,15 @@ the remaining ~32% alongside the FX cost.
     `arrival_offset` is 0 — block boundary is the earliest a note can play.
   - Wiring detail: SCK tied low (PCM5102 internal PLL); the SAI drives BCLK /
     LRCLK directly, no MCLK pin wired.
-- [ ] Audio callback in ITCM, hot buffers in DTCM (deferred to here).
-      STILL DEFERRED — the ISR runs from flash/OCRAM and the `AudioState`
-      buffers sit in DTCM `.bss`; measure before moving (DWT on the ISR body).
-      Bench-gated by 8-C's whole output stage.
+- [x] Audio callback in ITCM, hot buffers in DTCM. **DONE — and the premise
+      above was wrong.** The ISR was never running from flash/OCRAM:
+      `t4link.x` already aliases `REGION_TEXT` to ITCM and `REGION_BSS` to
+      DTCM, so all code and the `AudioState` buffers were in fast memory from
+      the start. The thing actually stranded in OCRAM was the *engine* —
+      `#[link_section = ".uninit"]`, 266 KB of it, mostly the delay line and
+      reverb tanks. Moving it to DTCM took the worst-case bench scenario from
+      87.2% of budget to 39.3%; moving `fast::QUARTER` too took it to 35.6%.
+      See "Optimisation pass" at the end of this file.
 - [ ] **Worst-case render-deadline measurement** — the regression tripwire for
       the underrun bug. `bench` cannot see the bug: it times isolated
       `process()` calls and never the interaction between the main-loop render
@@ -1135,3 +1140,56 @@ velocity→macro are done; preset save/load to SD is still open (Phase 10).
   ch 0/1 master/wet, ch 2..7 per-track-routable individual dry outs.
 - The analog/digital track split on Syntakt is about physical circuits;
   meaningless here. Any machine loads on any track.
+
+## Optimisation pass (2026-09-11)
+
+Closed-loop harness: `tools/benchloop.py` builds, flashes, captures and diffs
+in one command, with no button press — the bench is built `--features
+autoboot`, prints `=== BENCH END ===`, and executes `bkpt #251`, which the
+Teensy 4's MKL02 bootloader chip answers by entering HalfKay.
+`tools/checkasm.sh` is the instruction census. Run-to-run variance is **4
+cycles out of ~350,000**, so anything above ~50 cycles is signal.
+
+Worst case (`8+FX+SWFX`) went **88.2% -> 35.6%** of the 400,000-cycle budget:
+
+| step | 8+FX+SWFX | of budget | delta |
+|---|---|---|---|
+| baseline (this tree) | 352,767 | 88.2% | — |
+| `-C target-cpu=cortex-m7` | 348,934 | 87.2% | −1.1% |
+| engine `.uninit` OCRAM -> `.bss` DTCM | 157,035 | 39.3% | **−55.0%** |
+| `fast::QUARTER` -> DTCM | 142,237 | 35.6% | −9.4% |
+
+**The engine was memory-bound, not compute-bound.** OCRAM is reached over the
+AXI bus, and nothing in this firmware or in `teensy4-bsp` enables the L1 data
+cache, so every delay-line and reverb-tank access was an uncached bus
+transaction. That is the whole story of the drift toward the ceiling: the FX
+buffers grew past what OCRAM latency could sustain. Note the 72.1% recorded at
+Phase 12 is stale — an A/B against `c801324` shows `8 sounding` was already at
+84.4% *before* the Phase 13 refactor, which itself costs only ~1.8%.
+
+Measured and rejected:
+
+| change | result |
+|---|---|
+| `opt-level = 2` | +3.1% to +11.7%. Worse everywhere. |
+| `-C llvm-args=-inline-threshold=500` | +1.0% to +1.4%, and ITCM +56% (101 KB -> 158 KB). |
+
+Do not re-try either. Nor look for `vfma` as evidence that `target-cpu` took
+effect: LLVM will not fuse `a*b+c` without fast-math, because fusing changes
+rounding. The gain there is the scheduling model, invisible in an instruction
+census.
+
+Still on the table, not done because the budget goal was met without them:
+
+- Phase 4 micro-optimisations — three real divides in inner loops
+  (`hh_basic.rs` `sum / NUM_OSCS`, `track.rs` choke fade, `lfo.rs`), the
+  `libm::floorf` inside `exp2_approx`, `.fill(0.0)` for the bus zeroing,
+  hoisting `is_active` out of the sample loop, and hoisting the 15-arm
+  `MachineSlot::tick` match to once per track per block.
+- `bin/mi-drum.rs` is still in OCRAM and paying the full uncached cost.
+  `MiDrumEngine` is 343,296 bytes against 320 KB of DTCM, so it needs a
+  FlexRAM rebalance first — `.text` uses only ~101 KB of the 192 KB ITCM, so
+  ITCM 4 banks / DTCM 12 would give 384 KB. That means generating the linker
+  script from `imxrt-rt`'s `RuntimeBuilder` instead of taking the BSP's.
+- DTCM is now at 91.6%. The linker enforces the ceiling, but the next thing
+  that wants to live there will need the rebalance above.
