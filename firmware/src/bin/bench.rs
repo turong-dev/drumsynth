@@ -183,15 +183,15 @@ fn main() -> ! {
         // --- Idle: no track sounding, everything early-outs ---
         engine.panic();
         let idle = measure(&mut *engine, &mut left, &mut right, 0);
-        report("idle    ", idle);
+        report("idle    ", idle, &mut poller, &mut pit);
 
         // --- 3-voice sounding (the original 3-voice baseline; tracks 0,1,2) ---
         let sounding = measure(&mut *engine, &mut left, &mut right, 3);
-        report("3 sounding", sounding);
+        report("3 sounding", sounding, &mut poller, &mut pit);
 
         // --- 8-track worst case: every track retriggered continuously ---
         let all8 = measure(&mut *engine, &mut left, &mut right, TRACKS);
-        report("8 sounding", all8);
+        report("8 sounding", all8, &mut poller, &mut pit);
 
         // --- Send-FX scenarios (Phase 5) ---
         // Two tracks send: snare (track 1) to reverb, clap (track 4) to
@@ -205,10 +205,10 @@ fn main() -> ! {
         // handling the first `measure_with_fx` would leave tracks 1/4
         // routed in every scenario of every later loop iteration.
         let fx_idle = measure_fxeffect_only(&mut *engine, &mut left, &mut right, TRACKS);
-        report("8 FX idle ", fx_idle);
+        report("8 FX idle ", fx_idle, &mut poller, &mut pit);
 
         let with_fx = measure_with_fx(&mut *engine, &mut left, &mut right);
-        report("8 + FX    ", with_fx);
+        report("8 + FX    ", with_fx, &mut poller, &mut pit);
 
         // --- Phase 8-M regate: playing + FX + CC automation ---
         // Everything the groove box does at once: all 8 tracks retriggered,
@@ -217,7 +217,7 @@ fn main() -> ! {
         // ~32%" gate is really about (see the first four scenarios, which are
         // steady-state and never exercise the CC recompute path).
         let with_cc = measure_with_cc_automation(&mut *engine, &mut left, &mut right);
-        report("8+FX+CC   ", with_cc);
+        report("8+FX+CC   ", with_cc, &mut poller, &mut pit);
 
         // --- Phase 11 regate: 8 tracks with BdVa on track 0, worst case ---
         // Swap track 0 (BdClassic in the default kit) for BdVa configured
@@ -229,7 +229,7 @@ fn main() -> ! {
         // other track keeps its default kit machine so the scenario is
         // comparable to "8 sounding" with one track substituted.
         let bdva = measure_with_bdva(&mut *engine, &mut left, &mut right);
-        report("8 + BD VA ", bdva);
+        report("8 + BD VA ", bdva, &mut poller, &mut pit);
 
         // --- Phase 12 regate: one track sustaining a SweepFx gesture ---
         // The 8-track + send-FX load with track 0 swapped to SweepFx at its
@@ -237,7 +237,7 @@ fn main() -> ! {
         // machine stays `is_active()` across the whole measurement — the
         // sustained-load caveat the Phase 12 plan adds to the budget model.
         let swfx = measure_with_sweepfx_sustained(&mut *engine, &mut left, &mut right);
-        report("8+FX+SWFX ", swfx);
+        report("8+FX+SWFX ", swfx, &mut poller, &mut pit);
 
         log::info!("");
 
@@ -693,7 +693,12 @@ fn measure_fxeffect_only(
     }
 }
 
-fn report(label: &str, s: Stats) {
+fn report(
+    label: &str,
+    s: Stats,
+    poller: &mut imxrt_log::Poller,
+    pit: &mut bsp::hal::pit::Pit,
+) {
     let pct = s.peak as f32 * 100.0 / BUDGET;
     let per_frame = s.peak / BLOCK as u32;
 
@@ -709,6 +714,17 @@ fn report(label: &str, s: Stats) {
     if pct > 70.0 {
         log::warn!("  ^ over 70% — little headroom for MIDI, SD or USB work");
     }
+
+    // Push the line out before running the next scenario.
+    //
+    // `imxrt-log`'s bbqueue is 1024 bytes (`IMXRT_LOG_BUFFER_SIZE`) and is
+    // only drained by `poll()`. The scenarios run back to back with nothing
+    // else calling the poller, so without this the buffer fills partway
+    // through the run and every later line is silently dropped — including
+    // the `=== BENCH END ===` sentinel `tools/benchloop.py` keys on. The
+    // measurement itself is unaffected: DWT brackets `engine.process()` only,
+    // and this runs well outside it.
+    delay_blocking(poller, pit, 50);
 }
 
 /// Turn on the DWT cycle counter.
