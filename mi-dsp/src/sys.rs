@@ -81,6 +81,40 @@ extern "C" {
     /// Seed the process-global `stmlib::Random` generator.
     pub fn mi_dsp_seed_random(seed: u32);
 
+    /// Fused LPG envelope + gate: init, trigger, block process.
+    pub fn mi_lpg_init(storage: *mut c_void);
+    /// Arm the vactrol envelope's attack ramp.
+    pub fn mi_lpg_trigger(storage: *mut c_void);
+    /// Advance the envelope one block and apply the gate in place.
+    pub fn mi_lpg_process(
+        storage: *mut c_void,
+        attack: f32,
+        short_decay: f32,
+        decay_tail: f32,
+        hf: f32,
+        in_out: *mut f32,
+        size: usize,
+    );
+
+    /// Gain-compensated soft-clip overdrive.
+    pub fn mi_overdrive_init(storage: *mut c_void);
+    /// Apply overdrive in place.
+    pub fn mi_overdrive_process(storage: *mut c_void, drive: f32, in_out: *mut f32, size: usize);
+
+    /// 24-mode modal resonator bank.
+    pub fn mi_resonator_init(storage: *mut c_void, position: f32, resolution: i32);
+    /// Excite the resonator with `input`, writing to `output`.
+    pub fn mi_resonator_process(
+        storage: *mut c_void,
+        f0: f32,
+        structure: f32,
+        brightness: f32,
+        damping: f32,
+        input: *const f32,
+        output: *mut f32,
+        size: usize,
+    );
+
     /// Placement-new a `plaits::Voice` into `voice` using `buffer` for scratch.
     pub fn mi_plaits_voice_init(voice: *mut MiPlaitsVoice, buffer: *mut c_void);
 

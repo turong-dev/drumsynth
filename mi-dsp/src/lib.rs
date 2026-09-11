@@ -47,3 +47,5 @@ pub fn seed_random(seed: u32) {
 /// The seed `stmlib::Random` starts at in the vendored source, and therefore
 /// the one a render must use to reproduce a from-process-start result.
 pub const DEFAULT_RANDOM_SEED: u32 = 0x21;
+
+pub mod stages;

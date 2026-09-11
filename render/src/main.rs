@@ -82,6 +82,12 @@ enum Command {
         /// Output path.
         #[arg(short, long, default_value = "mi-drum.baseline.wav")]
         output: String,
+        /// Phase 14 spike: force an MI stage on every track. `none` (the
+        /// default, and what the pinned baseline digest covers), `lpg`,
+        /// `overdrive`, or `resonator`. Anything but `none` changes the sound
+        /// on purpose and will not match the baseline.
+        #[arg(long, default_value = "none")]
+        stage: String,
     },
     /// Render a retrigger/choke stress test to a WAV file.
     ///
@@ -404,8 +410,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("wrote {output} ({seconds:.2}s)");
         }
 
-        Command::MiDrum { output } => {
-            let samples = render_mi_drum_baseline();
+        Command::MiDrum { output, stage } => {
+            let stage_macro = match stage.as_str() {
+                "none" => 0.0,
+                "lpg" => 0.25,
+                "overdrive" => 0.5,
+                "resonator" => 0.75,
+                other => {
+                    return Err(format!(
+                        "unknown stage '{other}'. available: none, lpg, overdrive, resonator"
+                    )
+                    .into())
+                }
+            };
+            let samples = render_mi_drum(stage_macro);
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
@@ -1068,9 +1086,11 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
 /// the stages being rebuilt. Hence the second half: a bare kit pass would
 /// leave the filter `Off` and the drive at unity and happily agree with a
 /// broken restructure.
-fn render_mi_drum_baseline() -> Vec<f32> {
+fn render_mi_drum(stage_macro: f32) -> Vec<f32> {
     use mi_drum_engine::dsp::SvfMode;
-    use mi_drum_engine::{DeviceEngine, MiMachineId, StripParams, TRACKS as MI_TRACKS};
+    use mi_drum_engine::{
+        DeviceEngine, MiMachineId, StripParams, SLOT_FILT_0, TRACKS as MI_TRACKS,
+    };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
     // render is only reproducible from a known seed. This does not make two
@@ -1088,6 +1108,7 @@ fn render_mi_drum_baseline() -> Vec<f32> {
     let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
     for &id in MiMachineId::ALL.iter() {
         engine.tracks_mut()[0].load_machine(id);
+        engine.tracks_mut()[0].set_macro(SLOT_FILT_0, stage_macro);
         engine.trigger(0, 1.0);
         for _ in 0..blocks_per_hit {
             engine.process(&mut l, &mut r);
@@ -1133,6 +1154,7 @@ fn render_mi_drum_baseline() -> Vec<f32> {
             ..StripParams::default()
         };
         engine.tracks_mut()[track].set_strip(&strip);
+        engine.tracks_mut()[track].set_macro(SLOT_FILT_0, stage_macro);
     }
 
     // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
@@ -1669,7 +1691,7 @@ mod mi_drum_baseline {
     /// not overlapping fixes the interleaving.
     #[test]
     fn mi_drum_baseline_is_unchanged() {
-        let samples = render_mi_drum_baseline();
+        let samples = render_mi_drum(0.0);
 
         // The baseline has to exercise the machines, or the digest pins
         // silence and Phase 14.0 passes its gate by doing nothing.

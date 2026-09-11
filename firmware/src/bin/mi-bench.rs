@@ -55,7 +55,7 @@
 use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
-use mi_drum_engine::{DeviceEngine, MiDrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
+use mi_drum_engine::{DeviceEngine, MiDrumEngine, BLOCK, SAMPLE_RATE, SLOT_FILT_0, TRACKS};
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
 
@@ -174,6 +174,26 @@ fn main() -> ! {
 
         let with_fx = measure_with_fx(engine, &mut left, &mut right);
         report("6 + FX    ", with_fx, &mut poller, &mut pit);
+
+        // --- Phase 14 spike: one MI stage on all six tracks ---
+        // The question these answer is whether the stage catalog is
+        // affordable at all, given `6 sounding` already sits at 65.6% of a
+        // ~70% ceiling. Each is the 6-track worst case with one stage
+        // selected on every track, so the delta against `6 sounding` is the
+        // whole cost of that stage times six.
+        let lpg = measure_with_stage(engine, &mut left, &mut right, STAGE_LPG);
+        report("6 + LPG   ", lpg, &mut poller, &mut pit);
+
+        let od = measure_with_stage(engine, &mut left, &mut right, STAGE_OVERDRIVE);
+        report("6 + DRIVE ", od, &mut poller, &mut pit);
+
+        let res = measure_with_stage(engine, &mut left, &mut right, STAGE_RESONATOR);
+        report("6 + RESON ", res, &mut poller, &mut pit);
+
+        // Two stages chained. The Phase 14 chain is env + colour + drive, so
+        // if two of the cheapest stages do not fit, three certainly do not.
+        let chain = measure_with_stage(engine, &mut left, &mut right, STAGE_LPG_DRIVE);
+        report("6 + LPG+DR", chain, &mut poller, &mut pit);
 
         log::info!("");
 
@@ -301,6 +321,37 @@ fn measure_with_fx(
 
     set_send(engine, 1, 0.0, 0.0);
     set_send(engine, 4, 0.0, 0.0);
+
+    stats
+}
+
+/// Stage selector values, matching `StageKind::from_macro`'s quantisation.
+const STAGE_NONE: f32 = 0.0;
+const STAGE_LPG: f32 = 0.25;
+const STAGE_OVERDRIVE: f32 = 0.45;
+const STAGE_RESONATOR: f32 = 0.65;
+const STAGE_LPG_DRIVE: f32 = 0.85;
+
+/// Worst case with one MI processing stage selected on every track.
+///
+/// Restores `StageKind::None` on the way out, so a later scenario in the same
+/// loop iteration does not silently measure a stage it did not ask for — the
+/// same discipline `measure_with_fx` applies to the sends.
+fn measure_with_stage(
+    engine: &mut MiDrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+    stage: f32,
+) -> Stats {
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_macro(SLOT_FILT_0, stage);
+    }
+
+    let stats = measure(engine, left, right, TRACKS);
+
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_macro(SLOT_FILT_0, STAGE_NONE);
+    }
 
     stats
 }

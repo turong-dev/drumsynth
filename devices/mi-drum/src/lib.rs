@@ -23,16 +23,20 @@ pub use device_core::{
     MAX_TIMED_EVENTS, SAMPLE_RATE,
 };
 
+pub use device_core::macros::SLOT_FILT_0;
+
 use device_core::macros::{
     mi, resv, MacroInfo, LFO1_DEPTH_INFO, LFO1_DEST_INFO, LFO1_RATE_INFO, LFO2_DEPTH_INFO,
     LFO2_DEST_INFO, LFO2_RATE_INFO, MACH_INFO, NUM_MACROS, OUT_INFO, PAN_INFO, SEND_DLY_INFO,
     SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3,
-    SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
+    SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN,
+    SLOT_SEND_DELAY,
     SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
     SLOT_STRIP_RESO, STRIP_ATK_INFO, STRIP_CUT_INFO, STRIP_DEC_INFO, STRIP_HOLD_INFO,
     STRIP_RESO_INFO,
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
+use mi_dsp::stages::{Lpg, Overdrive, Resonator};
 
 /// Seed the noise generator shared by every Plaits engine on this device.
 ///
@@ -301,7 +305,7 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     mi("TM.MOD", "TMM", 0.0), // MACH 5
     mi("MM.MOD", "MMM", 0.0), // MACH 6
     mi("DECAY", "DEC", 0.5),  // MACH 7
-    resv(),                   // FILT 0
+    mi("STAGE", "STG", 0.0),  // FILT 0 — Phase 14 spike stage selector
     resv(),                   // FILT 1
     STRIP_CUT_INFO,           // FILT 2
     STRIP_RESO_INFO,          // FILT 3
@@ -327,6 +331,101 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     LFO2_DEST_INFO,           // MOD 7
 ];
 
+/// Which MI processing stage runs on the voice's output.
+///
+/// **Phase 14 spike.** The eventual design puts stage selection on its own
+/// macro slots, ahead of the track strip, with the strip's continuous knobs
+/// reinterpreted per stage. This is the cheap version: one selector on
+/// `SLOT_FILT_0`, applied inside `MiSlot` where a 24-sample block already
+/// exists, purely to find out what the stages cost and sound like before
+/// committing to the architecture. It is not the shape the phase ships in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StageKind {
+    /// No stage. The voice's own output, unchanged.
+    None,
+    /// Buchla-style low-pass gate, the vactrol pair Plaits uses internally.
+    Lpg,
+    /// Gain-compensated soft-clip overdrive.
+    Overdrive,
+    /// 24-mode modal resonator: the voice becomes an exciter.
+    Resonator,
+    /// LPG followed by overdrive — two stages chained, to measure whether the
+    /// Phase 14 chain (env + colour + drive) is affordable at all.
+    LpgDrive,
+}
+
+impl StageKind {
+    /// Quantise a 0..1 macro over the stage list. 0.0 is [`StageKind::None`],
+    /// so an untouched sound is unchanged.
+    fn from_macro(v: f32) -> Self {
+        match (v * 5.0) as u32 {
+            0 => Self::None,
+            1 => Self::Lpg,
+            2 => Self::Overdrive,
+            3 => Self::Resonator,
+            _ => Self::LpgDrive,
+        }
+    }
+}
+
+/// The MI stages a slot can run, all constructed up front.
+///
+/// Held as concrete fields rather than an enum of storages because the engine
+/// lives in a `.uninit` static and is built by `new_in_place`; keeping the set
+/// fixed means no discriminant to maintain and no re-init on stage change.
+/// The spike pays for all three per voice — 2 KB of that is the resonator —
+/// which is precisely the kind of cost the real design has to avoid.
+struct Stages {
+    lpg: Lpg,
+    overdrive: Overdrive,
+    resonator: Resonator,
+    scratch: [f32; VOICE_BLOCK],
+}
+
+impl Stages {
+    fn new() -> Self {
+        Self {
+            lpg: Lpg::new(),
+            overdrive: Overdrive::new(),
+            // Struck a third of the way along, all 24 modes. Both are
+            // hardcoded for the spike; they are macro targets in the real
+            // thing.
+            resonator: Resonator::new(0.3, 24),
+            scratch: [0.0f32; VOICE_BLOCK],
+        }
+    }
+
+    /// Apply the selected stage to `buf` in place.
+    fn process(&mut self, kind: StageKind, note: f32, buf: &mut [f32; VOICE_BLOCK]) {
+        match kind {
+            StageKind::None => {}
+            StageKind::Lpg => {
+                // Parameters in the region Plaits itself uses for a plucky
+                // decay. Fixed for the spike.
+                self.lpg.process(0.05, 0.5, 0.3, 0.2, buf);
+            }
+            StageKind::Overdrive => {
+                // Not 0.0 — that mutes rather than passing dry. See the
+                // measured table on `mi_dsp::stages::Overdrive`.
+                self.overdrive.process(0.6, buf);
+            }
+            StageKind::LpgDrive => {
+                self.lpg.process(0.05, 0.5, 0.3, 0.2, buf);
+                self.overdrive.process(0.6, buf);
+            }
+            StageKind::Resonator => {
+                // f0 as a fraction of the sample rate, from the voice's note
+                // so the body tracks pitch.
+                let hz = 440.0 * libm::exp2f((note - 69.0) / 12.0);
+                let f0 = (hz * INV_SAMPLE_RATE).clamp(0.001, 0.4);
+                self.resonator
+                    .process(f0, 0.3, 0.5, 0.3, buf, &mut self.scratch);
+                buf.copy_from_slice(&self.scratch);
+            }
+        }
+    }
+}
+
 /// A block-buffered Plaits voice implementing the per-sample `Slot` trait.
 ///
 /// `PlaitsVoice` renders 24-sample blocks; this slot feeds the core engine's
@@ -343,6 +442,8 @@ pub struct MiSlot {
     silence_counter: u8,
     tune_macro: f32,
     retune_semitones: f32,
+    stage_kind: StageKind,
+    stages: Stages,
 }
 
 impl MiSlot {
@@ -365,6 +466,9 @@ impl MiSlot {
 
         self.modulations.trigger = if self.trigger_pending {
             self.trigger_pending = false;
+            if matches!(self.stage_kind, StageKind::Lpg | StageKind::LpgDrive) {
+                self.stages.lpg.trigger();
+            }
             1.0
         } else {
             0.0
@@ -377,6 +481,14 @@ impl MiSlot {
             &mut self.block_aux,
             VOICE_BLOCK,
         );
+
+        // The stage runs here, on the voice's own block, before the silence
+        // check — so a stage that gates or rings can decide when the note is
+        // over rather than the raw voice doing it. This is also why the spike
+        // needs no change in `core`: a block already exists at this point.
+        self.stages
+            .process(self.stage_kind, self.patch.note, &mut self.block_out);
+
         self.block_pos = 0;
 
         let mut peak = 0.0f32;
@@ -435,6 +547,8 @@ impl Slot<NUM_MACROS> for MiSlot {
             silence_counter: 0,
             tune_macro: 0.45,
             retune_semitones: 0.0,
+            stage_kind: StageKind::None,
+            stages: Stages::new(),
         };
         slot.set_macros(macros);
         slot
@@ -479,6 +593,8 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).silence_counter).write(0);
             core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).stage_kind).write(StageKind::None);
+            core::ptr::addr_of_mut!((*ptr).stages).write(Stages::new());
             (*ptr).set_macros(macros);
         }
     }
@@ -497,6 +613,7 @@ impl Slot<NUM_MACROS> for MiSlot {
         self.patch.timbre_modulation_amount = macros[SLOT_MACH_5];
         self.patch.morph_modulation_amount = macros[SLOT_MACH_6];
         self.patch.decay = macros[SLOT_MACH_7];
+        self.stage_kind = StageKind::from_macro(macros[SLOT_FILT_0]);
     }
 
     fn trigger(&mut self, _velocity: f32) {

@@ -66,6 +66,49 @@ int mi_plaits_num_engines(void);
 // is only reproducible from a known seed — see mi_dsp::seed_random.
 void mi_dsp_seed_random(uint32_t seed);
 
+// ---------------------------------------------------------------------------
+// Processing stages (Phase 14 spike)
+//
+// Block-rate post-voice stages, each an opaque aligned storage block the Rust
+// side owns and placement-news into. Same FFI rule as the voice: one call per
+// stage per block, never per sample.
+// ---------------------------------------------------------------------------
+
+// plaits::LPGEnvelope + plaits::LowPassGate, as one fused stage. The pair is
+// how Plaits itself gets its character: a vactrol-modelled envelope driving a
+// combined VCA+VCF. Sizes are generous upper bounds, asserted in the .cc.
+#define MI_LPG_STORAGE_SIZE 64
+#define MI_OVERDRIVE_STORAGE_SIZE 16
+#define MI_RESONATOR_STORAGE_SIZE 2048
+#define MI_STAGE_STORAGE_ALIGN 8
+
+void mi_lpg_init(void* storage);
+void mi_lpg_trigger(void* storage);
+// `attack`, `short_decay`, `decay_tail` and `hf` are the LPGEnvelope ping
+// parameters; the envelope's gain/frequency/hf_bleed then drive the gate.
+void mi_lpg_process(
+    void* storage,
+    float attack,
+    float short_decay,
+    float decay_tail,
+    float hf,
+    float* in_out,
+    size_t size);
+
+void mi_overdrive_init(void* storage);
+void mi_overdrive_process(void* storage, float drive, float* in_out, size_t size);
+
+void mi_resonator_init(void* storage, float position, int resolution);
+void mi_resonator_process(
+    void* storage,
+    float f0,
+    float structure,
+    float brightness,
+    float damping,
+    const float* in,
+    float* out,
+    size_t size);
+
 // Placement-new a voice into `memory` (which must be at least
 // PLAITS_VOICE_STORAGE_SIZE bytes and aligned to PLAITS_VOICE_STORAGE_ALIGN),
 // using `buffer` (PLAITS_VOICE_BUFFER_SIZE bytes) for engine scratch.

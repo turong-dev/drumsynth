@@ -1,0 +1,115 @@
+{
+  "budget": 400000,
+  "label": "mi-stages-chain",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "6 FX idle",
+    "6 + FX",
+    "6 + LPG",
+    "6 + DRIVE",
+    "6 + RESON",
+    "6 + LPG+DR"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "3 sounding": {
+      "avg": 103315,
+      "cy_per_frame": 4175,
+      "pct": 33.4,
+      "peak": 133613
+    },
+    "6 + DRIVE": {
+      "avg": 205184,
+      "cy_per_frame": 8700,
+      "pct": 69.6,
+      "peak": 278413
+    },
+    "6 + FX": {
+      "avg": 194518,
+      "cy_per_frame": 8205,
+      "pct": 65.6,
+      "peak": 262569
+    },
+    "6 + LPG": {
+      "avg": 203650,
+      "cy_per_frame": 8618,
+      "pct": 68.9,
+      "peak": 275777
+    },
+    "6 + LPG+DR": {
+      "avg": 214352,
+      "cy_per_frame": 9127,
+      "pct": 73.0,
+      "peak": 292075
+    },
+    "6 + RESON": {
+      "avg": 323148,
+      "cy_per_frame": 14222,
+      "pct": 113.8,
+      "peak": 455107
+    },
+    "6 FX idle": {
+      "avg": 194911,
+      "cy_per_frame": 8204,
+      "pct": 65.6,
+      "peak": 262536
+    },
+    "6 sounding": {
+      "avg": 194527,
+      "cy_per_frame": 8222,
+      "pct": 65.8,
+      "peak": 263122
+    },
+    "idle": {
+      "avg": 29426,
+      "cy_per_frame": 926,
+      "pct": 7.4,
+      "peak": 29656
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165048
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 8192
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 186420
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 471456
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2456,
+      ".debug_abbrev": 70901,
+      ".debug_aranges": 4280,
+      ".debug_frame": 13988,
+      ".debug_info": 1175396,
+      ".debug_line": 346756,
+      ".debug_loc": 162743,
+      ".debug_loclists": 290120,
+      ".debug_ranges": 76584,
+      ".debug_rnglists": 54110,
+      ".debug_str": 461776,
+      ".heap": 16384,
+      ".rodata": 99232,
+      ".stack": 16384,
+      ".text": 186420,
+      ".uninit": 355840,
+      ".vector_table": 696
+    }
+  }
+}

@@ -1474,6 +1474,66 @@ split and are updated to 8/8. **Results in `bench-results/` from before this
 change state ITCM and DTCM percentages against the old capacities** — the
 `used` byte counts stay comparable, the percentages do not.
 
+#### Phase 14 spike — three stages, measured (2026-09-11)
+
+Before building the architecture, three MI stages were wired in crudely to
+find out what they cost. The shortcut that made this cheap: `MiSlot` already
+renders a 24-sample block internally, so stages drop in there with **no change
+to `core` at all** — no segment loop, no `macro_info` widening, no selector
+plumbing. One selector on `SLOT_FILT_0`, fixed stage parameters, applied
+inside `render_if_needed`.
+
+`LowPassGate` + `LPGEnvelope` (the vactrol pair Plaits uses on its own
+voices), `Overdrive`, and `Resonator` — chosen to bracket the cost range
+rather than to be a catalog.
+
+**Measured on hardware, 6 tracks, against the 263,122-cycle worst case:**
+
+| scenario | peak cy | % budget | delta | per track per block |
+|---|---|---|---|---|
+| 6 sounding | 263,122 | 65.8% | — | — |
+| + LPG | 275,777 | 68.9% | +12,655 | 2,109 cy |
+| + Overdrive | 278,413 | 69.6% | +15,291 | 2,549 cy |
+| **+ LPG and Overdrive** | **292,075** | **73.0%** | +28,953 | 4,826 cy |
+| + Resonator | 455,107 | **113.8%** | +191,985 | 31,998 cy |
+
+**This invalidates the phase as specified.** Phase 14 proposes env, colour and
+drive as independently selectable stages. The budget allows **one**. Two of
+the cheapest stages already exceed the ~70% ceiling, and three is not close.
+
+Three things follow:
+
+1. **The stage catalog cannot be "pick one per stage, per track, freely."**
+   Either the chain is one stage deep, or stages become a per-track privilege
+   with a global budget (n tracks may have stages, the rest may not), or the
+   track count drops below six when stages are in use. That is a product
+   decision, not an implementation detail, and it belongs in the spec before
+   any of 14.0 is built.
+
+2. **`Resonator` is not a stage on this device.** At 31,998 cycles per track
+   per block it is three-quarters the cost of a whole Plaits voice (43,752)
+   and blows the budget by 44 points on its own. It is affordable on one or
+   two tracks at most, which makes it a *machine* — a voice you choose — far
+   more naturally than a stage every track can switch on.
+
+3. **The cheap stages look too expensive, and that is worth chasing.** LPG is
+   a gain multiply plus a one-pole SVF: ~64 cycles per sample once the
+   24-against-32 block ratio is accounted for. On a 600 MHz dual-issue M7 that
+   should be nearer 10–20. Candidate causes, none yet tested: the stage
+   objects live in the engine struct and therefore in OCRAM, where the
+   placement rule says per-sample data-dependent access belongs in DTCM; no
+   inlining across the FFI boundary; `ParameterInterpolator` running per
+   sample. If there is a 3–4x overhead to reclaim here, two stages fit and
+   conclusion 1 softens considerably. **Measure this before redesigning the
+   phase around the current numbers.**
+
+Memory moved less alarmingly: ITCM 71.1% (+2,832), OCRAM 89.9% (+13,512 —
+mostly the resonator's 2 KB per track). OCRAM remains the binding region.
+
+The spike is on the branch and the stage selector quantises `0.0` to
+`StageKind::None`, so the pinned baseline digest is unmoved — the plumbing is
+inert when off, which is itself worth knowing.
+
 #### Phase 14.0 — `MiStrip` skeleton
 
 Segment-based strip with **zero new stages**: the segment loop, the

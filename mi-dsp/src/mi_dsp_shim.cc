@@ -9,6 +9,10 @@
 #include "plaits/dsp/voice.h"
 #include "stmlib/utils/buffer_allocator.h"
 #include "stmlib/utils/random.h"
+#include "plaits/dsp/envelope.h"
+#include "plaits/dsp/fx/low_pass_gate.h"
+#include "plaits/dsp/fx/overdrive.h"
+#include "plaits/dsp/physical_modelling/resonator.h"
 
 // Ensure the Rust-side storage is large enough for the real object.
 static_assert(
@@ -28,6 +32,80 @@ extern "C" {
 int mi_plaits_num_engines(void) { return plaits::kMaxEngines; }
 
 void mi_dsp_seed_random(uint32_t seed) { stmlib::Random::Seed(seed); }
+
+// --- Processing stages -----------------------------------------------------
+
+namespace {
+
+// The LPG is a pair: the vactrol envelope produces gain/frequency/hf_bleed,
+// the gate applies them. Kept together so the Rust side owns one object.
+struct LpgStage {
+  plaits::LPGEnvelope envelope;
+  plaits::LowPassGate gate;
+};
+
+}  // namespace
+
+static_assert(sizeof(LpgStage) <= MI_LPG_STORAGE_SIZE, "MI_LPG_STORAGE_SIZE too small");
+static_assert(sizeof(plaits::Overdrive) <= MI_OVERDRIVE_STORAGE_SIZE,
+              "MI_OVERDRIVE_STORAGE_SIZE too small");
+static_assert(sizeof(plaits::Resonator) <= MI_RESONATOR_STORAGE_SIZE,
+              "MI_RESONATOR_STORAGE_SIZE too small");
+
+void mi_lpg_init(void* storage) {
+  LpgStage* s = new (storage) LpgStage();
+  s->envelope.Init();
+  s->gate.Init();
+}
+
+void mi_lpg_trigger(void* storage) {
+  reinterpret_cast<LpgStage*>(storage)->envelope.Trigger();
+}
+
+void mi_lpg_process(
+    void* storage,
+    float attack,
+    float short_decay,
+    float decay_tail,
+    float hf,
+    float* in_out,
+    size_t size) {
+  LpgStage* s = reinterpret_cast<LpgStage*>(storage);
+  s->envelope.ProcessPing(attack, short_decay, decay_tail, hf);
+  s->gate.Process(
+      s->envelope.gain(),
+      s->envelope.frequency(),
+      s->envelope.hf_bleed(),
+      in_out,
+      size);
+}
+
+void mi_overdrive_init(void* storage) {
+  plaits::Overdrive* o = new (storage) plaits::Overdrive();
+  o->Init();
+}
+
+void mi_overdrive_process(void* storage, float drive, float* in_out, size_t size) {
+  reinterpret_cast<plaits::Overdrive*>(storage)->Process(drive, in_out, size);
+}
+
+void mi_resonator_init(void* storage, float position, int resolution) {
+  plaits::Resonator* r = new (storage) plaits::Resonator();
+  r->Init(position, resolution);
+}
+
+void mi_resonator_process(
+    void* storage,
+    float f0,
+    float structure,
+    float brightness,
+    float damping,
+    const float* in,
+    float* out,
+    size_t size) {
+  reinterpret_cast<plaits::Resonator*>(storage)->Process(
+      f0, structure, brightness, damping, in, out, size);
+}
 
 void mi_plaits_voice_init(MiPlaitsVoice* voice, void* buffer) {
   stmlib::BufferAllocator allocator(buffer, PLAITS_VOICE_BUFFER_SIZE);
