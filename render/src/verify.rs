@@ -286,8 +286,8 @@ pub fn dump_knob(id: MachineId, slot: usize, steps: usize) {
 /// aggregate counts; the caller decides the exit code.
 pub fn run(ids: &[MachineId], steps: usize) -> Totals {
     println!(
-        "{:<12} {:<9} {:>7} {:>7} {:>9} {:>9} {:>9}  {}",
-        "machine", "macro", "rmsmin", "rmsmax", "decmin", "decmax", "lenmax", "verdict"
+        "{:<12} {:<9} {:>7} {:>7} {:>9} {:>9} {:>9}  verdict",
+        "machine", "macro", "rmsmin", "rmsmax", "decmin", "decmax", "lenmax"
     );
     println!("{}", "-".repeat(82));
 

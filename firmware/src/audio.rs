@@ -111,7 +111,7 @@ use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use cortex_m::peripheral::NVIC;
-use drum_engine::{DrumEngine, BLOCK};
+use drum_engine::{DeviceEngine, BLOCK};
 use teensy4_bsp as bsp;
 
 use bsp::hal::ccm::{analog::pll4, clock_gate, sai_clk};
@@ -439,7 +439,10 @@ pub fn underruns() -> u64 {
 /// worst measured render is ~453 µs and starts within a few µs of the
 /// boundary, so it always clears the deadline; `TCR4.FCONT=1` makes a rare
 /// miss a one-block glitch rather than a halted clock.
-pub fn render_next(engine: &mut DrumEngine) {
+pub fn render_next<E, const N: usize>(engine: &mut E)
+where
+    E: DeviceEngine<N>,
+{
     if !RENDER_PENDING.swap(false, Ordering::SeqCst) {
         return;
     }

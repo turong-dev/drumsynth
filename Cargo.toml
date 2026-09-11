@@ -9,7 +9,7 @@ resolver = "2"
 # it out means `cargo test` at the root Just Works.
 #
 # Build it explicitly:  cd firmware && cargo build --release
-members = ["engine", "render"]
+members = ["core", "devices/drum", "devices/mi-drum", "mi-dsp", "render"]
 exclude = ["firmware"]
 
 [workspace.package]
@@ -17,7 +17,8 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-drum-engine = { path = "engine" }
+drum-engine = { path = "devices/drum" }
+mi-drum-engine = { path = "devices/mi-drum" }
 
 # Release profile for host rendering. The firmware crate has its own.
 [profile.release]

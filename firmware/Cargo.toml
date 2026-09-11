@@ -9,6 +9,13 @@ description = "Teensy 4.1 target for drum-engine."
 default = ["grid"]
 grid = ["drum-engine/grid"]
 
+# The Plaits device. Off by default because `mi-dsp` cross-compiles vendored
+# C++ and so needs a bare-metal C++ toolchain (`arm-none-eabi-g++`, or set
+# `MI_DSP_CXX`). Apple's clang++ cannot do it — it has no `<new>` for a
+# `thumbv7em-none-eabihf` target. Neither `bench` nor `drum` needs any of
+# that, and they should not be unbuildable without it.
+mi-drum = ["dep:mi-drum-engine"]
+
 # NOTE ON VERSIONS
 #
 # teensy4-bsp 0.6.0 bundles imxrt-hal 0.6.0, which is where the SAI driver
@@ -21,7 +28,8 @@ grid = ["drum-engine/grid"]
 #     cargo tree -p firmware | grep imxrt-hal
 
 [dependencies]
-drum-engine = { path = "../engine" }
+drum-engine = { path = "../devices/drum" }
+mi-drum-engine = { path = "../devices/mi-drum", optional = true }
 
 teensy4-bsp = { version = "0.6", features = ["rt"] }
 teensy4-panic = "0.3"
@@ -66,7 +74,14 @@ panic = "abort"
 # Always build the engine optimised, even in a debug firmware build.
 # An unoptimised DSP inner loop on an M7 is slow enough to be misleading —
 # you will conclude you are over budget when you are not.
+[[bin]]
+name = "mi-drum"
+required-features = ["mi-drum"]
+
 [profile.dev.package.drum-engine]
+opt-level = 3
+
+[profile.dev.package.mi-drum-engine]
 opt-level = 3
 
 [profile.dev]

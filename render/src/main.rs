@@ -25,9 +25,12 @@
 //! --to --steps`.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use drum_engine::machines::{MachineId, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3,
-    SLOT_MACH_5, SLOT_MACH_7};
+use drum_engine::machines::{
+    MachineId, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_5, SLOT_MACH_7,
+};
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
+#[cfg(feature = "live")]
+use mi_drum_engine::MiDrumEngine;
 
 mod measure;
 mod verify;
@@ -235,6 +238,9 @@ enum Command {
     /// future multi-DAC/TDM path will route the same way.
     #[cfg(feature = "live")]
     Device {
+        /// Device to run. `drum` (the default) or `mi-drum`.
+        #[arg(value_name = "DEVICE", default_value = "drum")]
+        device: String,
         /// Substring to match against output device names. Defaults to
         /// "BlackHole" if one is installed, else the system default device.
         #[arg(short, long)]
@@ -352,6 +358,24 @@ impl MachineArg {
             MachineId::DubSiren => Self::DubSiren,
             MachineId::SweepFx => Self::SweepFx,
         }
+    }
+}
+
+/// Allocate a `MiDrumEngine` on the heap and construct it in-place.
+///
+/// The engine is too large for the default test thread stack, so this helper
+/// uses `alloc` + `new_in_place` instead of `MiDrumEngine::new()`.
+#[cfg(feature = "live")]
+#[allow(dead_code)] // Re-enabled by the "mi-drum" device arm once MiDrumEngine is Send.
+fn mi_drum_in_place() -> Box<MiDrumEngine> {
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let layout = Layout::new::<MiDrumEngine>();
+        let ptr = alloc(layout) as *mut MiDrumEngine;
+        assert!(!ptr.is_null(), "failed to allocate MiDrumEngine");
+        MiDrumEngine::new_in_place(ptr);
+        Box::from_raw(ptr)
     }
 }
 
@@ -518,8 +542,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "const {}_TRIM: [f32; {steps}] = [",
                 macro_name.to_uppercase()
             );
-            for i in 0..steps {
-                let trim_db = reference - levels[i];
+            for (i, &level) in levels.iter().enumerate().take(steps) {
+                let trim_db = reference - level;
                 let gain = 10.0_f32.powf(trim_db / 20.0);
                 if i > 0 {
                     print!(", ");
@@ -616,11 +640,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         #[cfg(feature = "live")]
         Command::Device {
+            device,
             out,
             port,
             list,
             multi_out,
-        } => device::run(&out, &port, list, multi_out)?,
+        } => match device.as_str() {
+            "drum" => device::run(Box::new(DrumEngine::new()), &out, &port, list, multi_out)?,
+            // `device::run` hands the engine to the cpal audio-callback thread,
+            // so it requires `E: Send`. `MiDrumEngine` is not: `PlaitsVoice`
+            // holds a `*mut u8` into `mi-dsp`'s static scratch pool, whose
+            // `static mut` free-bitmap is documented as single-threaded. Wiring
+            // this up means making that pool thread-safe first — see the
+            // known-issue note in PLAN.md. Every other mi-drum path (render,
+            // play, WAV) works today; only live device mode is blocked.
+            "mi-drum" => {
+                return Err(
+                    "mi-drum device mode is not available yet: MiDrumEngine is not \
+                            Send, because mi-dsp's Plaits scratch pool is single-threaded. \
+                            Use `render --device drum`, or the WAV render path for mi-drum."
+                        .into(),
+                )
+            }
+            other => {
+                return Err(format!("unknown device '{other}'. available: drum, mi-drum").into())
+            }
+        },
 
         #[cfg(feature = "live")]
         Command::Monitor {
@@ -661,13 +706,27 @@ struct CheatRow {
 }
 
 impl CheatsheetRow for CheatRow {
-    fn slot(&self) -> usize { self.slot }
-    fn cc(&self) -> usize { self.cc }
-    fn bank(&self) -> &str { self.bank }
-    fn name(&self) -> &str { self.name }
-    fn abbrev(&self) -> &str { self.abbrev }
-    fn default(&self) -> f32 { self.default }
-    fn is_resv(&self) -> bool { self.is_resv }
+    fn slot(&self) -> usize {
+        self.slot
+    }
+    fn cc(&self) -> usize {
+        self.cc
+    }
+    fn bank(&self) -> &str {
+        self.bank
+    }
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn abbrev(&self) -> &str {
+        self.abbrev
+    }
+    fn default(&self) -> f32 {
+        self.default
+    }
+    fn is_resv(&self) -> bool {
+        self.is_resv
+    }
 }
 
 /// Generate the cheat-sheet in the requested format (`"markdown"` or `"html"`).
@@ -679,7 +738,7 @@ impl CheatsheetRow for CheatRow {
 ///
 /// Both are derived from `MACHINE_INFO` in the engine, so they can't drift.
 fn generate_cheatsheet(format: &str) -> String {
-    use drum_engine::machines::{MachineId, NUM_MACROS, MACROS_PER_BANK};
+    use drum_engine::machines::{MachineId, MACROS_PER_BANK, NUM_MACROS};
 
     let machines = MachineId::ALL;
 
@@ -1145,7 +1204,13 @@ fn render_stress(seconds: f32) -> Vec<f32> {
     // closed hat ~107 Hz roll (each hit chokes the ringing open hat), open
     // hat re-triggered every ~38 ms so there is always a tail to cut, and a
     // fast SyTone pulse.
-    let schedule = [(0, 350usize), (1, 300usize), (2, 450usize), (3, 1800usize), (7, 400usize)];
+    let schedule = [
+        (0, 350usize),
+        (1, 300usize),
+        (2, 450usize),
+        (3, 1800usize),
+        (7, 400usize),
+    ];
     let mut next = [0usize; TRACKS];
 
     for block in 0..total_blocks {

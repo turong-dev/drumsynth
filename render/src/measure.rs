@@ -46,12 +46,12 @@ impl Measurement {
 
     /// Tail length in milliseconds.
     pub fn length_ms(self) -> f32 {
-        self.length_samples as f32 * 1000.0 / SAMPLE_RATE as f32
+        self.length_samples as f32 * 1000.0 / SAMPLE_RATE
     }
 
     /// Envelope decay time in milliseconds (see [`Self::decay_samples`]).
     pub fn decay_ms(self) -> f32 {
-        self.decay_samples as f32 * 1000.0 / SAMPLE_RATE as f32
+        self.decay_samples as f32 * 1000.0 / SAMPLE_RATE
     }
 }
 

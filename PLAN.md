@@ -856,6 +856,210 @@ All other slots RESV.
   macros work the same as every other machine's, which is the
   load-bearing property. No new send routing.
 
+### Phase 13 — Device framework + MI drum device
+
+*Goal:* restructure the repo so it can host multiple devices on a shared
+framework, then build a second device whose machines wrap Mutable Instruments
+open-source C++ DSP.
+
+#### Target tree
+
+```text
+drumsynth/
+├── Cargo.toml            workspace: core, mi-dsp, devices/*, render
+├── core/                 `device-core` — Rust-only, no_std, no alloc
+│   └── src/  dsp/, macros.rs, slot.rs, track.rs, midi.rs, grid.rs, engine.rs
+├── mi-dsp/               vendored MI C++ + Rust FFI wrappers
+│   ├── vendor/           stmlib, plaits/dsp, peaks/dsp (+ LICENSEs)
+│   ├── include/          extern "C" shims over C++ classes
+│   ├── src/              component wrappers + engine wrappers
+│   └── build.rs          cc-based build for host and thumbv7em-none-eabihf
+├── devices/
+│   ├── drum/             existing engine crate, now on core
+│   └── mi-drum/          NEW device #2
+├── render/               one binary, --device flag, device registry
+└── firmware/             one crate (still excluded), shared src/ + bin per device
+    └── bin/  drum.rs, mi-drum.rs, bench.rs
+```
+
+#### Device contract
+
+A device is **one engine crate** containing: a machine catalog
+(`MachineId`/`MachineSlot`/`MACHINE_INFO`), an engine struct over
+`core::Track<YourSlot>`, a default kit, and a `DeviceEngine` impl.
+Everything else comes free: MIDI router + CC map, grid UX, firmware bin,
+render/sweep/device harness, bench scaffolding, and SendFx.
+
+#### Trait surfaces
+
+```rust
+// Static dispatch: each device's voice slot enum implements this;
+// Track<S, N> monomorphizes. No trait objects, no allocation.
+pub trait Slot<const N: usize>: Sized {
+    type Id: SlotId<N>;
+    fn new(id: Self::Id, macros: &[f32; N]) -> Self;
+    fn id(&self) -> Self::Id;
+    fn set_macros(&mut self, macros: &[f32; N]);
+    fn trigger(&mut self, velocity: f32);
+    fn retune(&mut self, semis: f32);
+    fn reset(&mut self);
+    fn is_active(&self) -> bool;
+    fn tick(&mut self) -> f32;
+}
+
+pub trait SlotId<const N: usize>: Copy + Eq + Debug {
+    fn index(self) -> usize;
+    fn from_index(i: usize) -> Option<Self>;
+    fn count() -> usize;
+    fn default_macros(self) -> [f32; N];
+}
+
+// Narrow metadata surface for the grid UI: per-machine macro names/abbrevs
+// and a human-readable label.
+pub trait DeviceModel<const N: usize>: SlotId<N> {
+    fn macro_info(self) -> [MacroInfo; N];
+    fn label(self) -> &'static str;
+}
+
+pub trait DeviceEngine<const N: usize> {
+    type Slot: Slot<N>;
+    fn tracks(&self) -> &[Track<Self::Slot, N>];
+    fn tracks_mut(&mut self) -> &mut [Track<Self::Slot, N>];
+    fn trigger(&mut self, track: usize, velocity: f32);
+    fn trigger_note(&mut self, note: u8, velocity: f32) -> Option<usize>;
+    fn trigger_channel(&mut self, channel: u8, note: u8, velocity: f32) -> Option<usize>;
+    fn set_note(&mut self, note: u8, track: Option<u8>);
+    fn panic(&mut self);
+    fn schedule_timed(&mut self, offset: usize, ev: EngineEvent) -> bool;
+    fn load_sound(&mut self, track: usize, sound: &Sound<Self::Slot, N>);
+    fn trigger_with_sound(&mut self, track: usize, velocity: f32, sound: &Sound<Self::Slot, N>);
+    fn is_active(&self) -> bool;
+    fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]);
+    fn process_dry_wet(
+        &mut self,
+        master_l: &mut [f32; BLOCK],
+        master_r: &mut [f32; BLOCK],
+        aux: &mut [[f32; BLOCK]; 6],
+        wet_l: &mut [f32; BLOCK],
+        wet_r: &mut [f32; BLOCK],
+    );
+    fn master_gain(&self) -> f32;
+    fn set_master_gain(&mut self, value: f32);
+    fn fx_drive(&self) -> f32;
+    fn set_fx_drive(&mut self, value: f32);
+    fn load_kit(&mut self, kit: &[<Self::Slot as Slot<N>>::Id]);
+}
+```
+
+`Track`, `Strip`, `ModState`, `TimedQueue`, `Sound<Id>`, `OutPair`, the
+macro/CC system, `SendFx`, and `dsp/` move to core.
+
+#### Phase 13.0 — Baseline capture
+
+Record pre-refactor `cargo test` state and a release `out.wav` byte hash.
+Existing bench numbers in this plan are the perf baseline.
+
+#### Phase 13.1 — Extract `core` crate (mechanical)
+
+Create workspace member `core/` (`device-core` crate). Move verbatim:
+`dsp/`, macro system (slot consts, `Macro`, `MacroInfo`, banks), MIDI
+*parser*, consts, `TimedQueue`/`EngineEvent`/`TimedEvent`, `OutPair`.
+
+The `drum-engine` crate depends on core and **re-exports** so
+firmware/render/tests compile unchanged this phase. CI adds
+`-p device-core` to cross-compile and clippy jobs.
+
+*Gate:* all tests green, `out.wav` bit-identical.
+
+#### Phase 13.2 — Genericize track infrastructure
+
+Introduce `MachineSlotSurface`; make `Track`/`Strip`/`Sound` generic.
+Drum's `MachineSlot` implements it; `DrumEngine` becomes a thin struct
+over `[Track<MachineSlot>; 8]`. Track/engine tests move to core;
+machine tests stay with the drum machine modules.
+
+*Gate:* tests green, `out.wav` bit-identical, **bench cycle counts
+unchanged** — proves monomorphization preserved the hot path.
+
+#### Phase 13.3 — `DeviceEngine` trait; genericize consumers
+
+MIDI router, grid (via a narrow `DeviceModel` surface), firmware
+`audio.rs`/`usb.rs`/main-loop skeleton, render `device.rs` harness and
+`--device` flag with a registry. Move `engine/` → `devices/drum/`.
+Firmware gets `bin/drum.rs` (thin) + shared `runner`.
+
+*Gate:* hardware behaves identically to pre-refactor.
+
+#### Phase 13.4 — `mi-dsp` crate ✅
+
+Vendor stmlib + `plaits/dsp` + `peaks/dsp` with LICENSEs. Inventory
+component families against the core `dsp/` taxonomy (oscillator/, LFO,
+envelope, waveshaper, `units.h` param scaling, physical models; Peaks
+drum synth; Plaits Engine interface).
+
+`build.rs` uses the `cc` crate for host and
+`thumbv7em-none-eabihf` builds via `arm-none-eabi-g++` with
+`-fno-exceptions -fno-rtti -ffp-contract=off` (no fast-math). Host builds
+add `-DTEST` so the vendored ARM inline asm is disabled and tests/benches
+run on x86_64 / arm64.
+
+**FFI rules:**
+- Boundary is **block-rate** only (`mi_plaits_voice_render(handle, ...)`);
+  no per-sample extern calls.
+- No-alloc object ownership: C++ objects are placement-new'd into aligned
+  `[u8; PLAITS_VOICE_STORAGE_SIZE]` storage held by the Rust wrapper.
+- `unsafe` is confined to `mi-dsp`; core and device crates keep
+  `#![deny(unsafe_code)]`.
+
+*Gate:* wrap **one** Plaits engine and bench `8×` worst case on hardware
+before any catalog breadth decision.
+
+**Completed:** `mi-dsp` crate added to workspace; `PlaitsVoice` wrapper
+exposes block-rate `render`/`render_f32`. Host bench (`cargo bench -p mi-dsp`)
+renders 8 voices × 24 samples for 1000 iterations at ~20.8 MS/s (~28.8
+estimated CM7 cycles/sample @ 600 MHz). Unit tests verify init, idle
+silence, and triggered output. Cross-compile to `thumbv7em-none-eabihf`
+requires `arm-none-eabi-g++` or `clang++` (not exercised on this host).
+
+#### Phase 13.5 — Device #2: `mi-drum`
+
+Catalog from `mi-dsp` wrappers — each Plaits model as its own machine
+(~16) plus Peaks BD/SD/HH (~3), breadth bench-gated. Macros map to MI
+params via `units.h` scaling where it fits. `MiDrumEngine` over core
+`Track`; grid/MIDI/firmware/render arrive via Phase 13.3 traits.
+
+`bin/mi-drum.rs`, bench scenario, `--device mi-drum` in render.
+Determinism: within-platform bit-identity tests; cross-platform
+bit-identity documented as best-effort for C++ float paths.
+
+*Gate:* device playable over MIDI+grid on Teensy, bench under ~70%,
+tests green.
+
+#### Phase 13.6 — CI + docs
+
+CI tests all crates, cross-compiles core + drum + mi-drum + mi-dsp
+(adds `g++-arm-none-eabi` install step), and enables the firmware bench
+build job now that the imxrt-hal 0.6 blocker is resolved. README becomes
+a device-family doc with the "add a device" checklist.
+
+#### Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| C++ cross-toolchain (macOS + CI) | Document install; CI apt step; fallback clang `--target=` |
+| Per-sample FFI cost kills budget | Block-rate FFI boundary is a stated rule; Phase 13.4 bench gate |
+| Genericization regresses hot path | Phase 13.2 bench-comparison gate |
+| RAM: 8 Plaits engines + SendFx | Fits 512 KB on paper; assert sizes in bench |
+| Host/target bit-identity in C++ paths | `-ffp-contract=off`, within-platform tests, documented caveat |
+| Slot-index / CC-map ABI drift | Structural refactor only; WAV byte-compare guards it |
+| Polyphonic future | `Machine` stays per-voice; poly device adds voice allocation above machines |
+
+#### Untouched by design
+
+Slot indices and the CC map (binary ABI), the firmware workspace
+exclusion, the bench-gating culture, `deny(unsafe_code)` in core +
+device crates, and the strict determinism contract for the drum device.
+
 ## Design guidance received (2026-08-10)
 
 A design-guidance review (`drum-machine-design.md`, untracked) landed after
@@ -915,6 +1119,12 @@ velocity→macro are done; preset save/load to SD is still open (Phase 10).
 | Individual-out tap point | post-fader, post-strip, **pre-send** — pan summed to mono on `Channel`, preserved on `Pair`/`Master`; no new DSP, the same tap the sends use, reused |
 | FX machines (sustained gestures) | in scope as Phase 12; **Dub Siren** (sine + internal pitch LFO, index 13) and **Sweep FX** (noise → SVF, cutoff swept by internal LFO, index 14) appended to the catalogue. Self-timed internal `AhdEnv` owns the gesture length — no NoteOff / external gate path added (engine carries NoteOn only; the per-track `is_active` budget early-out is preserved for the gesture's duration). Bench-gated against a new `8 + sweep fx sustained` row; sustained machines defeat the per-track idle early-out for their whole gesture, which is the new fact in the budget model |
 | Machine envelope for sustained voices | `AhdEnv` (Phase 1, used by the per-track strip amp env) becomes a per-machine DSP for the first time in Phase 12 — no new primitive; `DecayEnv` stays the one-shot default, `AhdEnv` is the gesture default |
+| Device crate layout | core crate + per-device engine crates |
+| Firmware crate layout | one firmware crate, one bin per device; shared audio/usb/runner |
+| Render tool layout | one binary, `--device` flag with a device registry |
+| Mutable Instruments source | vendored into `mi-dsp/vendor/`, not submodules |
+| MI FFI boundary | block-rate only; no per-sample extern calls |
+| MI catalog growth | bench-gated; wrap one engine, measure `8×` before breadth |
 
 ## Hardware
 

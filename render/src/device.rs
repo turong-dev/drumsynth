@@ -1,16 +1,16 @@
-//! `render device` — run the engine as a MIDI-in / audio-out device.
+//! `render device` — run a device engine as a MIDI-in / audio-out host harness.
 //!
-//! The engine is a drum module, so the harness is just the firmware's main
-//! loop relocated to macOS: MIDI bytes in from a virtual CoreMIDI port, audio
-//! out through a 48 kHz device (BlackHole, your speakers, or an aggregate you
-//! created in Audio MIDI Setup). Because both targets call the shared
-//! [`drum_engine::midi::handle_midi`] router, a DAW or controller drives the
-//! Mac rig and the Teensy identically — which is the point: tune here, flash
-//! the same numbers to the device.
+//! The harness is the firmware's main loop relocated to macOS: MIDI bytes in
+//! from a virtual CoreMIDI port, audio out through a 48 kHz device (BlackHole,
+//! your speakers, or an aggregate you created in Audio MIDI Setup). Because
+//! both targets call the shared [`drum_engine::midi::handle_midi`] router, a
+//! DAW or controller drives the Mac rig and the Teensy identically — which is
+//! the point: tune here, flash the same numbers to the device.
 //!
 //! Threading mirrors the hardware too: the CoreMIDI callback parses bytes and
 //! pushes events into a lock-free ring; the audio callback drains the ring and
-//! applies events *between* engine blocks, never inside [`DrumEngine::process`].
+//! applies events *between* engine blocks, never inside
+//! [`DeviceEngine::process`](drum_engine::engine::DeviceEngine::process).
 //!
 //! # `--multi-out`
 //!
@@ -22,7 +22,8 @@
 //! mix only, with the wet FX return mixed in by the engine's `process`
 //! wrapper.
 //!
-//! Multi-out mode writes the engine's [`DrumEngine::process_dry_wet`]
+//! Multi-out mode writes the engine's
+//! [`process_dry_wet`](drum_engine::engine::DeviceEngine::process_dry_wet)
 //! primitive straight to an 8-channel output: pair 0 = master (with wet
 //! mixed in), pairs 1..3 = auxes. A DAW sees 8 channels: 2 master + 6
 //! individual. Matches the firmware's future 8-output TDM/multi-DAC
@@ -32,7 +33,7 @@ use std::error::Error;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use drum_engine::midi::{handle_midi, MidiEvent, MidiParser};
-use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE};
+use drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE};
 use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput};
 use rtrb::{Producer, RingBuffer};
@@ -48,12 +49,21 @@ const EVENT_QUEUE_CAP: usize = 1024;
 const MULTI_OUT_CHANNELS: usize = 8;
 
 /// Run the device until ctrl-c.
-pub fn run(
+///
+/// The engine is passed as a `Box<E>` so large devices (e.g. `MiDrumEngine`,
+/// whose Plaits voices are hundreds of kilobytes) can be allocated in-place on
+/// the heap and moved into the audio callback without ever putting the whole
+/// struct on the caller's stack.
+pub fn run<E, const N: usize>(
+    engine: Box<E>,
     out: &Option<String>,
     port: &str,
     list: bool,
     multi_out: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>>
+where
+    E: DeviceEngine<N> + Send + 'static,
+{
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     let host = cpal::default_host();
@@ -81,7 +91,6 @@ pub fn run(
     }
 
     // Engine and its MIDI queue are owned by the audio callback thread.
-    let engine = DrumEngine::new();
     let (producer, consumer) = RingBuffer::<MidiEvent>::new(EVENT_QUEUE_CAP);
 
     // Virtual MIDI input: appears system-wide as an input port any app can
@@ -134,8 +143,8 @@ pub fn run(
     let mut cursor = BLOCK; // force a render on the first frame
     let mut consumer = consumer;
     let mut engine = engine;
-    let master_gain = engine.master_gain;
-    let fx_drive = engine.send_fx.drive;
+    let master_gain = engine.master_gain();
+    let fx_drive = engine.fx_drive();
 
     let stream = device.build_output_stream(
         &config.into(),
@@ -146,7 +155,7 @@ pub fn run(
                     // then render one engine block. Same discipline as the
                     // firmware: sequence between blocks, never inside.
                     while let Ok(ev) = consumer.pop() {
-                        handle_midi(&mut engine, ev);
+                        handle_midi(&mut *engine, ev);
                     }
                     if multi_out {
                         engine.process_dry_wet(
