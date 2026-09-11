@@ -1159,10 +1159,22 @@ Worst case (`8+FX+SWFX`) went **88.2% -> 35.6%** of the 400,000-cycle budget:
 | engine `.uninit` OCRAM -> `.bss` DTCM | 157,035 | 39.3% | **−55.0%** |
 | `fast::QUARTER` -> DTCM | 142,237 | 35.6% | −9.4% |
 
-**The engine was memory-bound, not compute-bound.** OCRAM is reached over the
-AXI bus, and nothing in this firmware or in `teensy4-bsp` enables the L1 data
-cache, so every delay-line and reverb-tank access was an uncached bus
-transaction. That is the whole story of the drift toward the ceiling: the FX
+**The engine was memory-bound, not compute-bound** — and the root cause turned
+out to be simpler than the placement fix implies. OCRAM is reached over the
+AXI bus, and *nothing was enabling the L1 caches*: not `teensy4-bsp`, not
+`cortex-m-rt`, though Teensyduino does by default on this same chip. So every
+delay-line and reverb-tank access was an uncached bus transaction. Enabling
+the caches recovers 98% of what the DTCM move bought:
+
+| configuration | 8+FX+SWFX | of budget |
+|---|---|---|
+| engine in OCRAM, caches off | 348,934 | 87.2% |
+| engine in OCRAM, caches **on** | 143,978 | 36.0% |
+| engine in DTCM (cache irrelevant) | 142,237 | 35.6% |
+
+TCM bypasses the caches, so DTCM placement and cache state are independent —
+confirmed by a control run (caches on, everything already in DTCM: no change
+within the 4-cycle noise floor). That is the whole story of the drift toward the ceiling: the FX
 buffers grew past what OCRAM latency could sustain. Note the 72.1% recorded at
 Phase 12 is stale — an A/B against `c801324` shows `8 sounding` was already at
 84.4% *before* the Phase 13 refactor, which itself costs only ~1.8%.
@@ -1186,10 +1198,25 @@ Still on the table, not done because the budget goal was met without them:
   `libm::floorf` inside `exp2_approx`, `.fill(0.0)` for the bus zeroing,
   hoisting `is_active` out of the sample loop, and hoisting the 15-arm
   `MachineSlot::tick` match to once per track per block.
-- `bin/mi-drum.rs` is still in OCRAM and paying the full uncached cost.
-  `MiDrumEngine` is 343,296 bytes against 320 KB of DTCM, so it needs a
-  FlexRAM rebalance first — `.text` uses only ~101 KB of the 192 KB ITCM, so
-  ITCM 4 banks / DTCM 12 would give 384 KB. That means generating the linker
-  script from `imxrt-rt`'s `RuntimeBuilder` instead of taking the BSP's.
-- DTCM is now at 91.6%. The linker enforces the ceiling, but the next thing
-  that wants to live there will need the rebalance above.
+- `bin/mi-drum.rs` stays in OCRAM, and that is now fine. `MiDrumEngine` is
+  343,296 bytes against 320 KB of DTCM so it can never fit, but with the
+  caches on it pays roughly 1.2% for being there rather than the 51 points it
+  used to. The FlexRAM rebalance this file previously called for (ITCM 4 banks
+  / DTCM 12, via `imxrt-rt`'s `RuntimeBuilder`) is **not needed**, and neither
+  is splitting `SendFx` out of `Engine`.
+- DTCM is at 91.6% because the drum engine lives there for a 0.4-point gain.
+  If anything else ever needs DTCM, moving the engine back to OCRAM is a
+  one-line change costing a measured 1.2%.
+
+### Placement rule
+
+What matters is **accesses per sample x latency**, not size:
+
+| data | placement |
+|---|---|
+| not touched per sample (`MACHINE_INFO`, string tables, note map) | OCRAM, always fine |
+| per sample, data-dependent addressing (lookup tables, voice state) | DTCM — `QUARTER` is 2 KB and cost 9.9% of budget in uncached OCRAM |
+| per sample, sequential (delay lines, reverb combs) | cached OCRAM is fine — a walk up an incrementing index is the best case a cache line gets |
+
+With the caches off, every row above collapses to "must be DTCM", which is
+what made this look like a placement problem in the first place.
