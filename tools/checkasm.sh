@@ -35,33 +35,59 @@ if [ ! -f "$ELF" ]; then
     exit 1
 fi
 
+# `--mcpu=cortex-m7` is not optional. llvm-objdump picks its disassembler
+# subtarget from the ELF's build attributes, and for a build carrying
+# `-C target-cpu=cortex-m7` it picks one that cannot decode VFP -- every
+# floating-point instruction comes back as `<unknown>`. Without this flag the
+# tool reports zero FP instructions for a build that is full of them, which
+# reads exactly like "the flag disabled the FPU".
 echo "==> $ELF"
-DIS="$(rust-objdump -d "$ELF")"
+DIS="$(rust-objdump -d --mcpu=cortex-m7 "$ELF")"
+
+UNKNOWN="$(printf '%s\n' "$DIS" | grep -c '<unknown>' || true)"
+if [ "$UNKNOWN" -gt 64 ]; then
+    echo "  warning: $UNKNOWN undecoded instructions -- counts below are unreliable" >&2
+fi
+
+# Count occurrences of a mnemonic in the instruction column only, so that
+# data bytes and symbol names cannot inflate the total.
+MNEMONICS="$(printf '%s\n' "$DIS" | awk -F'\t' 'NF>1 {print $2}' | awk '{print $1}')"
 
 count() {
-    # $1 = label, $2 = extended regex over the mnemonic column
+    # $1 = label, $2 = extended regex anchored at the mnemonic
     local n
-    n="$(printf '%s\n' "$DIS" | grep -cE "$2" || true)"
+    n="$(printf '%s\n' "$MNEMONICS" | grep -cE "^$2" || true)"
+    printf '  %-28s %s\n' "$1" "$n"
+}
+
+# Calls are matched against the full disassembly, since the callee name lives
+# in the operand column.
+count_call() {
+    local n
+    n="$(printf '%s\n' "$DIS" | grep -cE "\bbl\b.*$2" || true)"
     printf '  %-28s %s\n' "$1" "$n"
 }
 
 echo
 echo "floating point:"
-count "vfma/vfms (fused MAC)"  '\bvfm[as]'
-count "vmla/vmls (chained MAC)" '\bvml[as]'
-count "vdiv"                    '\bvdiv'
-count "vsqrt"                   '\bvsqrt'
-count "vabs"                    '\bvabs'
+count "total FP instructions"   'v'
+count "vfma/vfms (fused MAC)"  'vfm[as]'
+count "vmla/vmls (chained MAC)" 'vml[as]'
+count "vmul"                    'vmul'
+count "vdiv"                    'vdiv'
+count "vsqrt"                   'vsqrt'
+count "vabs"                    'vabs'
+count "vldr/vstr (FP mem)"      'v(ldr|str)'
 
 echo
 echo "libm calls remaining (want these at or near zero):"
 for sym in sinf cosf floorf ceilf powf expf logf fmodf roundf; do
-    count "bl <...${sym}>" "\bbl\b.*${sym}"
+    count_call "bl <...${sym}>" "${sym}"
 done
 
 echo
 echo "reboot path:"
-count "bkpt (autoboot -> HalfKay)" '\bbkpt'
+count "bkpt (autoboot -> HalfKay)" 'bkpt'
 
 echo
 echo "section sizes:"
