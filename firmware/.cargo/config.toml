@@ -3,11 +3,15 @@ target = "thumbv7em-none-eabihf"
 
 [target.thumbv7em-none-eabihf]
 rustflags = [
-    # teensy4-bsp's runtime feature supplies this. It places code in ITCM and
+    # our build.rs supplies this. It places code in ITCM and
     # data in DTCM, which is what gets you the full 600MHz without stalling on
     # flash reads. If your cycle counts look implausibly bad, check this is
     # actually being applied.
-    "-C", "link-arg=-Tt4link.x",
+    # Our own script (firmware/build.rs), not the BSP's `t4link.x`. Same memory
+    # map except the FlexRAM split: ITCM 8 / DTCM 8 rather than 6 / 10, because
+    # the Plaits C++ makes ITCM the binding constraint while DTCM sits half
+    # empty. See build.rs for the numbers.
+    "-C", "link-arg=-Tdrumsynth-link.x",
 
     # The target's default CPU model is generic thumbv7em, which implies
     # fpv4-sp-d16 -- single precision only, and a scheduling model that is not

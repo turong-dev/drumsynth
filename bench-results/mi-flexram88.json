@@ -1,0 +1,87 @@
+{
+  "budget": 400000,
+  "label": "mi-flexram88",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "6 FX idle",
+    "6 + FX"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "3 sounding": {
+      "avg": 102940,
+      "cy_per_frame": 4162,
+      "pct": 33.3,
+      "peak": 133196
+    },
+    "6 + FX": {
+      "avg": 194137,
+      "cy_per_frame": 8185,
+      "pct": 65.5,
+      "peak": 261926
+    },
+    "6 FX idle": {
+      "avg": 194537,
+      "cy_per_frame": 8185,
+      "pct": 65.5,
+      "peak": 261931
+    },
+    "6 sounding": {
+      "avg": 194136,
+      "cy_per_frame": 8204,
+      "pct": 65.6,
+      "peak": 262544
+    },
+    "idle": {
+      "avg": 29153,
+      "cy_per_frame": 918,
+      "pct": 7.3,
+      "peak": 29393
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165048
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 8192
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 183588
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 457944
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2456,
+      ".debug_abbrev": 70593,
+      ".debug_aranges": 4200,
+      ".debug_frame": 13680,
+      ".debug_info": 1163951,
+      ".debug_line": 345440,
+      ".debug_loc": 159053,
+      ".debug_loclists": 286721,
+      ".debug_ranges": 82968,
+      ".debug_rnglists": 53590,
+      ".debug_str": 459514,
+      ".heap": 16384,
+      ".rodata": 99064,
+      ".stack": 16384,
+      ".text": 183588,
+      ".uninit": 342496,
+      ".vector_table": 696
+    }
+  }
+}

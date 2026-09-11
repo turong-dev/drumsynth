@@ -91,20 +91,27 @@ use teensy4_bsp::board;
 const CORE_HZ: f32 = 600_000_000.0;
 
 /// The engine + its send-FX buffers (~256 KB for the delay line + reverb
-/// tanks) live in DTCM via a plain `.bss` static, *not* on the stack: the
-/// 16 KB stack configured by `t4link.x` cannot hold it, and Phase 5 grew
-/// the engine past the point where a stack-allocated local was viable.
+/// tanks) live in `.uninit` OCRAM, *not* on the stack: the 16 KB stack cannot
+/// hold it, and Phase 5 grew the engine past the point where a
+/// stack-allocated local was viable.
 ///
-/// DTCM rather than the `.uninit` OCRAM this used to use. OCRAM sits behind
-/// the AXI bus; DTCM is zero-wait-state, and `t4link.x` aliases `REGION_BSS`
-/// to it. The engine is 269,056 bytes against 320 KB of DTCM, so it fits with
-/// roughly 29 KB to spare once the 16 KB stack and the rest of `.bss` are
-/// accounted for -- tight, but it is the linker that enforces it, and a build
-/// that does not fit fails to link rather than misbehaving at run time.
+/// **OCRAM, not DTCM — and that changed.** This was in DTCM, at 304,300 of
+/// 327,680 used (92.9%), which was fine while the FlexRAM split was the BSP's
+/// ITCM 6 / DTCM 10. Phase 14 moved it to ITCM 8 / DTCM 8 (see `build.rs`)
+/// because the vendored Plaits C++ makes ITCM the binding constraint for the
+/// *other* device while DTCM sits half empty — and 269 KB does not fit in
+/// 8 banks. So the drum engine comes back here.
+///
+/// The cost is a measured ~1.2% of the cycle budget, which the optimisation
+/// pass established once the L1 caches were enabled: OCRAM is behind the AXI
+/// bus, but a cached sequential walk is close to the best case a cache line
+/// gets. With the `cache` feature *off* this would be catastrophic rather
+/// than mildly expensive — see PLAN.md's placement rule.
 /// Initialized below via [`DrumEngine::new_in_place`], not
 /// `MaybeUninit::write(DrumEngine::new())` — see the comment at the call
 /// site. Doing the write from a single-threaded `main` is sound here — the
 /// bench is run-once with interrupts managed by `imxrt_log`.
+#[link_section = ".uninit"]
 static mut ENGINE_BUF: core::mem::MaybeUninit<DrumEngine> = core::mem::MaybeUninit::uninit();
 
 /// Cycles available per block before the audio callback misses its deadline.

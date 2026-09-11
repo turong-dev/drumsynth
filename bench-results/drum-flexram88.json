@@ -1,0 +1,106 @@
+{
+  "budget": 400000,
+  "label": "drum-flexram88",
+  "order": [
+    "idle",
+    "3 sounding",
+    "8 sounding",
+    "8 FX idle",
+    "8 + FX",
+    "8+FX+CC",
+    "8 + BD VA",
+    "8+FX+SWFX"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "3 sounding": {
+      "avg": 65669,
+      "cy_per_frame": 2060,
+      "pct": 16.5,
+      "peak": 65922
+    },
+    "8 + BD VA": {
+      "avg": 136819,
+      "cy_per_frame": 4286,
+      "pct": 34.3,
+      "peak": 137165
+    },
+    "8 + FX": {
+      "avg": 135724,
+      "cy_per_frame": 4258,
+      "pct": 34.1,
+      "peak": 136265
+    },
+    "8 FX idle": {
+      "avg": 136157,
+      "cy_per_frame": 4262,
+      "pct": 34.1,
+      "peak": 136413
+    },
+    "8 sounding": {
+      "avg": 136150,
+      "cy_per_frame": 4263,
+      "pct": 34.1,
+      "peak": 136417
+    },
+    "8+FX+CC": {
+      "avg": 137341,
+      "cy_per_frame": 4298,
+      "pct": 34.4,
+      "peak": 137542
+    },
+    "8+FX+SWFX": {
+      "avg": 142984,
+      "cy_per_frame": 4496,
+      "pct": 36.0,
+      "peak": 143876
+    },
+    "idle": {
+      "avg": 32830,
+      "cy_per_frame": 1034,
+      "pct": 8.3,
+      "peak": 33113
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 327680,
+        "used": 33964
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 8192
+      },
+      "ITCM": {
+        "capacity": 196608,
+        "used": 102004
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 304008
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 14432,
+      ".comment": 153,
+      ".data": 2452,
+      ".debug_abbrev": 5475,
+      ".debug_aranges": 1944,
+      ".debug_frame": 5096,
+      ".debug_info": 548753,
+      ".debug_line": 132603,
+      ".debug_loc": 200406,
+      ".debug_ranges": 116648,
+      ".debug_str": 368713,
+      ".heap": 16384,
+      ".rodata": 18568,
+      ".stack": 16384,
+      ".text": 102004,
+      ".uninit": 269056,
+      ".vector_table": 696
+    }
+  }
+}
