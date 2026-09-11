@@ -61,6 +61,11 @@ typedef struct {
 // Returns the number of engine models available.
 int mi_plaits_num_engines(void);
 
+// Seed the process-global `stmlib::Random` LCG that every Plaits engine draws
+// its noise from. There is exactly one generator for all voices, so a render
+// is only reproducible from a known seed — see mi_dsp::seed_random.
+void mi_dsp_seed_random(uint32_t seed);
+
 // Placement-new a voice into `memory` (which must be at least
 // PLAITS_VOICE_STORAGE_SIZE bytes and aligned to PLAITS_VOICE_STORAGE_ALIGN),
 // using `buffer` (PLAITS_VOICE_BUFFER_SIZE bytes) for engine scratch.

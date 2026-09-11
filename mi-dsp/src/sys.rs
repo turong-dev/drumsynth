@@ -78,6 +78,9 @@ extern "C" {
     /// Returns the number of available Plaits synthesis models.
     pub fn mi_plaits_num_engines() -> c_int;
 
+    /// Seed the process-global `stmlib::Random` generator.
+    pub fn mi_dsp_seed_random(seed: u32);
+
     /// Placement-new a `plaits::Voice` into `voice` using `buffer` for scratch.
     pub fn mi_plaits_voice_init(voice: *mut MiPlaitsVoice, buffer: *mut c_void);
 

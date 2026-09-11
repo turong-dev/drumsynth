@@ -8,6 +8,7 @@
 
 #include "plaits/dsp/voice.h"
 #include "stmlib/utils/buffer_allocator.h"
+#include "stmlib/utils/random.h"
 
 // Ensure the Rust-side storage is large enough for the real object.
 static_assert(
@@ -25,6 +26,8 @@ static_assert(
 extern "C" {
 
 int mi_plaits_num_engines(void) { return plaits::kMaxEngines; }
+
+void mi_dsp_seed_random(uint32_t seed) { stmlib::Random::Seed(seed); }
 
 void mi_plaits_voice_init(MiPlaitsVoice* voice, void* buffer) {
   stmlib::BufferAllocator allocator(buffer, PLAITS_VOICE_BUFFER_SIZE);

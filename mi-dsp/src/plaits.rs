@@ -1,6 +1,8 @@
 //! Wrapper for the Mutable Instruments Plaits macro oscillator voice.
 
+use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 // Re-export the C constants so callers know the required buffer shape.
 pub use crate::sys::{
@@ -34,52 +36,106 @@ impl Default for PlaitsBuffer {
 
 /// Maximum number of Plaits voices that can be alive at once.
 ///
-/// This pool is shared by all [`PlaitsVoice`] instances. The mi-drum engine
-/// uses six tracks; allowing a few extra covers reloads while a voice is being
-/// replaced. The buffers live in `.bss`, not inside the voice struct, so a
-/// voice can be moved after construction without invalidating its internal
-/// pointers.
+/// This pool is shared by all [`PlaitsVoice`] instances. The buffers live in
+/// `.bss`, not inside the voice struct, so a voice can be moved after
+/// construction without invalidating its internal pointers.
+///
+/// The size differs by target. Firmware runs one engine and needs only its six
+/// tracks plus headroom for a reload mid-swap. Host builds run the test harness,
+/// which constructs a whole engine per test *in parallel*, so the pool has to
+/// cover several engines at once or tests fail on exhaustion rather than on
+/// anything real. At 16 KB a buffer that is 128 KB on target and 2 MB on host —
+/// the latter being nothing, and the former being the number the RAM budget
+/// already accounts for.
+#[cfg(target_os = "none")]
 const MAX_VOICES: usize = 8;
+#[cfg(not(target_os = "none"))]
+const MAX_VOICES: usize = 128;
+
+/// Bits per word of the free bitmap. `AtomicU64` does not exist on
+/// `thumbv7em-none-eabihf`, so the bitmap is an array of 32-bit words rather
+/// than a single integer.
+const POOL_BITS: usize = 32;
+
+/// Number of words in the free bitmap.
+const POOL_WORDS: usize = MAX_VOICES.div_ceil(POOL_BITS);
 
 /// Static pool of scratch buffers.
-static mut VOICE_BUFFER_POOL: [PlaitsBuffer; MAX_VOICES] = [PlaitsBuffer::new(); MAX_VOICES];
-
-/// Free bitmap for the pool. Bit `i` set = buffer `i` is in use.
 ///
-/// Voice construction/destruction is single-threaded in this firmware context
-/// (init/control thread), so a simple bitmap is sufficient.
-static mut VOICE_BUFFER_USED: u8 = 0;
+/// Wrapped in an `UnsafeCell` rather than declared `static mut`: taking a
+/// reference to a `static mut` is undefined behaviour, and the pool is
+/// genuinely shared across threads in host test builds.
+#[repr(align(8))]
+struct BufferPool(UnsafeCell<[PlaitsBuffer; MAX_VOICES]>);
+
+// SAFETY: every access goes through `alloc_buffer`, which claims a bit in
+// `VOICE_BUFFER_USED` with a compare-exchange before handing out the matching
+// buffer pointer. A given index is therefore owned by at most one
+// `PlaitsVoice` at a time, and that voice is the only thing that writes to it.
+#[allow(unsafe_code)]
+unsafe impl Sync for BufferPool {}
+
+static VOICE_BUFFER_POOL: BufferPool =
+    BufferPool(UnsafeCell::new([PlaitsBuffer::new(); MAX_VOICES]));
+
+/// Free bitmap for the pool. Bit `i` of word `w` set = buffer `w * 32 + i` is
+/// in use.
+static VOICE_BUFFER_USED: [AtomicU32; POOL_WORDS] =
+    [const { AtomicU32::new(0) }; POOL_WORDS];
 
 /// Allocate a buffer from the static pool.
 ///
 /// Returns a pointer to the buffer and its index, or `None` if the pool is
-/// exhausted.
+/// exhausted. Thread-safe: the claim is a compare-exchange, so two threads
+/// racing for the last buffer cannot both win it.
 #[allow(unsafe_code)]
-// `i` indexes the pool array and shifts the free bitmap in step, so an
-// iterator would need the index back out again via `enumerate`. Not worth
-// restructuring a `static mut` walk that is about to be revisited when this
-// pool is made thread-safe.
-#[allow(clippy::needless_range_loop)]
 fn alloc_buffer() -> Option<(*mut u8, u8)> {
-    unsafe {
-        for i in 0..MAX_VOICES {
-            let mask = 1u8 << i;
-            if VOICE_BUFFER_USED & mask == 0 {
-                VOICE_BUFFER_USED |= mask;
-                let ptr = VOICE_BUFFER_POOL[i].0.as_mut_ptr();
-                return Some((ptr, i as u8));
+    for (w, word) in VOICE_BUFFER_USED.iter().enumerate() {
+        // Bits past MAX_VOICES in the final word are never claimable.
+        let valid: u32 = {
+            let remaining = MAX_VOICES - w * POOL_BITS;
+            if remaining >= POOL_BITS {
+                u32::MAX
+            } else {
+                (1u32 << remaining) - 1
+            }
+        };
+        let mut used = word.load(Ordering::Relaxed);
+        loop {
+            let free = !used & valid;
+            if free == 0 {
+                break;
+            }
+            let bit = free.trailing_zeros();
+            match word.compare_exchange_weak(
+                used,
+                used | (1u32 << bit),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    let index = w * POOL_BITS + bit as usize;
+                    // SAFETY: the compare-exchange above succeeded, so this
+                    // index's bit was clear and is now ours exclusively. No
+                    // other thread can hand out the same pointer until
+                    // `free_buffer` clears the bit in `Drop`.
+                    let ptr = unsafe { (*VOICE_BUFFER_POOL.0.get())[index].0.as_mut_ptr() };
+                    return Some((ptr, index as u8));
+                }
+                // Lost the race (or a spurious weak failure); retry this word
+                // with the value we actually observed.
+                Err(actual) => used = actual,
             }
         }
-        None
     }
+    None
 }
 
 /// Return a buffer to the static pool.
-#[allow(unsafe_code)]
 fn free_buffer(index: u8) {
-    unsafe {
-        VOICE_BUFFER_USED &= !(1u8 << index);
-    }
+    let index = index as usize;
+    let (w, bit) = (index / POOL_BITS, index % POOL_BITS);
+    VOICE_BUFFER_USED[w].fetch_and(!(1u32 << bit), Ordering::Release);
 }
 
 /// A Plaits voice, owned by Rust and rendered block-rate over FFI.
@@ -204,10 +260,44 @@ impl Drop for PlaitsVoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
 
     #[test]
     fn voice_initializes_without_panic() {
         let _voice = PlaitsVoice::new();
+    }
+
+    /// A freed buffer becomes claimable again, so a process that repeatedly
+    /// builds and discards engines does not leak its way to exhaustion.
+    ///
+    /// Deliberately does not assert *which* index comes back: these tests run
+    /// against the same process-wide pool as every other test in this binary,
+    /// and the harness runs them in parallel.
+    #[test]
+    fn pool_reuses_buffers_after_drop() {
+        let (_, index) = alloc_buffer().expect("pool empty at rest");
+        free_buffer(index);
+        let (_, again) = alloc_buffer().expect("freed buffer was not reusable");
+        free_buffer(again);
+    }
+
+    /// Live claims never alias. This is the invariant that the `unsafe impl
+    /// Sync` on the pool rests on, and the one a `static mut` bitmap could not
+    /// promise once the test harness started constructing engines in parallel.
+    #[test]
+    fn pool_never_hands_out_the_same_buffer_twice() {
+        let claims: Vec<_> = (0..4)
+            .map(|_| alloc_buffer().expect("pool exhausted"))
+            .collect();
+        for (i, (ptr_a, idx_a)) in claims.iter().enumerate() {
+            for (ptr_b, idx_b) in claims.iter().skip(i + 1) {
+                assert_ne!(idx_a, idx_b);
+                assert_ne!(ptr_a, ptr_b);
+            }
+        }
+        for (_, index) in claims {
+            free_buffer(index);
+        }
     }
 
     #[test]
