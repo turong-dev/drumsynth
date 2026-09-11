@@ -90,6 +90,12 @@ panic = "abort"
 name = "mi-drum"
 required-features = ["mi-drum"]
 
+# The mi-drum cycle bench. Same feature gate: it links the vendored C++, so it
+# needs the bare-metal C++ toolchain that `mi-drum` needs.
+[[bin]]
+name = "mi-bench"
+required-features = ["mi-drum"]
+
 [profile.dev.package.drum-engine]
 opt-level = 3
 
@@ -99,3 +105,9 @@ opt-level = 3
 [profile.dev]
 opt-level = 1
 debug = 2
+
+# Used only by `build.rs`, to generate this crate's linker script instead of
+# taking the BSP's. Keep the version aligned with what teensy4-bsp pins —
+# `cargo tree -p firmware | grep imxrt-rt`.
+[build-dependencies]
+imxrt-rt = "0.1.8"

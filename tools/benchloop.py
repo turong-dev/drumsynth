@@ -38,15 +38,35 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 FIRMWARE = REPO / "firmware"
 TARGET_DIR = FIRMWARE / "target" / "thumbv7em-none-eabihf" / "release"
-ELF = TARGET_DIR / "bench"
-HEX = TARGET_DIR / "bench.hex"
+# Which firmware binary this run measures. Both are cycle benches with the
+# same output format; `bench` is the drum device, `mi-bench` the Plaits one.
+# Set from `--bin` in main() before anything reads them.
+BIN = "bench"
+ELF = TARGET_DIR / BIN
+HEX = TARGET_DIR / (BIN + ".hex")
+
+# Per-binary header line and the cargo features each needs. The header is what
+# `capture` checks to prove it did not open the port late and lose the early
+# scenarios, so it has to match the binary actually flashed.
+BINS = {
+    "bench": {
+        "header": "drum-engine cycle bench",
+        "features": "autoboot",
+    },
+    "mi-bench": {
+        # Links the vendored C++, so it needs the `mi-drum` feature and a
+        # bare-metal C++ toolchain on PATH (`arm-none-eabi-g++`).
+        "header": "mi-drum cycle bench",
+        "features": "mi-drum,autoboot",
+    },
+}
 RESULTS = REPO / "bench-results"
 
 SENTINEL = "=== BENCH END ==="
 # First line the bench prints. If this is missing from a capture, the host
 # opened the port too late and the early scenarios were lost -- macOS discards
 # CDC bytes that arrive before the character device is opened.
-HEADER = "drum-engine cycle bench"
+HEADER = BINS[BIN]["header"]
 PORT_GLOB = "/dev/cu.usbmodem*"
 MCU = "TEENSY41"
 
@@ -63,12 +83,20 @@ LINE_RE = re.compile(
 )
 BUDGET_RE = re.compile(r"budget\s+(\d+)\s+cycles per block")
 
-# Which linker region each section lands in, per the BSP's generated t4link.x.
+# Which linker region each section lands in, and how big each region is.
 # Used to turn `rust-size -A` into a memory-pressure summary, because a change
 # that buys cycles by spending ITCM or DTCM it does not have is not a win.
+#
+# The capacities track `firmware/build.rs`, NOT teensy4-bsp. The BSP generates
+# a 6/10 FlexRAM split (192 KB ITCM / 320 KB DTCM); this firmware overrides it
+# to 8/8, because the vendored Plaits C++ makes ITCM the binding constraint on
+# the mi-drum device while DTCM sits half empty. Results in bench-results/
+# from before 2026-09-11 were measured against the 6/10 capacities, so their
+# ITCM and DTCM *percentages* are not comparable with later runs — the `used`
+# byte counts still are.
 REGIONS = {
-    "ITCM": ([".text"], 192 * 1024),
-    "DTCM": ([".stack", ".vector_table", ".data", ".bss"], 320 * 1024),
+    "ITCM": ([".text"], 256 * 1024),
+    "DTCM": ([".stack", ".vector_table", ".data", ".bss"], 256 * 1024),
     "OCRAM": ([".rodata", ".uninit", ".heap"], 512 * 1024),
     "FLASH": ([".boot"], 1984 * 1024),
 }
@@ -107,9 +135,9 @@ def run(cmd, cwd=None, capture=False):
 
 
 def build(features):
-    print("==> building bench (%s)" % features)
+    print("==> building %s (%s)" % (BIN, features))
     run(
-        ["cargo", "build", "--release", "--bin", "bench", "--features", features],
+        ["cargo", "build", "--release", "--bin", BIN, "--features", features],
         cwd=FIRMWARE,
     )
     print("==> converting to HEX")
@@ -344,12 +372,18 @@ def report(result, baseline):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--bin", default="bench", choices=sorted(BINS),
+                    help="which firmware bench to build and flash. `bench` is "
+                         "the drum device, `mi-bench` the mi-drum (Plaits) one "
+                         "(default: bench)")
     ap.add_argument("--label", required=True,
                     help="name for this run; written to bench-results/<label>.json")
     ap.add_argument("--baseline", default=None,
                     help="label (or path) of a previous run to diff against")
-    ap.add_argument("--features", default="autoboot",
-                    help="cargo features for the bench build (default: autoboot)")
+    ap.add_argument("--features", default=None,
+                    help="cargo features for the bench build. Defaults to what "
+                         "the chosen --bin needs (`autoboot`, plus `mi-drum` "
+                         "for mi-bench)")
     ap.add_argument("--no-build", action="store_true",
                     help="reuse the existing bench.hex")
     ap.add_argument("--flash-timeout", type=int, default=60,
@@ -364,6 +398,19 @@ def main():
     ap.add_argument("--raw", default=None,
                     help="also write the raw captured serial text here")
     args = ap.parse_args()
+
+    # Point the module-level paths at the selected binary. Done here rather
+    # than threaded through every function because the harness is a script
+    # measuring one binary per invocation, and the alternative is passing
+    # `bin` into a dozen call sites that have no other reason to know it.
+    global BIN, ELF, HEX, HEADER
+    BIN = args.bin
+    ELF = TARGET_DIR / BIN
+    HEX = TARGET_DIR / (BIN + ".hex")
+    HEADER = BINS[BIN]["header"]
+
+    if args.features is None:
+        args.features = BINS[BIN]["features"]
 
     if "autoboot" not in args.features.split(","):
         print("warning: --features %r has no `autoboot`; the bench will free-run "
