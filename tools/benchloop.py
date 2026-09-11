@@ -43,6 +43,10 @@ HEX = TARGET_DIR / "bench.hex"
 RESULTS = REPO / "bench-results"
 
 SENTINEL = "=== BENCH END ==="
+# First line the bench prints. If this is missing from a capture, the host
+# opened the port too late and the early scenarios were lost -- macOS discards
+# CDC bytes that arrive before the character device is opened.
+HEADER = "drum-engine cycle bench"
 PORT_GLOB = "/dev/cu.usbmodem*"
 MCU = "TEENSY41"
 
@@ -72,6 +76,19 @@ REGIONS = {
 
 class BenchError(Exception):
     """Anything that should stop the run with a readable message."""
+
+
+class Incomplete(BenchError):
+    """A capture that is worth simply retrying.
+
+    Re-flashing is cheap and needs no intervention: the board self-reboots
+    into HalfKay at the end of every sweep, so another attempt costs one build
+    -- and the build is already cached.
+    """
+
+    def __init__(self, message, text=""):
+        BenchError.__init__(self, message)
+        self.text = text
 
 
 def run(cmd, cwd=None, capture=False):
@@ -146,16 +163,20 @@ def flash(wait_timeout):
 
 
 def wait_for_port(timeout, exclude=()):
-    """Poll for the CDC port to (re)appear after the board reboots."""
+    """Poll hard for the CDC port to (re)appear after the board reboots.
+
+    This is a race against the firmware: the bench waits ~3 s after USB init
+    before printing its header, and anything it writes before the host opens
+    the character device is dropped by the macOS CDC driver, not buffered. So
+    poll at 20 ms and open immediately -- the settle is handled by retrying
+    the open rather than by sleeping through the margin.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         found = [p for p in ports() if p not in exclude]
         if found:
-            # The port node appears a moment before the CDC endpoint is
-            # actually ready to read; a short settle avoids a spurious EBUSY.
-            time.sleep(0.3)
             return found[0]
-        time.sleep(0.1)
+        time.sleep(0.02)
     raise BenchError(
         "no %s appeared within %ds. If the board is stuck in HalfKay, re-run; "
         "if it hard-faulted on the bkpt, the LED will be blinking a panic "
@@ -170,7 +191,18 @@ def capture(port, timeout):
     *after* the sentinel is the expected ending, not a failure.
     """
     print("==> capturing from %s" % port)
-    fd = os.open(port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    # The node can exist a moment before the endpoint accepts an open; retry
+    # rather than sleeping a fixed margin, so we start reading as early as
+    # possible.
+    fd = None
+    open_deadline = time.time() + 5.0
+    while fd is None:
+        try:
+            fd = os.open(port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError:
+            if time.time() > open_deadline:
+                raise BenchError("could not open %s within 5s" % port)
+            time.sleep(0.01)
     try:
         try:
             tty.setraw(fd)
@@ -195,6 +227,11 @@ def capture(port, timeout):
         text = b"".join(chunks).decode("utf-8", errors="replace")
     finally:
         os.close(fd)
+
+    if SENTINEL in text and HEADER not in text:
+        raise Incomplete(
+            "captured a complete sweep but missed the header, so the early "
+            "scenarios were dropped before the port was open", text)
 
     if SENTINEL not in text:
         rows = len(LINE_RE.findall(PREFIX_RE.sub("", text)))
@@ -321,6 +358,9 @@ def main():
                     help="seconds to wait for the CDC port to reappear (default: 30)")
     ap.add_argument("--read-timeout", type=int, default=90,
                     help="seconds to wait for the sentinel (default: 90)")
+    ap.add_argument("--retries", type=int, default=3,
+                    help="re-flash and re-capture this many times if the capture "
+                         "misses the header (default: 3)")
     ap.add_argument("--raw", default=None,
                     help="also write the raw captured serial text here")
     args = ap.parse_args()
@@ -337,9 +377,24 @@ def main():
 
     sizes = read_sizes()
     before = ports()
-    flash(args.flash_timeout)
-    port = wait_for_port(args.port_timeout, exclude=())
-    text = capture(port, args.read_timeout)
+
+    # Racing the firmware's ~3 s pre-header delay is not always winnable on a
+    # busy machine, and a capture that misses the header has silently lost its
+    # first scenarios. Retrying is cheap and unattended: the board is back in
+    # HalfKay the moment the sweep ends.
+    text = None
+    for attempt in range(1, args.retries + 2):
+        flash(args.flash_timeout)
+        port = wait_for_port(args.port_timeout, exclude=())
+        try:
+            text = capture(port, args.read_timeout)
+            break
+        except Incomplete as exc:
+            if attempt > args.retries:
+                raise BenchError(
+                    "%s (after %d attempts)" % (exc, attempt))
+            print("==> incomplete capture (%s); retrying %d/%d"
+                  % (exc, attempt, args.retries), file=sys.stderr)
 
     if args.raw:
         with open(args.raw, "w") as fh:
