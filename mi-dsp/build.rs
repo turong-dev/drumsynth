@@ -33,9 +33,26 @@ fn main() {
         build.compiler(env::var("MI_DSP_CXX").unwrap());
         build.flag_if_supported("--target=thumbv7em-none-eabihf");
         build.flag_if_supported("-mcpu=cortex-m7");
+        // cc-rs injects `-march=armv7e-m` ahead of our flags, and an explicit
+        // `-march` takes the architecture decision away from `-mcpu` — the
+        // object comes out tagged `Tag_CPU_name: "7E-M"` rather than
+        // Cortex-M7. The FPU and ABI still land correctly (verified via
+        // `readelf -A`: FPv5/FP-D16, VFP registers), but the scheduling model
+        // is the part worth having: the Rust side measured 1.1% from
+        // `-C target-cpu=cortex-m7`, and that gain is invisible in an
+        // instruction census, so state it explicitly rather than hope.
+        build.flag_if_supported("-mtune=cortex-m7");
         build.flag_if_supported("-mfloat-abi=hard");
         build.flag_if_supported("-mfpu=fpv5-d16");
         build.flag_if_supported("-mthumb");
+
+        // Do not link a C++ standard library. cc-rs defaults to `-lstdc++`,
+        // which does not exist bare-metal and which we do not want anyway: the
+        // vendored code is built `-fno-exceptions -fno-rtti`, allocates
+        // nothing, and uses `new` only in its placement form. It links with no
+        // undefined C++ ABI symbols at all — not even `__cxa_pure_virtual`,
+        // since every virtual in the Plaits engine hierarchy is implemented.
+        build.cpp_link_stdlib(None);
     }
 
     // No exceptions, no RTTI, no fast-math: keep float behaviour deterministic
@@ -44,7 +61,11 @@ fn main() {
     build.flag_if_supported("-fno-rtti");
     build.flag_if_supported("-ffp-contract=off");
     build.flag_if_supported("-Wno-unused-parameter");
+    // clang spells this singular, GCC plural. `flag_if_supported` probes each,
+    // so passing both silences the vendored `STATIC_ASSERT` macro on either
+    // compiler instead of only on clang.
     build.flag_if_supported("-Wno-unused-local-typedef");
+    build.flag_if_supported("-Wno-unused-local-typedefs");
     build.opt_level(3);
 
     // On host targets the vendored code uses ARM inline assembly unless TEST is
