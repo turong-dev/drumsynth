@@ -197,9 +197,23 @@ def capture(port, timeout):
         os.close(fd)
 
     if SENTINEL not in text:
+        rows = len(LINE_RE.findall(PREFIX_RE.sub("", text)))
+        if not text:
+            hint = ("Nothing arrived at all. The board enumerated but never "
+                    "wrote: check it is running the bench and not another binary.")
+        elif rows:
+            hint = ("Got %d scenario rows, then the board went quiet while still "
+                    "enumerated. That is what `teensy4-panic` looks like from the "
+                    "host -- it blinks the LED S.O.S. forever and never resets, so "
+                    "the port stays up and silent. Look at the LED: a repeating "
+                    "3-short/3-long/3-short means the bench panicked in the "
+                    "scenario after the last one printed, and the board needs its "
+                    "button pressed to get back to HalfKay." % rows)
+        else:
+            hint = "Output arrived but no scenario rows parsed; the format may have changed."
         raise BenchError(
-            "never saw %r within %ds. Captured %d bytes:\n%s"
-            % (SENTINEL, timeout, len(text), text[-2000:] or "(nothing)")
+            "never saw %r within %ds. %s\n\nCaptured %d bytes:\n%s"
+            % (SENTINEL, timeout, hint, len(text), text[-2000:] or "(nothing)")
         )
     return text
 
@@ -342,6 +356,11 @@ def main():
         json.dump(result, fh, indent=2, sort_keys=True)
 
     baseline = load(args.baseline) if args.baseline else None
+    if baseline:
+        missing = [k for k in baseline.get("order", []) if k not in result["scenarios"]]
+        if missing:
+            print("warning: this run is missing %d scenario(s) the baseline has: %s"
+                  % (len(missing), ", ".join(missing)), file=sys.stderr)
     report(result, baseline)
     print("")
     print("wrote %s" % out)

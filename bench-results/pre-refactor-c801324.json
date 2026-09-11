@@ -1,0 +1,75 @@
+{
+  "budget": 400000,
+  "label": "pre-refactor-c801324",
+  "note": "Halted in measure_with_cc_automation -- board stayed enumerated and silent, the teensy4-panic S.O.S. signature. Scenarios 6-8 are absent. Pre-existing at c801324; not caused by the refactor.",
+  "order": [
+    "idle",
+    "3 sounding",
+    "8 sounding",
+    "8 FX idle",
+    "8 + FX"
+  ],
+  "scenarios": {
+    "3 sounding": {
+      "avg": 177591,
+      "cy_per_frame": 5552,
+      "pct": 44.4,
+      "peak": 177682
+    },
+    "8 + FX": {
+      "avg": 337361,
+      "cy_per_frame": 10544,
+      "pct": 84.4,
+      "peak": 337437
+    },
+    "8 FX idle": {
+      "avg": 337370,
+      "cy_per_frame": 10545,
+      "pct": 84.4,
+      "peak": 337442
+    },
+    "8 sounding": {
+      "avg": 337345,
+      "cy_per_frame": 10545,
+      "pct": 84.4,
+      "peak": 337445
+    },
+    "idle": {
+      "avg": 100864,
+      "cy_per_frame": 3154,
+      "pct": 25.2,
+      "peak": 100928
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 327680,
+        "used": 31904
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 8192
+      },
+      "ITCM": {
+        "capacity": 196608,
+        "used": 109560
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 301016
+      }
+    },
+    "sections": {
+      ".boot": 8192,
+      ".bss": 14424,
+      ".data": 400,
+      ".heap": 16384,
+      ".rodata": 15576,
+      ".stack": 16384,
+      ".text": 109560,
+      ".uninit": 269056,
+      ".vector_table": 696
+    }
+  }
+}
