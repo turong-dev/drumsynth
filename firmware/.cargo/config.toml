@@ -8,6 +8,19 @@ rustflags = [
     # flash reads. If your cycle counts look implausibly bad, check this is
     # actually being applied.
     "-C", "link-arg=-Tt4link.x",
+
+    # The target's default CPU model is generic thumbv7em, which implies
+    # fpv4-sp-d16 -- single precision only, and a scheduling model that is not
+    # the M7's. The i.MX RT1062 is a Cortex-M7 with FPv5-D16 and a dual-issue
+    # pipeline. Without this, LLVM emits zero fused multiply-adds for the whole
+    # engine (435 chained vmla/vmls instead), and `mi-dsp/build.rs` has been
+    # compiling its C++ with `-mcpu=cortex-m7 -mfpu=fpv5-d16` all along, so the
+    # two halves of the image disagreed about the FPU.
+    #
+    # `core` and `libm` stay as the generic prebuilt rlibs -- rebuilding them
+    # for this CPU needs `-Z build-std`, which needs nightly. Mixing is
+    # ABI-compatible: the float ABI and register count are unchanged.
+    "-C", "target-cpu=cortex-m7",
 ]
 
 # There is no `cargo run` story here by default: the Teensy bootloader wants a
