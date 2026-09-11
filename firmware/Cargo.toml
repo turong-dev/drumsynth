@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Teensy 4.1 target for drum-engine."
 
 [features]
-default = ["grid"]
+default = ["grid", "cache"]
 grid = ["drum-engine/grid"]
 
 # The Plaits device. Off by default because `mi-dsp` cross-compiles vendored
@@ -20,6 +20,13 @@ mi-drum = ["dep:mi-drum-engine"]
 # then `bkpt #251` into HalfKay so `tools/benchloop.py` can reflash without a
 # button press. Off by default so `./flash.sh bench` still free-runs.
 autoboot = []
+
+# Enable the Cortex-M7 L1 instruction and data caches. On by default: with
+# them off, the same engine in OCRAM costs 87.2% of budget instead of 36.0%.
+# TCM bypasses the caches, so this only affects OCRAM and flash. Kept as a
+# feature so it can be switched off to reproduce the measurement, and because
+# adding a DMA peripheral (SDIO, SAI DMA) means auditing coherency first.
+cache = []
 
 # NOTE ON VERSIONS
 #

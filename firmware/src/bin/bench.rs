@@ -740,6 +740,8 @@ fn report(
 /// a constant zero, which looks exactly like an implausibly fast engine.
 fn enable_cycle_counter() {
     let mut core = cortex_m::Peripherals::take().expect("core peripherals already taken");
+    #[cfg(feature = "cache")]
+    firmware::enable_caches(&mut core.SCB, &mut core.CPUID);
     core.DCB.enable_trace();
     // The DWT block carries the lock-access register; writing the key is a
     // no-op on cores whose DWT is not locked.

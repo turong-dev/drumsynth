@@ -28,6 +28,14 @@ where
     E: DeviceEngine<N>,
     <E::Slot as Slot<N>>::Id: DeviceModel<N>,
 {
+    // First, before anything touches bulk data or the audio interrupt is
+    // unmasked. This is what makes an engine in OCRAM affordable.
+    #[cfg(feature = "cache")]
+    {
+        let mut core = cortex_m::Peripherals::take().expect("core peripherals already taken");
+        crate::enable_caches(&mut core.SCB, &mut core.CPUID);
+    }
+
     let board::Resources {
         mut gpio2,
         mut pins,
