@@ -91,14 +91,20 @@ use teensy4_bsp::board;
 const CORE_HZ: f32 = 600_000_000.0;
 
 /// The engine + its send-FX buffers (~256 KB for the delay line + reverb
-/// tanks) live in OCRAM via a `.uninit` static, *not* on the stack: the
+/// tanks) live in DTCM via a plain `.bss` static, *not* on the stack: the
 /// 16 KB stack configured by `t4link.x` cannot hold it, and Phase 5 grew
 /// the engine past the point where a stack-allocated local was viable.
+///
+/// DTCM rather than the `.uninit` OCRAM this used to use. OCRAM sits behind
+/// the AXI bus; DTCM is zero-wait-state, and `t4link.x` aliases `REGION_BSS`
+/// to it. The engine is 269,056 bytes against 320 KB of DTCM, so it fits with
+/// roughly 29 KB to spare once the 16 KB stack and the rest of `.bss` are
+/// accounted for -- tight, but it is the linker that enforces it, and a build
+/// that does not fit fails to link rather than misbehaving at run time.
 /// Initialized below via [`DrumEngine::new_in_place`], not
 /// `MaybeUninit::write(DrumEngine::new())` — see the comment at the call
 /// site. Doing the write from a single-threaded `main` is sound here — the
 /// bench is run-once with interrupts managed by `imxrt_log`.
-#[link_section = ".uninit"]
 static mut ENGINE_BUF: core::mem::MaybeUninit<DrumEngine> = core::mem::MaybeUninit::uninit();
 
 /// Cycles available per block before the audio callback misses its deadline.
