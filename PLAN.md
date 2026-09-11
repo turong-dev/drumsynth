@@ -1026,7 +1026,11 @@ estimated CM7 cycles/sample @ 600 MHz). Unit tests verify init, idle
 silence, and triggered output. Cross-compile to `thumbv7em-none-eabihf`
 requires `arm-none-eabi-g++` or `clang++` (not exercised on this host).
 
-#### Phase 13.5 — Device #2: `mi-drum`
+#### Phase 13.5 — Device #2: `mi-drum` (voice stage only)
+
+This phase replaces the **voice** and nothing else; the rest of the
+chain stays the stock Rust strip. Substituting the other stages is
+Phase 14, and `mi-drum` is not finished until that phase lands.
 
 Catalog from `mi-dsp` wrappers — each Plaits model as its own machine
 (~16) plus Peaks BD/SD/HH (~3), breadth bench-gated. Macros map to MI
@@ -1064,6 +1068,488 @@ a device-family doc with the "add a device" checklist.
 Slot indices and the CC map (binary ABI), the firmware workspace
 exclusion, the bench-gating culture, `deny(unsafe_code)` in core +
 device crates, and the strict determinism contract for the drum device.
+
+### Phase 14 — Stage substitution: MI processing stages
+
+*Goal:* make `mi-drum` Mutable end-to-end. Phase 13.5 replaced the **voice**
+and stopped there; every stage downstream of it is still the stock Rust one.
+Phase 14 gives each stage of the track chain a catalog of MI alternatives,
+selectable per track, chosen for creative range rather than for parity with
+what the stage already does.
+
+#### The gap this closes
+
+Phase 13.5 specified "each Plaits model as its own machine", and that is what
+shipped: `MiSlot` wraps a Plaits voice, and `Track::tick` (`core/src/track.rs`)
+then runs the unchanged chain
+
+```text
+slot.tick() -> AhdEnv -> fast::soft_clip(drive) -> core Svf -> level -> pan
+```
+
+So the MI content of `mi-drum` is one stage out of five. The vendored tree
+already carries stage-level components — `LowPassGate`, `LPGEnvelope`,
+`Resonator`, `Overdrive`, the `noise/` family, `fx_engine` — that nothing
+references. Phase 14 is the phase that uses them.
+
+This is a *different axis of breadth* from Phase 13.5. That phase grows the
+machine list; this one grows what any machine can be put through. Sixteen
+voices times a handful of stage choices is the actual catalog.
+
+#### Decision: the mi-drum strip is block-rate
+
+Every MI stage class is written block-wise — `LowPassGate::Process(…, size)`,
+`Resonator::Process(…, size)`, `Overdrive::Process(…, size)` — while
+`Track::tick()` is per-sample. The settled "block-rate FFI only" rule makes
+those two irreconcilable as they stand, so `mi-drum` gets its own block path:
+
+The unit is a **segment**: a run of the engine block between timed-event
+offsets. Not a fixed 24 samples — that cannot be bit-identical, and the reason
+is worth stating because it is easy to miss.
+
+`Engine::process_dry_wet` drains `TimedQueue` *inside* its sample loop, firing
+triggers at exact offsets, and `Track::trigger` resets the amp envelope and
+filter there and then. `MiSlot::render_if_needed` separately consumes
+`trigger_pending` at 24-sample voice boundaries whose phase drifts against the
+32-sample engine block. Pre-rendering a whole block of anything would move a
+trigger's effect to the next boundary.
+
+Between two events, though, nothing resets. So:
+
+```text
+for each segment (bounded by event offsets, at most BLOCK long):
+    fill dry[..n] from slot.tick()      unchanged — preserves voice phasing
+    env.process(dry, n)                 1 call    stage selector
+    colour.process(dry, n)              1 call    stage selector
+    drive.process(dry, n)               1 call    stage selector
+    level / pan / sends                 Rust, sample-wise over the segment
+```
+
+Hoisting the per-sample strip into a per-stage loop over a segment is the same
+arithmetic in the same order — bit-identical by construction, not by luck.
+Typical blocks carry zero or one event, so a segment is usually the full 32.
+MI's stage classes all take `Process(…, size)`, so a variable length is native
+to them.
+
+What this costs:
+
+- `MiSlot`'s buffer-and-drip `tick()` **stays**. The voice is already
+  block-rate internally; `tick()` is a buffer read, and leaving it alone is
+  precisely what preserves the trigger phasing. What goes block-rate is the
+  *strip*, which is the part Phase 14 replaces.
+- Per-sample behaviour currently living in `Track::tick` — the choke fade-out
+  ramp and the retrigger de-click crossfade — becomes a sample-wise pass over
+  the segment buffer. Same maths, same `CHOKE_SAMPLES`/`DECLICK_STEP`
+  constants, different loop.
+- `core` grows a segment-processing path alongside `tick`; the drum device
+  keeps using `tick` and is untouched.
+
+Rejected: per-sample FFI (breaks the settled rule, call overhead x stages x
+samples); fixed 24-sample strip blocks (cannot be bit-identical, per above);
+and hand-porting the MI stages to Rust (loses the upstream code that is the
+point of the device — though see *Shared stages* below for the one case where
+a port is still the right answer).
+
+#### Stage catalog
+
+Each row is a stage of the chain with its core default and the MI options that
+replace it. Selector value 0.0 is always the core default, so an untouched
+sound renders bit-identically to Phase 13.5.
+
+| Stage | Core default | MI options | Source |
+|---|---|---|---|
+| **Source** | Plaits engine (13.5) | Dust, ClockedNoise, Particle, FractalRandom, SmoothRandom as *modulation or excitation* sources feeding the voice | `plaits/dsp/noise/` |
+| **Env** | `AhdEnv` | `LPGEnvelope` (vactrol model — the non-linear decay that makes Plaits sound like Plaits), `DecayEnvelope`, Peaks `Excitation` (pulse/click, for exciting a resonator) | `plaits/dsp/envelope.h`, `peaks/drums/excitation.h` |
+| **Colour** (filter) | core `Svf` TPT | stmlib `Svf` / `NaiveSvf` / `ModifiedSvf` (different non-linearities, cheaper or dirtier), Peaks `Svf`, **`Resonator`** (24-mode modal bank — the filter becomes a struck object), **`String`** (Karplus-Strong; the filter becomes a plucked string) | `stmlib/dsp/filter.h`, `peaks/drums/svf.h`, `physical_modelling/resonator.h`, `string.h` |
+| **Env+Colour fused** | — | **`LowPassGate`** — Buchla LPG, one stage doing both. Selecting it forces the other selector to `Fused` | `plaits/dsp/fx/low_pass_gate.h` |
+| **Drive** | `fast::soft_clip` | `Overdrive` (gain-compensated), `SampleRateReducer` (bitcrush/SRR), stmlib `SoftLimit`, `Limiter` | `plaits/dsp/fx/overdrive.h`, `sample_rate_reducer.h`, `stmlib/dsp/dsp.h`, `limiter.h` |
+| **LFO** | core `Lfo` | `CosineOscillator` (cheap recursive), Peaks `Lfo` (needs vendoring), Peaks `MultistageEnvelope` as a loopable envelope-LFO (needs vendoring) | `stmlib/dsp/cosine_oscillator.h`, *(not yet vendored)* |
+| **Send FX** | core `SendFx` | `FxEngine` + `Diffuser` (the Rings/Clouds reverb kernel), `Ensemble` (chorus) | `plaits/dsp/fx/fx_engine.h`, `diffuser.h`, `ensemble.h` |
+| **Param smoothing** | `MACRO_SMOOTH_K` one-pole | `ParameterInterpolator` (per-block linear ramp — what every MI stage expects on its inputs) | `stmlib/dsp/parameter_interpolator.h` |
+
+The headline combinations this unlocks, as a sanity check that the catalog is
+worth the work: *any Plaits engine -> LPG* (the Plaits patch that Plaits itself
+can't make, because Plaits fixes the LPG to its own voice); *Excitation ->
+Resonator* (Rings-style struck bodies with a drum trigger); *noise -> String*
+(plucked-string percussion); *any voice -> SampleRateReducer* (the Peaks/
+chiptune degradation path).
+
+#### Stage selection surface
+
+Four selectors are needed, and `mi-drum` has seven macro slots currently `resv`
+— 8, 9, 15, 22, 23, 24, 25. Assign four, leave three:
+
+| Slot | New const | Role |
+|---|---|---|
+| 8 (FILT 0) | `SLOT_STAGE_COLOUR` | Colour-stage algorithm, quantised over the device's stage enum |
+| 9 (FILT 1) | `SLOT_STAGE_COLOUR_B` | Second colour param — LPG `hf_bleed`, resonator brightness, string damping |
+| 15 (FILT 7) | `SLOT_STAGE_ENV` | Env-stage algorithm |
+| 22 (TRACK 6) | `SLOT_STAGE_DRIVE` | Drive-stage algorithm |
+| 24 (MOD 0) | `SLOT_STAGE_LFO` | LFO-stage algorithm (both LFOs share it) |
+
+Rules that make this safe against the CC-map ABI:
+
+- **0.0 means "the stage that is there today."** Reserved slots already default
+  to 0.0, so no existing sound, kit, or golden WAV changes.
+- The consts are *additive* — no existing slot moves, so `CC_TRACK_BASE + flat`
+  is stable and the drum device keeps ignoring these slots as `resv`.
+- The existing continuous FILT slots (`SLOT_STRIP_CUT`, `SLOT_STRIP_RESO`,
+  `SLOT_STRIP_ATK/HOLD/DEC`) are **reinterpreted by the selected stage** rather
+  than duplicated. Cutoff drives the LPG frequency or the resonator's
+  fundamental; reso drives Q or structure; ATK/HOLD/DEC drive whichever of the
+  chosen envelope's segments exist.
+
+That reinterpretation forces one trait change: `DeviceModel::macro_info(self)`
+takes only the machine id, so the grid cannot relabel a knob when the stage
+changes. It becomes a function of the track's full stage configuration, not the
+machine alone — either `macro_info(&self, stages: StageConfig)` or the grid
+reads labels off the `Track`. This is the one non-additive part of Phase 14 and
+it lands first, in 14.0.
+
+#### Shared stages
+
+Stage substitution is `mi-drum`'s identity and the work stays in that device —
+`core`'s strip and the drum device's strict determinism contract are not
+touched. The one exception worth taking: where an MI stage is small enough to
+transliterate cleanly to per-sample Rust (`LPGEnvelope` is ~40 lines,
+`Overdrive` ~20), a Rust port in `core/dsp/` also makes it available to the
+drum device's 15 machines through the existing `tick` path. Treat that as
+opportunistic, not as a requirement of any sub-phase.
+
+#### Vendor additions needed
+
+`peaks/modulations/` is not vendored — only `peaks/drums/` is. The LFO row of
+the catalog needs `lfo.h` and `multistage_envelope.h` added under the existing
+vendoring decision (copy + LICENSE, not submodules). Confirm the license header
+on each file before adding.
+
+#### Phase 14.0-pre — Gate infrastructure (DONE, 2026-09-11)
+
+14.0's gate is a bit-identity comparison, and when Phase 14 was specified
+neither half of that existed: there was no way to render mi-drum at all, and
+`cargo test --workspace` was red. Built first, because a gate you cannot run is
+not a gate.
+
+- [x] **Plaits buffer pool made thread-safe.** It was a `static mut` bitmap with
+      a comment asserting single-threaded use, which the test harness was
+      already violating — a live data race, not just the "pool exhausted" panic
+      it surfaced as. Now an array of `AtomicU32` words claimed by
+      compare-exchange. `AtomicU64` does not exist on `thumbv7em-none-eabihf`,
+      hence words rather than one integer.
+- [x] **Pool sized per target.** Firmware keeps 8 buffers; host builds get 128.
+      Thread-safety alone does not fix exhaustion — the harness constructs a
+      whole 6-voice engine per test, in parallel. 16 KB a buffer, so 128 KB on
+      target (the number the RAM budget already assumes) and 2 MB on host.
+- [x] **`render mi-drum`** renders the baseline: one hit per catalogued machine
+      on track 0, then the default kit over a two-bar pattern with the strip
+      exercised (filter on per track, drive, pan spread, sends, a real AHD
+      attack). The second half is the point — a bare-kit baseline leaves the
+      filter `Off` and the drive at unity and would happily agree with a broken
+      restructure.
+- [x] **Baseline pinned as a digest, not a WAV.** `*.wav` is gitignored, so the
+      committed artefact is an FNV-1a digest over the sample bits, asserted by
+      `mi_drum_baseline_is_unchanged` in `render`. `cargo test` *is* the gate.
+- [x] `mi_drum_in_place` un-gated from the `live` feature (it was dead code),
+      `DEFAULT_KIT` exported, and the stale comment pointing at a
+      "known-issue note in PLAN.md" that never existed removed.
+
+##### Finding: `stmlib::Random` is process-global
+
+Getting the baseline to reproduce turned up a determinism bug worth recording,
+because it is not obvious and it bites exactly where the plan cares.
+
+`stmlib::Random` is **one static LCG for the whole library** — a single
+`rng_state_`, not one generator per voice. Every Plaits engine that touches
+noise (Noise, Particle, HiHat, SnareDrum, BassDrum) draws from it. So:
+
+- A render is only reproducible from a **known seed**. `mi_dsp::seed_random`
+  now exposes that, re-exported as `mi_drum_engine::seed_random`, and the
+  baseline render calls it.
+- Two renders **running concurrently interleave their draws** and both diverge.
+  Seeding does not help; only not overlapping does. That is why the baseline is
+  a single test doing a single render rather than the natural split into
+  "is it unchanged" and "is it non-silent" — the split renders twice and the
+  digest moves on every run.
+- On target this is currently harmless: one engine, one render, fixed track
+  order. It stops being harmless if mi-drum ever renders tracks concurrently,
+  and it means voice-to-voice noise is order-dependent rather than per-voice.
+- Investigated and *not* the cause, recorded so nobody re-runs them: recycled
+  pool buffers (clearing on hand-out changes nothing) and the uninitialised
+  `alloc` behind `mi_drum_in_place` (`alloc_zeroed` changes nothing).
+
+The real fix is a per-voice generator, which means patching vendored code and
+carrying the upstream drift. Not done — deliberately parked until something
+needs it.
+
+##### Known issue: three machines are silent
+
+`SixOp1`/`SixOp2`/`SixOp3` (catalogue indices 2–4) render at ~-84 dBFS — peak
+`0.000061`, the 16-bit LSB. Confirmed at the raw `PlaitsVoice` level via
+`cargo run -p mi-dsp --example preview`, so it predates mi-drum and is not a
+device or baseline problem. Ruled out: the factory patch banks are present in
+`resources.cc` and compiled; `UserData::ptr()` correctly returns `NULL` so the
+`fm_patches_table` fallback in `voice.cc` applies; the buffer allocator is not
+exhausted (engines share the scratch region by design, `allocator->Free()`
+between each); and `p.accent` defaults to `0.8f` rather than zero.
+
+The baseline pins them as-is. Fixing them changes the digest on purpose and
+gets re-pinned with that change — it is a separate investigation, not a
+blocker.
+
+##### Still open
+
+- ~~No ARM toolchain on the dev host~~ — **resolved 2026-09-11.** Arm GNU
+  Toolchain 15.3.rel1 via `brew install --cask gcc-arm-embedded`, which
+  installs outside the usual prefixes, so PATH needs
+  `/Applications/ArmGNUToolchain/15.3.rel1/arm-none-eabi/bin`.
+
+  Do **not** use the Homebrew formula `arm-none-eabi-gcc`: it ships a compiler
+  with no C library (no newlib, no `libc.a`, no C++ headers), so the vendored
+  code dies on `include_next <stdint.h>`. There is no `newlib` formula to add
+  alongside it, and `-ffreestanding` does not rescue it because MI's C++ leans
+  on `<algorithm>` and `<cmath>`. The cask bundles newlib; the formula does
+  not. This cost an hour, hence the note.
+
+  Three build fixes fell out of actually running the cross-build:
+
+  | symptom | cause | fix |
+  |---|---|---|
+  | `-Wno-unused-local-typedef` ignored, vendored `STATIC_ASSERT` warns on every file | that is the clang spelling; GCC wants the plural | pass both, `flag_if_supported` probes each |
+  | object tagged `Tag_CPU_name: "7E-M"`, not Cortex-M7 | cc-rs injects `-march=armv7e-m` ahead of our flags, and an explicit `-march` takes the architecture decision away from `-mcpu` | add `-mtune=cortex-m7` explicitly. The FPU and ABI were already correct — `readelf -A` confirms `FPv5/FP-D16` and `VFP registers` — so this is about the scheduling model, which no tag will show |
+  | `rust-lld: unable to find library -lstdc++` | cc-rs defaults to linking a C++ stdlib that does not exist bare-metal | `cpp_link_stdlib(None)` on the target branch. Links with zero undefined C++ ABI symbols — not even `__cxa_pure_virtual` |
+
+  With those, `cargo build -p mi-dsp --target thumbv7em-none-eabihf` and
+  `cargo build --release --bin mi-drum --features mi-drum` (from `firmware/`,
+  which has its own `.cargo/config.toml` — `--manifest-path` from the root
+  silently builds for the *host* and fails in `bsp::rt`) both succeed.
+
+  First size numbers for the mi-drum image: text 293,700, data 2,448,
+  **bss 503,248**. The bss is the number to watch — `MiDrumEngine` is 343 KB of
+  it and the Plaits buffer pool another 131 KB. Phase 14's stage objects land
+  on top of that, which is what the per-sub-phase RAM assert is for.
+
+#### Phase 14.0-pre — mi-drum bench (DONE, 2026-09-11)
+
+Phase 13.5 listed a bench scenario as a deliverable and it was never built:
+`firmware/src/bin/bench.rs` had **zero** references to mi-drum, so all eight
+scenarios were `DrumEngine` and **13.5's own gate ("bench under ~70%") had
+never been run** — not just Phase 14's.
+
+Built as a separate binary, `firmware/src/bin/mi-bench.rs`, behind the same
+`mi-drum` feature. Not folded into `bench.rs`: the drum image is 301 KB of
+`.bss` and the mi-drum image 503 KB, which does not fit together, and keeping
+them apart means this cannot perturb the numbers every file in
+`bench-results/` was measured with. `tools/benchloop.py` gains `--bin`
+(default `bench`), which also picks the per-binary header line and cargo
+features.
+
+**Measured, 6 tracks, 600 MHz, block 32, 400,000-cycle budget:**
+
+| scenario | peak cy | % budget |
+|---|---|---|
+| idle | 29,402 | 7.4% |
+| 3 sounding | 133,128 | 33.3% |
+| **6 sounding** | **262,515** | **65.6%** |
+| 6 FX idle | 261,975 | 65.5% |
+| 6 + FX | 261,999 | 65.5% |
+
+Reproducible: a second flash moved the worst case by 21 cycles (0.0%).
+
+**Phase 13.5's gate passes — but only just, and that is the headline.**
+65.6% against a ~70% ceiling is 4.4 points of headroom, and Phase 14 proposes
+to add an envelope, a filter and a drive stage on top of every one of those
+voices. Against the drum device:
+
+| | drum (8 tracks) | mi-drum (6 tracks) |
+|---|---|---|
+| worst case | 134,858 (33.7%) | 262,515 (65.6%) |
+| per voice per block | 16,857 cy | 43,752 cy |
+
+**A Plaits voice costs ~2.6× a drum machine voice.** That is the number that
+should govern Phase 14's scope: the stage catalog is not being added to a
+device with room to spare.
+
+The FX scenarios measure ~nothing (`6 sounding` and `6 + FX` differ by 516
+cycles, 0.1%). Not a fault in the new bench — the drum device shows the same
+thing, `8 sounding` and `8 FX idle` being bit-identical at 134,858. The tanks
+advance every block whether or not sends are routed, so the worst-case
+scenario already pays for them and "FX idle" isolates a cost that turns out to
+be nil. Worth knowing before anyone reads a Phase 14 FX delta as free.
+
+**Memory is the tighter constraint, not cycles:**
+
+| region | used | capacity | % |
+|---|---|---|---|
+| ITCM | 183,588 | 196,608 | **93.4%** |
+| DTCM | 165,048 | 327,680 | 50.4% |
+| OCRAM | 457,944 | 524,288 | **87.3%** |
+| FLASH | 8,192 | 2,031,616 | 0.4% |
+
+ITCM has **13 KB of instruction memory left**, and every MI stage class added
+in Phase 14 is more `.text`. OCRAM has 66 KB, and `String` alone is ~5 KB per
+track — 30 KB across six. DTCM is the only region with real room, and
+`MiDrumEngine` cannot go there (343 KB against 320 KB). So the per-sub-phase
+RAM assert specified above is not bookkeeping: on current numbers Phase 14
+runs out of ITCM before it runs out of budget.
+
+One measurement caveat specific to this device: the Plaits voices are
+block-rate, rendering 24 samples at a time against a 32-sample engine block,
+so per-block cost is genuinely uneven in a way the drum device's is not.
+`peak` is the honest number here even more than usual. The run-to-run drift on
+`idle` and `3 sounding` (+40, +104 cycles) is larger than the harness's usual
+4-cycle noise floor, which is consistent with the shared-`stmlib::Random`
+finding above — the noise-using engines do not draw an identical sequence
+across runs.
+- **`peaks/` is vendored but never wrapped.** `mi-dsp/build.rs` compiles plaits
+  + stmlib only; there is no shim and no Rust wrapper. Phase 13.5's "plus Peaks
+  BD/SD/HH (~3)" never landed, so **Phase 14.1 inherits the entire Peaks build
+  path** as a prerequisite of using `Excitation` — budget for it there.
+- **`all_bd_classic_knobs_are_monotonic` fails**, on the *drum* device, and was
+  being masked by the mi-drum failure above. Seven knobs report "dead zone":
+  STRIP.CUT, STRIP.RESO, STRIP.HOLD, STRIP.DEC, LFO1.RATE, LFO1.DST,
+  LFO2.RATE. All seven are knobs with no audible effect at their defaults —
+  cutoff and resonance with `f_mode: SvfMode::Off`, LFO rate with depth 0, hold
+  and decay past the measurement window — which reads as a fault in the check's
+  methodology rather than in the engine. Unresolved either way.
+
+#### Phase 14.0-pre — FlexRAM rebalance (DONE, 2026-09-11)
+
+The 93.4% ITCM figure above prompted a look at what was actually consuming it,
+and the answer was not what the bench implied.
+
+**First, 93.4% was the bench, not the firmware.** The production `mi-drum`
+image is `.text` 171,748 — 87.4% of the old ITCM. The bench carries ~11.8 KB
+the firmware does not: `core::fmt::float::float_to_decimal_common_shortest::<f32>`
+(8,318 B) and `..._exact` (6,150 B), pulled in by `log::info!("{:.1}%")`.
+
+**Second, of that 171,748, the vendored C++ is 73,960 — 43.1%.** Largest
+contributors: `SixOpEngine` 6,312, `VirtualAnalogEngine` 5,438,
+`AdditiveEngine` 4,654, `Voice` 4,172, `ChiptuneEngine` 4,102. Note the
+largest is the one whose three machines render silent — but `Voice::Init`
+registers all 24 engines unconditionally, so trimming the catalog does not
+free the code without patching vendored `voice.cc`.
+
+**Third, and the actual fix: the FlexRAM split was the wrong shape.**
+`teensy4-bsp-0.6.0/build.rs` hardcodes ITCM 6 / DTCM 10 banks. That suits a
+device whose engine lives in DTCM. `MiDrumEngine` is ~343 KB and cannot, so it
+sits in OCRAM and left half of DTCM idle while the Plaits C++ ran ITCM out:
+
+| | capacity | used | |
+|---|---|---|---|
+| ITCM 6 banks | 196,608 | 171,748 | **87.4%** |
+| DTCM 10 banks | 327,680 | 165,048 | 50.4% |
+
+`firmware/build.rs` now generates the linker script itself via
+`imxrt_rt::RuntimeBuilder`, identical to the BSP's except **ITCM 8 / DTCM 8**,
+under the name `drumsynth-link.x` (`.cargo/config.toml` selects it by name;
+the BSP still emits its unused `t4link.x`).
+
+**Measured after the change:**
+
+| device | ITCM | DTCM | OCRAM | worst case |
+|---|---|---|---|---|
+| mi-drum | 183,588 / 262,144 (**70.0%**) | 165,048 / 262,144 (63.0%) | 457,944 / 524,288 (87.3%) | 65.6%, **unchanged** (+29 cy) |
+| drum | 102,004 / 262,144 (38.9%) | 33,964 / 262,144 (13.0%) | 304,008 / 524,288 (58.0%) | 36.0%, **+1.2%** |
+
+mi-drum pays nothing and gains 90 KB of ITCM headroom instead of 25 KB.
+
+**What it cost the drum device.** Its engine (269 KB) does not fit in 8 DTCM
+banks, so it moved back to `.uninit` OCRAM — the placement it had before the
+optimisation pass. That is a measured **+1.2%** (worst case 35.6% → 36.0%),
+exactly the number the optimisation pass predicted for this move once the L1
+caches were on. It is affordable at 36%, and it is *only* affordable because
+the caches are enabled: with the `cache` feature off, this is the 87.2%
+configuration again. The `#[link_section = ".uninit"]` comments in
+`bin/drum.rs` and `bin/bench.rs` carry that warning.
+
+**OCRAM is now mi-drum's binding region**, at 87.3% with 66 KB free — and
+Phase 14's stage objects live in the engine struct, which is `.uninit`, which
+is OCRAM. If that runs out, the next lever is a three-way split: FlexRAM can
+assign banks to OCRAM as well, so ITCM 8 / DTCM 6 / OCRAM 2 adds 64 KB of
+OCRAM and leaves DTCM at 84% — tight but sufficient. Not done; noted so the
+option is not rediscovered under pressure.
+
+`tools/benchloop.py`'s `REGIONS` capacities were hardcoded to the BSP's 6/10
+split and are updated to 8/8. **Results in `bench-results/` from before this
+change state ITCM and DTCM percentages against the old capacities** — the
+`used` byte counts stay comparable, the percentages do not.
+
+#### Phase 14.0 — `MiStrip` skeleton
+
+Segment-based strip with **zero new stages**: the segment loop, the
+sample-wise choke/de-click passes over the segment buffer, and the
+`macro_info` widening. Every selector exists and every selector is pinned to 0.
+
+*Gate:* `mi-drum` output bit-identical to the pre-14.0 render, bench delta
+within the 50-cycle noise floor. This proves the restructure is free before any
+stage is added.
+
+#### Phase 14.1 — Env stage
+
+`LPGEnvelope`, `DecayEnvelope`, `Excitation`. First real selector.
+
+Carries a prerequisite the rest of Phase 14 does not: `Excitation` is Peaks
+code, and `peaks/` is vendored but has never been compiled — no entry in
+`build.rs`, no shim, no wrapper. This sub-phase builds that path. Sequence the
+two Plaits envelopes first so the selector mechanism is proven before the build
+work lands on top of it.
+
+#### Phase 14.2 — Colour stage
+
+stmlib SVF variants first (cheap, proves the selector), then `Resonator`, then
+`String`. `LowPassGate` lands here as the fused Env+Colour option, including
+the mutual-exclusion rule between the two selectors.
+
+#### Phase 14.3 — Drive stage
+
+`Overdrive`, `SampleRateReducer`, `SoftLimit`, `Limiter`.
+
+#### Phase 14.4 — LFO stage
+
+Vendor `peaks/modulations/`, then `CosineOscillator`, Peaks `Lfo`,
+`MultistageEnvelope`-as-LFO.
+
+#### Phase 14.5 — Source/excitation stage
+
+`plaits/dsp/noise/` as excitation and modulation sources — the family that
+makes *Excitation -> Resonator* and *noise -> String* reachable.
+
+#### Phase 14.6 — Send FX stage
+
+`FxEngine` + `Diffuser` reverb and `Ensemble` as alternatives to core `SendFx`.
+Engine-wide rather than per-track, so it gets a global selector, not a macro
+slot. Sequence this last: it is the only row that touches the send bus, and the
+Phase 12 measurements say the send FX are where the budget actually goes.
+
+#### Gates
+
+Bench and RAM are gated **per sub-phase**, not once at the end, because the
+stage catalog is exactly the kind of breadth that creeps:
+
+- Every sub-phase adds a bench row for its own worst case — all 6 tracks on the
+  most expensive option that sub-phase introduced — and reports it as a delta
+  against 14.0. A stage that cannot be afforded on all 6 tracks at once is
+  documented as such, not silently shipped.
+- `6 tracks x every stage at its most expensive` is the standing worst case and
+  stays under the Phase 13.5 ceiling of ~70%.
+- RAM asserted in the bench, as Phase 13.4 does. `MiDrumEngine` is already
+  343,296 bytes against 320 KB of DTCM, so it lives in cached OCRAM and stage
+  objects grow it further: `Resonator` is ~1 KB/track, but `String` is two
+  delay lines totalling ~5 KB/track (~30 KB across 6). Per the placement rule,
+  delay-line access is sequential and cached OCRAM is the right home for it —
+  but the assert is what will catch it if a stage turns out to be
+  data-dependent instead.
+
+#### Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Block restructure changes the sound | 14.0 is a pure-refactor phase with a bit-identity gate before any stage exists |
+| Stage x machine combinatorics outrun testing | Property tests (no NaN, decays to zero, output <= 1) run over the *cross product* of machine x stage, not per stage |
+| `macro_info` widening breaks the grid | The one non-additive change, landed alone in 14.0 with the grid updated in the same commit |
+| Catalog breadth creeps past budget | Per-sub-phase bench rows with published deltas, not one gate at the end |
+| Fused LPG confuses the selector model | Explicit `Fused` state on the other selector; the grid shows the knob as owned by the fused stage |
+| Peaks vendoring widens the license surface | Same MIT/CC terms as the existing vendored tree; verify per file when `peaks/modulations/` is added |
 
 ## Design guidance received (2026-08-10)
 
@@ -1130,6 +1616,15 @@ velocity→macro are done; preset save/load to SD is still open (Phase 10).
 | Mutable Instruments source | vendored into `mi-dsp/vendor/`, not submodules |
 | MI FFI boundary | block-rate only; no per-sample extern calls |
 | MI catalog growth | bench-gated; wrap one engine, measure `8×` before breadth |
+| MI stage substitution | in scope as Phase 14 and the point of the device: every stage of the `mi-drum` chain (env, filter, drive, LFO, source, send FX) gets a catalog of MI alternatives, selectable per track. Phase 13.5's voice catalog is one axis of breadth; this is the other, and 16 voices × a handful of stage choices is the real catalog |
+| mi-drum strip rate | **block-rate over event-bounded segments.** Every MI stage class is written block-wise (`Process(…, size)`) and `Track::tick` is per-sample, so the mi-drum strip processes a buffer instead. The unit is a *segment* — a run of the engine block between timed-event offsets — not a fixed 24 samples: `Engine::process_dry_wet` drains `TimedQueue` inside the sample loop and `Track::trigger` resets the amp envelope and filter mid-block, so any fixed-size pre-render would move triggers and break bit-identity. Between events nothing resets, so hoisting the per-sample strip into a per-stage loop over the segment is the same arithmetic in the same order. Typical blocks carry zero or one event, so a segment is usually the full 32. The **voice stays on its existing `tick()` drip** — it is already block-rate internally, and leaving it alone is what preserves the 24-against-32 trigger phasing. Rejected: per-sample FFI (breaks the block-rate rule), fixed 24-sample strip blocks (cannot be bit-identical), wholesale hand-porting to Rust (loses the upstream code that is the point) |
+| Stage selection surface | four selectors on slots currently `resv` in `mi-drum` — 8 (colour), 9 (colour param B), 15 (env), 22 (drive), 24 (LFO). **Selector 0.0 = the stage that is there today**, so the CC-map ABI stays additive and no existing sound or golden WAV changes. The continuous FILT slots are *reinterpreted* by the selected stage rather than duplicated |
+| `DeviceModel::macro_info` | widened to take the track's stage configuration, not just the machine id — the one non-additive change in Phase 14, landed alone in 14.0 so the grid can relabel a knob when its stage changes |
+| Fused stages | `LowPassGate` claims both the env and colour stages; selecting it forces the other selector to `Fused`. The stage model has to allow one option to own two slots |
+| Stage substitution blast radius | confined to `mi-drum`. `core`'s per-sample strip and the drum device's strict determinism contract are untouched; small MI stages (`LPGEnvelope`, `Overdrive`) may *opportunistically* get Rust ports in `core/dsp/` for the drum device, but no sub-phase depends on it |
+| Plaits noise determinism | `stmlib::Random` is one process-global LCG shared by every engine, not one per voice. A render reproduces only from a known seed (`mi_dsp::seed_random`), and two renders running concurrently interleave their draws and both diverge — seeding does not fix that, not overlapping does. Harmless on target today (one engine, fixed track order); a per-voice generator is the real fix and is parked rather than taken, because it means patching vendored code |
+| mi-drum baseline artefact | a committed FNV-1a **digest**, not a WAV — `*.wav` is gitignored. Asserted by `mi_drum_baseline_is_unchanged` in `render`, so `cargo test` is the gate. Reproduce the audio with `cargo run -p render -- mi-drum` |
+| Peaks vendoring scope | widened by Phase 14.4 — `peaks/modulations/` (`lfo.h`, `multistage_envelope.h`) joins the vendored `peaks/drums/`, licenses verified per file |
 
 ## Hardware
 
@@ -1201,12 +1696,19 @@ Still on the table, not done because the budget goal was met without them:
 - `bin/mi-drum.rs` stays in OCRAM, and that is now fine. `MiDrumEngine` is
   343,296 bytes against 320 KB of DTCM so it can never fit, but with the
   caches on it pays roughly 1.2% for being there rather than the 51 points it
-  used to. The FlexRAM rebalance this file previously called for (ITCM 4 banks
-  / DTCM 12, via `imxrt-rt`'s `RuntimeBuilder`) is **not needed**, and neither
-  is splitting `SendFx` out of `Engine`.
-- DTCM is at 91.6% because the drum engine lives there for a 0.4-point gain.
-  If anything else ever needs DTCM, moving the engine back to OCRAM is a
-  one-line change costing a measured 1.2%.
+  used to. Splitting `SendFx` out of `Engine` is not needed.
+
+  The FlexRAM rebalance is — but in the *opposite direction* to what this file
+  originally called for. The note here proposed ITCM 4 / DTCM 12, to give the
+  drum engine more DTCM. Phase 14 went to **ITCM 8 / DTCM 8** instead: once
+  mi-drum's vendored Plaits C++ entered the picture, ITCM became the binding
+  constraint and DTCM the idle one. See the Phase 14.0-pre rebalance section.
+  The drum engine moved back to OCRAM as part of it, paying the 1.2% this
+  paragraph already priced.
+- ~~DTCM is at 91.6% because the drum engine lives there for a 0.4-point
+  gain.~~ Superseded: the engine moved back to OCRAM in Phase 14.0-pre, and
+  the one-line change did cost the predicted 1.2% (35.6% → 36.0%). DTCM for
+  the drum device is now 13.0% of 256 KB.
 
 ### Placement rule
 
