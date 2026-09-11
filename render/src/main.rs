@@ -29,7 +29,6 @@ use drum_engine::machines::{
     MachineId, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_5, SLOT_MACH_7,
 };
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE, TRACKS};
-#[cfg(feature = "live")]
 use mi_drum_engine::MiDrumEngine;
 
 mod measure;
@@ -66,6 +65,23 @@ enum Command {
         /// Number of bars.
         #[arg(long, default_value_t = 2)]
         bars: usize,
+    },
+    /// Render the mi-drum baseline to a WAV file.
+    ///
+    /// A fixed, deterministic pass over the mi-drum device, in two halves:
+    /// one hit per catalogued Plaits machine on track 0, then a six-track
+    /// pattern on the default kit with the strip fully exercised (filter on,
+    /// drive, pan spread, sends). The second half is the point — Phase 14
+    /// replaces the strip stages, and a baseline that left them at their
+    /// defaults would not notice.
+    ///
+    /// This is the reference render for Phase 14.0's bit-identity gate. It
+    /// takes no tuning arguments on purpose: a gate you can accidentally
+    /// re-parameterise is not a gate.
+    MiDrum {
+        /// Output path.
+        #[arg(short, long, default_value = "mi-drum.baseline.wav")]
+        output: String,
     },
     /// Render a retrigger/choke stress test to a WAV file.
     ///
@@ -365,8 +381,6 @@ impl MachineArg {
 ///
 /// The engine is too large for the default test thread stack, so this helper
 /// uses `alloc` + `new_in_place` instead of `MiDrumEngine::new()`.
-#[cfg(feature = "live")]
-#[allow(dead_code)] // Re-enabled by the "mi-drum" device arm once MiDrumEngine is Send.
 fn mi_drum_in_place() -> Box<MiDrumEngine> {
     use std::alloc::{alloc, Layout};
 
@@ -385,6 +399,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Render { output, bpm, bars } => {
             let samples = render_pattern(&Pattern::demo(), bpm, bars);
+            write_wav(&output, &samples)?;
+            let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
+            println!("wrote {output} ({seconds:.2}s)");
+        }
+
+        Command::MiDrum { output } => {
+            let samples = render_mi_drum_baseline();
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
@@ -1038,6 +1059,145 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
     out
 }
 
+/// Render the mi-drum baseline: every catalogued machine, then the default
+/// kit with the strip exercised.
+///
+/// Deterministic and argument-free by design. Phase 14 rebuilds the mi-drum
+/// strip as a block-rate chain, and 14.0's gate is that this render comes back
+/// byte-for-byte identical — which only means anything if the render covers
+/// the stages being rebuilt. Hence the second half: a bare kit pass would
+/// leave the filter `Off` and the drive at unity and happily agree with a
+/// broken restructure.
+fn render_mi_drum_baseline() -> Vec<f32> {
+    use mi_drum_engine::dsp::SvfMode;
+    use mi_drum_engine::{DeviceEngine, MiMachineId, StripParams, TRACKS as MI_TRACKS};
+
+    // Every Plaits engine draws noise from one process-global LCG, so the
+    // render is only reproducible from a known seed. This does not make two
+    // concurrent renders safe — they would interleave their draws — which is
+    // why the baseline test below is a single test doing a single render.
+    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+    let mut engine = mi_drum_in_place();
+    let mut out: Vec<f32> = Vec::new();
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+
+    // Half one: one hit per machine on track 0, 0.75 s apart, so every engine
+    // in the catalogue contributes to the hash.
+    let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
+    for &id in MiMachineId::ALL.iter() {
+        engine.tracks_mut()[0].load_machine(id);
+        engine.trigger(0, 1.0);
+        for _ in 0..blocks_per_hit {
+            engine.process(&mut l, &mut r);
+            for i in 0..BLOCK {
+                out.push(l[i]);
+                out.push(r[i]);
+            }
+        }
+    }
+
+    // Half two: back to the default kit, with a strip that actually does
+    // something on every track.
+    engine.load_kit(&mi_drum_engine::DEFAULT_KIT);
+
+    // (pan, level, filter mode, cutoff, Q, drive, delay send, reverb send)
+    type StripSpec = (f32, f32, SvfMode, f32, f32, f32, f32, f32);
+    let strips: [StripSpec; MI_TRACKS] = [
+        (0.00, 0.90, SvfMode::Lp, 4000.0, 0.707, 2.0, 0.00, 0.10),
+        (-0.25, 0.75, SvfMode::Hp, 180.0, 1.200, 1.4, 0.15, 0.25),
+        (0.35, 0.50, SvfMode::Bp, 6000.0, 2.000, 1.0, 0.10, 0.15),
+        (0.40, 0.55, SvfMode::Lp, 2200.0, 3.000, 1.2, 0.20, 0.30),
+        (-0.35, 0.60, SvfMode::Notch, 900.0, 1.500, 1.6, 0.25, 0.20),
+        (-0.50, 0.70, SvfMode::Lp, 3000.0, 0.707, 1.0, 0.30, 0.40),
+    ];
+
+    for (track, &(pan, level, f_mode, f_cutoff_hz, f_reso_q, drive, send_delay, send_reverb)) in
+        strips.iter().enumerate()
+    {
+        let strip = StripParams {
+            f_mode,
+            f_cutoff_hz,
+            f_reso_q,
+            // A short amp envelope with a real attack, so the strip's AHD is
+            // shaping the hit rather than passing it through.
+            amp_attack_s: 0.002,
+            amp_hold_s: 0.05,
+            amp_decay_s: 0.60,
+            drive,
+            pan,
+            level,
+            send_delay,
+            send_reverb,
+            ..StripParams::default()
+        };
+        engine.tracks_mut()[track].set_strip(&strip);
+    }
+
+    // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
+    // modal / noise / string against the default kit.
+    const PATTERN: [[bool; 16]; MI_TRACKS] = [
+        [true, false, false, false, true, false, false, false, true, false, false, true, true, false, false, false],
+        [false, false, false, false, true, false, false, false, false, false, false, false, true, false, true, false],
+        [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, true],
+        [false, false, true, false, false, false, false, true, false, false, true, false, false, false, false, false],
+        [false, false, false, true, false, false, false, false, false, true, false, false, false, false, true, false],
+        [true, false, false, false, false, false, true, false, false, false, false, false, true, false, false, false],
+    ];
+
+    let bpm = 130.0f32;
+    let samples_per_step = (SAMPLE_RATE * 60.0 / bpm / 4.0) as usize;
+    let total_steps = 2 * 16;
+    // Two seconds of tail so the last hit and the send-FX decay are captured.
+    let total_blocks = (total_steps * samples_per_step + (2.0 * SAMPLE_RATE) as usize) / BLOCK;
+
+    let mut next_step = 0usize;
+    let mut next_step_at = 0usize;
+    for block in 0..total_blocks {
+        let block_start = block * BLOCK;
+        while next_step_at < block_start + BLOCK && next_step < total_steps {
+            let s = next_step % 16;
+            for (track, row) in PATTERN.iter().enumerate() {
+                if row[s] {
+                    // Velocity varies with the step so the velocity-mod path
+                    // is not stuck at full scale for the whole render.
+                    let vel = if s.is_multiple_of(4) { 1.0 } else { 0.7 };
+                    engine.trigger(track, vel);
+                }
+            }
+            next_step += 1;
+            next_step_at += samples_per_step;
+        }
+
+        engine.process(&mut l, &mut r);
+        for i in 0..BLOCK {
+            out.push(l[i]);
+            out.push(r[i]);
+        }
+    }
+
+    out
+}
+
+/// A stable 64-bit digest of a rendered buffer.
+///
+/// FNV-1a over the raw `f32` bits. Not cryptographic — this is a tripwire, and
+/// the thing it has to be is *stable*, which a hand-written hash over
+/// `to_bits()` is and a float-formatting round-trip is not. Rendered WAVs are
+/// gitignored, so a committed digest is how a baseline gets into the repo.
+#[cfg(test)]
+fn digest(samples: &[f32]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for s in samples {
+        for byte in s.to_bits().to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    h
+}
+
 /// A 16-step pattern per track. `true` means trigger.
 #[derive(Default)]
 struct Pattern {
@@ -1481,4 +1641,48 @@ fn play_live(bpm: f32) -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mi_drum_baseline {
+    use super::*;
+
+    /// The pre-Phase-14 mi-drum render, pinned.
+    ///
+    /// Phase 14 rebuilds the mi-drum strip as a block-rate chain around MI
+    /// stage classes. Phase 14.0 is the pure-refactor step of that work, and
+    /// its gate is that this digest does not move: the restructure is supposed
+    /// to change *when* the arithmetic happens, not what it computes. Once
+    /// 14.1 starts substituting actual stages the sound changes on purpose,
+    /// and this constant gets re-pinned with that change called out.
+    ///
+    /// Rendered WAVs are gitignored, so the digest is the committed artefact.
+    /// Reproduce the audio with `cargo run -p render -- mi-drum`.
+    const BASELINE_DIGEST: u64 = 0x3859_3443_16d2_5630;
+
+    /// One test, one render, deliberately.
+    ///
+    /// Splitting the silence check into its own `#[test]` renders twice, and
+    /// two renders in the same process interleave their draws on the shared
+    /// `stmlib::Random` generator — so both digests come out different, and
+    /// different again on the next run. Seeding fixes the starting point; only
+    /// not overlapping fixes the interleaving.
+    #[test]
+    fn mi_drum_baseline_is_unchanged() {
+        let samples = render_mi_drum_baseline();
+
+        // The baseline has to exercise the machines, or the digest pins
+        // silence and Phase 14.0 passes its gate by doing nothing.
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.1, "baseline is near-silent: peak={peak}");
+        assert!(peak <= 1.0, "baseline clips: peak={peak}");
+
+        let actual = digest(&samples);
+        assert_eq!(
+            actual, BASELINE_DIGEST,
+            "mi-drum baseline moved: expected {BASELINE_DIGEST:#018x}, got {actual:#018x}. \
+             If this is Phase 14.0, the block restructure is not sample-exact. \
+             If it is a later phase that changes the sound on purpose, re-pin the constant."
+        );
+    }
 }

@@ -34,6 +34,14 @@ use device_core::macros::{
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 
+/// Seed the noise generator shared by every Plaits engine on this device.
+///
+/// Re-exported from `mi-dsp` because callers that want a reproducible render
+/// (the host renderer, tests) already depend on this crate and should not have
+/// to reach past it. See [`mi_dsp::seed_random`] for why one call is not
+/// enough to make *concurrent* renders reproducible.
+pub use mi_dsp::{seed_random, DEFAULT_RANDOM_SEED};
+
 /// How many tracks the engine owns.
 pub const TRACKS: usize = 6;
 
@@ -532,7 +540,10 @@ pub type Sound = device_core::sound::Sound<MiSlot, NUM_MACROS>;
 /// Default kit: drum-focused Plaits engines on the first tracks, melodic on
 /// the later tracks. Limited to six tracks so the engine still fits in the
 /// Teensy 4.1 OCRAM budget alongside the shared send effects.
-const DEFAULT_KIT: [MiMachineId; TRACKS] = [
+///
+/// Public so the host renderer can restore it after auditioning other
+/// machines on a track.
+pub const DEFAULT_KIT: [MiMachineId; TRACKS] = [
     MiMachineId::BassDrum,  // 0: kick
     MiMachineId::SnareDrum, // 1: snare
     MiMachineId::HiHat,     // 2: closed hat
