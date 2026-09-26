@@ -172,6 +172,10 @@ where
     /// with a shared random generator stay sample-interleaved across tracks;
     /// the strip then processes this buffer block-wise.
     pub(crate) source_segment: [f32; BLOCK],
+    /// When true, skip the built-in filter/amp-env/drive strip. Devices such as
+    /// mi-drum implement their own audio strip inside the slot (Warps →
+    /// Ripples) and only need pan/level/sends/choke/de-click from Track.
+    pub strip_bypass: bool,
 }
 
 impl<S, const N: usize> Track<S, N>
@@ -217,6 +221,7 @@ where
             declick_r: 0.0,
             choke_fade_left: 0,
             source_segment: [0.0f32; BLOCK],
+            strip_bypass: false,
         }
     }
 
@@ -272,6 +277,7 @@ where
         core::ptr::addr_of_mut!((*ptr).declick_r).write(0.0);
         core::ptr::addr_of_mut!((*ptr).choke_fade_left).write(0);
         core::ptr::addr_of_mut!((*ptr).source_segment).write([0.0f32; BLOCK]);
+        core::ptr::addr_of_mut!((*ptr).strip_bypass).write(false);
     }
 
     /// Replace the slot on this track, resetting macros to its defaults. Strip
@@ -832,11 +838,15 @@ where
     #[inline(always)]
     pub fn tick(&mut self) -> (f32, f32) {
         let machine_sample = self.slot.tick();
-        let amp = self.amp_env.tick();
-        let stage = machine_sample * amp;
-        let driven = fast::soft_clip(stage * self.eff_drive);
-        let filtered = self.filter.tick(driven);
-        let mixed = filtered * self.eff_level;
+        let mixed = if self.strip_bypass {
+            machine_sample * self.eff_level
+        } else {
+            let amp = self.amp_env.tick();
+            let stage = machine_sample * amp;
+            let driven = fast::soft_clip(stage * self.eff_drive);
+            let filtered = self.filter.tick(driven);
+            filtered * self.eff_level
+        };
         let mut l = mixed * self.pan_l;
         let mut r = mixed * self.pan_r;
 
@@ -875,14 +885,14 @@ where
 
     /// Render one contiguous segment into the output and send buses.
     ///
-    /// `source` is a mono buffer of `n` source samples collected by the engine
-    /// (typically via [`Slot::tick`](crate::slot::Slot::tick)). `start` is the
-    /// offset into the block. The strip (amp env, drive, filter, level, pan,
-    /// sends, choke, de-click) is applied sample-wise. This is the segment-
-    /// based equivalent of calling [`tick`](Self::tick) `n` times.
+    /// Reads source samples from [`Self::source_segment`], which the engine
+    /// fills via [`Slot::tick`](crate::slot::Slot::tick) and then optionally
+    /// processes through [`Slot::process_audio_strip`]. `start` is the offset
+    /// into the block. The strip (amp env, drive, filter, level, pan, sends,
+    /// choke, de-click) is applied sample-wise. This is the segment-based
+    /// equivalent of calling [`tick`](Self::tick) `n` times.
     pub fn process_segment(
         &mut self,
-        source: &[f32],
         start: usize,
         n: usize,
         master_l: &mut [f32; BLOCK],
@@ -894,19 +904,22 @@ where
         send_rr: &mut [f32; BLOCK],
     ) {
         debug_assert!(start + n <= BLOCK);
-        debug_assert!(source.len() >= n);
 
         let sd = self.eff_send_delay;
         let sr = self.eff_send_reverb;
         let out = self.strip.out;
 
         for i in 0..n {
-            let machine_sample = source[i];
-            let amp = self.amp_env.tick();
-            let stage = machine_sample * amp;
-            let driven = fast::soft_clip(stage * self.eff_drive);
-            let filtered = self.filter.tick(driven);
-            let mixed = filtered * self.eff_level;
+            let machine_sample = self.source_segment[i];
+            let mixed = if self.strip_bypass {
+                machine_sample * self.eff_level
+            } else {
+                let amp = self.amp_env.tick();
+                let stage = machine_sample * amp;
+                let driven = fast::soft_clip(stage * self.eff_drive);
+                let filtered = self.filter.tick(driven);
+                filtered * self.eff_level
+            };
             let mut l = mixed * self.pan_l;
             let mut r = mixed * self.pan_r;
 

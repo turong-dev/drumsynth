@@ -104,4 +104,13 @@ pub trait Slot<const N: usize>: Sized {
             *s = self.tick();
         }
     }
+
+    /// Apply a device-specific audio strip to a collected source segment.
+    ///
+    /// The engine collects raw source samples into `Track::source_segment` via
+    /// [`tick`](Self::tick), then calls this hook so devices with block-rate
+    /// strip modules (e.g. mi-drum's Warps → Ripples) can process the segment
+    /// before pan, level and sends are applied. The default implementation is
+    /// a no-op.
+    fn process_audio_strip(&mut self, _buf: &mut [f32]) {}
 }

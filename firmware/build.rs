@@ -24,10 +24,10 @@
 //!   DTCM  8 banks     262,144   165,048    63.0%
 //! ```
 //!
-//! Everything else is copied verbatim from the BSP's build script, so the only
-//! deliberate difference from a stock `teensy4-bsp` image is the bank split.
-//! Check `teensy4-bsp-0.6.0/build.rs` when bumping the BSP: if it changes
-//! anything but the banks, mirror it here.
+//! Phase 14 also vendors Warps, Stages and Clouds. Their lookup tables push
+//! `.rodata` past what fits in OCRAM alongside the 420 KB mi-drum engine, so
+//! `.rodata` is placed in flash. The L1 caches keep flash reads affordable;
+//! disabling the `cache` feature makes this layout much slower.
 //!
 //! # This constrains the drum device
 //!
@@ -39,6 +39,9 @@
 //! established and which is affordable at 33.7%. With the caches *off* it
 //! would be catastrophic — so if you ever disable the `cache` feature, this
 //! trade stops being a good one.
+//!
+//! Check `teensy4-bsp-0.6.0/build.rs` when bumping the BSP: mirror any changes
+//! other than the bank split and the `.rodata` placement.
 
 use imxrt_rt::{Family, FlexRamBanks, Memory, RuntimeBuilder};
 
@@ -58,6 +61,7 @@ fn main() {
         .stack_size_env_override("TEENSY4_STACK_SIZE")
         .vectors(Memory::Dtcm)
         .text(Memory::Itcm)
+        .rodata(Memory::Flash)
         .data(Memory::Dtcm)
         .bss(Memory::Dtcm)
         .uninit(Memory::Ocram)

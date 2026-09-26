@@ -411,7 +411,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::MiDrum { output, stage } => {
-            let stage_macro = match stage.as_str() {
+            // Phase 14.2 replaced the spike stage selector with the Warps
+            // algorithm on SLOT_FILT_0. Keep the CLI argument name but map it
+            // to the new chain.
+            let warps_algorithm = match stage.as_str() {
                 "none" => 0.0,
                 "lpg" => 0.25,
                 "overdrive" => 0.5,
@@ -423,7 +426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into())
                 }
             };
-            let samples = render_mi_drum(stage_macro);
+            let samples = render_mi_drum(warps_algorithm);
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
@@ -1078,18 +1081,15 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
 }
 
 /// Render the mi-drum baseline: every catalogued machine, then the default
-/// kit with the strip exercised.
+/// kit with the fixed Warps -> Ripples strip exercised.
 ///
-/// Deterministic and argument-free by design. Phase 14 rebuilds the mi-drum
-/// strip as a block-rate chain, and 14.0's gate is that this render comes back
-/// byte-for-byte identical — which only means anything if the render covers
-/// the stages being rebuilt. Hence the second half: a bare kit pass would
-/// leave the filter `Off` and the drive at unity and happily agree with a
-/// broken restructure.
-fn render_mi_drum(stage_macro: f32) -> Vec<f32> {
-    use mi_drum_engine::dsp::SvfMode;
+/// Deterministic and argument-free by design. Phase 14.2's gate is that this
+/// render comes back byte-for-byte identical — which only means anything if
+/// the render covers the new strip chain.
+fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
     use mi_drum_engine::{
-        DeviceEngine, MiMachineId, StripParams, SLOT_FILT_0, TRACKS as MI_TRACKS,
+        DeviceEngine, MiMachineId, SLOT_FILT_0, SLOT_FILT_1, SLOT_STRIP_CUT, SLOT_STRIP_HOLD,
+        SLOT_STRIP_RESO, TRACKS as MI_TRACKS,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -1108,7 +1108,11 @@ fn render_mi_drum(stage_macro: f32) -> Vec<f32> {
     let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
     for &id in MiMachineId::ALL.iter() {
         engine.tracks_mut()[0].load_machine(id);
-        engine.tracks_mut()[0].set_macro(SLOT_FILT_0, stage_macro);
+        engine.tracks_mut()[0].set_macro(SLOT_FILT_0, warps_algorithm);
+        engine.tracks_mut()[0].set_macro(SLOT_FILT_1, 0.5);
+        engine.tracks_mut()[0].set_macro(SLOT_STRIP_CUT, 0.5);
+        engine.tracks_mut()[0].set_macro(SLOT_STRIP_RESO, 0.25);
+        engine.tracks_mut()[0].set_macro(SLOT_STRIP_HOLD, 0.7);
         engine.trigger(0, 1.0);
         for _ in 0..blocks_per_hit {
             engine.process(&mut l, &mut r);
@@ -1119,42 +1123,27 @@ fn render_mi_drum(stage_macro: f32) -> Vec<f32> {
         }
     }
 
-    // Half two: back to the default kit, with a strip that actually does
-    // something on every track.
+    // Half two: back to the default kit, with per-track Warps/Ripples settings
+    // so the strip is actually exercised.
     engine.load_kit(&mi_drum_engine::DEFAULT_KIT);
 
-    // (pan, level, filter mode, cutoff, Q, drive, delay send, reverb send)
-    type StripSpec = (f32, f32, SvfMode, f32, f32, f32, f32, f32);
+    // (warps timbre, ripples cutoff, ripples resonance, warps drive)
+    type StripSpec = (f32, f32, f32, f32);
     let strips: [StripSpec; MI_TRACKS] = [
-        (0.00, 0.90, SvfMode::Lp, 4000.0, 0.707, 2.0, 0.00, 0.10),
-        (-0.25, 0.75, SvfMode::Hp, 180.0, 1.200, 1.4, 0.15, 0.25),
-        (0.35, 0.50, SvfMode::Bp, 6000.0, 2.000, 1.0, 0.10, 0.15),
-        (0.40, 0.55, SvfMode::Lp, 2200.0, 3.000, 1.2, 0.20, 0.30),
-        (-0.35, 0.60, SvfMode::Notch, 900.0, 1.500, 1.6, 0.25, 0.20),
-        (-0.50, 0.70, SvfMode::Lp, 3000.0, 0.707, 1.0, 0.30, 0.40),
+        (0.40, 0.55, 0.20, 0.60),
+        (0.55, 0.35, 0.40, 0.75),
+        (0.30, 0.80, 0.10, 0.50),
+        (0.65, 0.45, 0.55, 0.80),
+        (0.25, 0.70, 0.30, 0.65),
+        (0.50, 0.60, 0.15, 0.55),
     ];
 
-    for (track, &(pan, level, f_mode, f_cutoff_hz, f_reso_q, drive, send_delay, send_reverb)) in
-        strips.iter().enumerate()
-    {
-        let strip = StripParams {
-            f_mode,
-            f_cutoff_hz,
-            f_reso_q,
-            // A short amp envelope with a real attack, so the strip's AHD is
-            // shaping the hit rather than passing it through.
-            amp_attack_s: 0.002,
-            amp_hold_s: 0.05,
-            amp_decay_s: 0.60,
-            drive,
-            pan,
-            level,
-            send_delay,
-            send_reverb,
-            ..StripParams::default()
-        };
-        engine.tracks_mut()[track].set_strip(&strip);
-        engine.tracks_mut()[track].set_macro(SLOT_FILT_0, stage_macro);
+    for (track, &(timbre, cutoff, resonance, drive)) in strips.iter().enumerate() {
+        engine.tracks_mut()[track].set_macro(SLOT_FILT_0, warps_algorithm);
+        engine.tracks_mut()[track].set_macro(SLOT_FILT_1, timbre);
+        engine.tracks_mut()[track].set_macro(SLOT_STRIP_CUT, cutoff);
+        engine.tracks_mut()[track].set_macro(SLOT_STRIP_RESO, resonance);
+        engine.tracks_mut()[track].set_macro(SLOT_STRIP_HOLD, drive);
     }
 
     // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
@@ -1698,7 +1687,7 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0x3859_3443_16d2_5630;
+    const BASELINE_DIGEST: u64 = 0x2626_751b_455c_d325;
 
     /// One test, one render, deliberately.
     ///

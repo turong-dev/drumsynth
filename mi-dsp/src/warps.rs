@@ -13,7 +13,7 @@ use crate::sys;
 ///
 /// The vendored source reduced `kMaxBlockSize` from 96 to 32 to save memory
 /// on the Teensy; the wrapper must not pass larger blocks.
-const MAX_BLOCK: usize = 32;
+pub const MAX_BLOCK: usize = 32;
 
 #[repr(align(16))]
 struct Storage(MaybeUninit<[u8; sys::MI_WARPS_STORAGE_SIZE]>);
@@ -39,11 +39,20 @@ impl Warps {
         let mut stage = Self {
             storage: Storage::new(),
         };
+        stage.init(sample_rate);
+        stage
+    }
+
+    /// Re-initialise Warps in its current memory location.
+    ///
+    /// Use this after the struct has been moved (for example, from a stack
+    /// temporary into an engine array) to fix up any self-referential C++
+    /// pointers. Safe to call on a freshly constructed instance.
+    pub fn init(&mut self, sample_rate: f32) {
         #[allow(unsafe_code)]
         unsafe {
-            sys::mi_warps_init(stage.storage.as_ptr(), sample_rate);
+            sys::mi_warps_init(self.storage.as_ptr(), sample_rate);
         }
-        stage
     }
 
     /// Set the algorithm (0..1), algorithm parameter (0..1) and drive (0..1).

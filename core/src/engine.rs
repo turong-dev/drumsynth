@@ -404,16 +404,23 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
                 }
             }
 
-            // Apply the strip to each track's collected segment. Copy the
-            // source out first so the process_segment mutable borrow does not
-            // conflict with the immutable borrow of source_segment.
-            let mut source = [0.0f32; BLOCK];
+            // Let device-specific slots apply their own audio strip (e.g. mi-
+            // drum's Warps -> Ripples) to the collected source segment.
             let mut t = 0;
             while t < T {
                 if self.tracks[t].is_active() {
-                    source[..n].copy_from_slice(&self.tracks[t].source_segment[..n]);
+                    self.tracks[t]
+                        .slot
+                        .process_audio_strip(&mut self.tracks[t].source_segment[..n]);
+                }
+                t += 1;
+            }
+
+            // Apply pan/level/sends/choke/de-click to each track's segment.
+            let mut t = 0;
+            while t < T {
+                if self.tracks[t].is_active() {
                     self.tracks[t].process_segment(
-                        &source[..n],
                         start,
                         n,
                         master_l,
