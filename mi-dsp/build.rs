@@ -156,8 +156,9 @@ fn main() {
     // deliberately NOT compiled. The Rust wrapper does not exist yet, and
     // pulling the C++ in now would add ~40 KB of dead `wav_digits` to the
     // image for nothing. Phase 14.4 adds both together. See
-    // docs/peaks-vendoring.md for provenance and two integration traps (the
-    // GateFlags type is Peaks-local, and the raw output needs a trim).
+    // docs/peaks-vendoring.md for provenance and the two things that will bite
+    // when the wrapper lands: GateFlags is a Peaks-local type with its own bit
+    // values, and the models have no velocity input at all.
 
     // Warps meta-modulator.
     for name in ["oscillator", "modulator", "vocoder", "filter_bank"] {

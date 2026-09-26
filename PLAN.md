@@ -444,10 +444,11 @@ and all four models compile and sound. Two traps are recorded in
 - `GateFlags` is a **Peaks-local `uint8_t`** with its own bit values, not
   `stmlib::GateFlags`, and `ControlMode` is two states, not three. A shim that
   passes `stmlib` gate flags through will mistrigger.
-- The raw `Process` output **saturates** — BassDrum clips 99.98% of samples with
-  no output limiting, because the real module applies gain staging and a limiter
-  downstream that we bypass. The wrapper needs a per-model trim or every Peaks
-  voice is a square wave.
+- Peaks has **no gain staging, no limiter and no per-voice velocity**, and none
+  is being bypassed: `peaks.cc:116` sends the model straight to the DAC. The
+  models peak at full scale by design (a saturating drum circuit is the sound),
+  so no trim is needed. But `Slot::trigger(velocity)` will be *ignored* until the
+  wrapper applies velocity as an output gain — a new feature, not a restored one.
 
 `resources.cc` is 376 KB and only ~5 of its tables are used; the rest is
 `wav_digits` and wavefolding tables belonging to the display engine. Vendored

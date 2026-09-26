@@ -24,6 +24,8 @@ https://raw.githubusercontent.com/pichenettes/eurorack/refs/heads/master/peaks/
 `gate_processor.h` was briefly hand-written as a local reduction before the
 correct repository was found. That stub was **wrong, not merely incomplete** —
 see "GateFlags is Peaks-local" below — and was replaced with the upstream file.
+Falling into that trap while verifying is what produced the bogus saturation
+figures corrected in section 2.
 
 ## Present
 
@@ -68,25 +70,53 @@ silently mistrigger depending on the values. A wrapper must convert.
 `ControlMode` is also only two states upstream — `CONTROL_MODE_FULL = 0`,
 `CONTROL_MODE_HALF = 1` — not the three-way enum one might assume.
 
-### 2. The raw output saturates; the module relies on an output stage we do not have
+### 2. There is no gain staging, no limiter, and no velocity — and that is correct
 
-Measured through `Process` with no output limiting, neutral-ish parameters:
+An earlier version of this note claimed the models "saturate" and need a
+per-model trim because the real module applies gain staging and a limiter we
+bypass. **That was wrong.** Checked against the upstream audio path
+(`peaks/peaks.cc:116`):
 
-| model | peak | samples at full scale |
-|---|---|---|
-| BassDrum | 1.0000 | 99.98% |
-| SnareDrum | 1.0000 | 57.08% |
-| HighHat | 1.0000 | — |
-| FmDrum | 0.0853 | — |
+```cpp
+processors[i].Process(block->input[i], output_buffer, size);
+block->output[i][j] = calibration_data.DacCode(i, output_buffer[j]);
+```
 
-That is flat-topping, not merely loud: the int16 output is clipping, and that
-is unrecoverable. The real Peaks module applies gain staging and a limiter after
-these models; we bypass it, so **the wrapper needs a per-model trim** (order
-1/8 looks about right for BassDrum/Snare, which are peaking near 8x) before the
-signal reaches the engine, or every Peaks voice will be a square wave.
+That is the whole chain. `Processors` is a thin forwarder
+(`processors.h:66`, a macro that just calls `variable.Process`), and `Dac` is a
+raw SPI/I2S writer. There is no limiter and no output gain stage anywhere in
+Peaks. The models are *meant* to run at up to full scale and hand that straight
+to the converter — `BassDrum::Process` ends in a deliberate `CLIP(output)`, and
+drives its resonator with a hardcoded `12 * 32768 * 0.7` excitation, because a
+saturating analogue-modelled drum circuit *is* the sound.
 
-This is a wrapper concern, not a vendoring one, but it is the first thing that
-will bite.
+Measured correctly — trigger once, then release the gate, so it can decay:
+
+| model | peak | samples at full scale | silent after |
+|---|---|---|---|
+| BassDrum | 32767 | 0.07% | ~82 ms |
+| SnareDrum | 32767 | 1.80% | ~92 ms |
+| HighHat | 714 | 0.00% | ~13 ms |
+| FmDrum | 32700 | 0.00% | ~198 ms |
+
+Peak at full scale with well under 2% of samples there is ordinary drum
+material, not flat-topping. **No trim is needed**; the `LEVEL` macro (0.85) and
+the engine's master clipper are the right place for gain staging in this
+architecture.
+
+> Getting those numbers took driving the models wrong twice first: with
+> `stmlib` gate flags instead of `peaks::GateFlags`, and then re-triggering on
+> every block so the drum never decayed. Both made it look like 99.98%
+> saturation. If a Peaks voice ever sounds like a square wave, suspect the
+> harness before the model.
+
+**Velocity is a genuine gap, but not a bypassed one.** Peaks has no per-voice
+velocity at all — the excitation level is a literal in `Process`, and
+`Slot::trigger(velocity)` would be ignored. Our `Slot` contract requires
+velocity to affect amplitude, so the wrapper has to apply it as an output gain.
+That is a new feature for Peaks voices rather than the restoration of something
+the vendor tree had.
+
 
 ## Table sizes in `resources.cc`
 
