@@ -36,7 +36,7 @@ use device_core::macros::{
     STRIP_RESO_INFO,
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
-use mi_dsp::stages::{Lpg, Overdrive, Resonator};
+use mi_dsp::spike_stages::{Lpg, Overdrive, Resonator};
 
 /// Seed the noise generator shared by every Plaits engine on this device.
 ///
@@ -48,7 +48,7 @@ pub use mi_dsp::{seed_random, DEFAULT_RANDOM_SEED};
 
 /// The MI processing stages, re-exported so callers (firmware benches, the
 /// host renderer) can construct one without depending on `mi-dsp` directly.
-pub use mi_dsp::stages;
+pub use mi_dsp::spike_stages;
 
 /// How many tracks the engine owns.
 pub const TRACKS: usize = 6;

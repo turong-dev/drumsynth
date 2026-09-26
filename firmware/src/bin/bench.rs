@@ -106,7 +106,7 @@ const CORE_HZ: f32 = 600_000_000.0;
 /// pass established once the L1 caches were enabled: OCRAM is behind the AXI
 /// bus, but a cached sequential walk is close to the best case a cache line
 /// gets. With the `cache` feature *off* this would be catastrophic rather
-/// than mildly expensive — see PLAN.md's placement rule.
+/// than mildly expensive — see `BENCHMARKS.md` for the placement rule.
 /// Initialized below via [`DrumEngine::new_in_place`], not
 /// `MaybeUninit::write(DrumEngine::new())` — see the comment at the call
 /// site. Doing the write from a single-threaded `main` is sound here — the
@@ -506,7 +506,7 @@ fn measure_with_cc_automation(
 
 /// Phase 11 regate: track 0 swapped to `BdVa` configured for its heaviest
 /// path — full sweep, deep decay, max Q. Exposes `BridgedT::set_coeffs`
-/// running per-sample (Option A from `PLAN.md` Phase 11): two
+/// running per-sample (Option A from `DESIGN.md`): two
 /// `fast::sin_turns` lookups plus a divide every sample. The bench-gate
 /// decision is whether this fits in the remaining headroom; if not, the
 /// plan calls for splitting static/moving coefficients (Option B).

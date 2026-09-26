@@ -35,7 +35,7 @@
 //! ~269 KB and *was* in DTCM, at 304,300 of 327,680 used — 92.9%, with only
 //! 23 KB spare. It does not fit in 8 banks, so it moves to `.uninit` OCRAM
 //! (see `ENGINE_BUF` in `bin/bench.rs`). With the L1 caches on that costs a
-//! measured ~1.2% of the cycle budget, which the optimisation pass in PLAN.md
+//! measured ~1.2% of the cycle budget, which the optimisation pass in BENCHMARKS.md
 //! established and which is affordable at 33.7%. With the caches *off* it
 //! would be catastrophic — so if you ever disable the `cache` feature, this
 //! trade stops being a good one.
