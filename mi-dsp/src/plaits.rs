@@ -80,8 +80,7 @@ static VOICE_BUFFER_POOL: BufferPool =
 
 /// Free bitmap for the pool. Bit `i` of word `w` set = buffer `w * 32 + i` is
 /// in use.
-static VOICE_BUFFER_USED: [AtomicU32; POOL_WORDS] =
-    [const { AtomicU32::new(0) }; POOL_WORDS];
+static VOICE_BUFFER_USED: [AtomicU32; POOL_WORDS] = [const { AtomicU32::new(0) }; POOL_WORDS];
 
 /// Allocate a buffer from the static pool.
 ///

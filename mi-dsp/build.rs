@@ -13,6 +13,10 @@ fn main() {
     build.include(&vendor);
     build.include(vendor.join("stmlib"));
     build.include(vendor.join("plaits"));
+    build.include(vendor.join("warps"));
+    build.include(vendor.join("stages"));
+    build.include(vendor.join("clouds"));
+    build.include(vendor.join("tides2"));
 
     // Host or cross-compiled ARM Cortex-M7.
     if target == "thumbv7em-none-eabihf" {
@@ -66,6 +70,10 @@ fn main() {
     // compiler instead of only on clang.
     build.flag_if_supported("-Wno-unused-local-typedef");
     build.flag_if_supported("-Wno-unused-local-typedefs");
+    // Stages uses a variable-length array in ProcessOscillator; it is bounded by
+    // the caller's block size. Silence the Clang extension warning.
+    build.flag_if_supported("-Wno-vla-cxx-extension");
+    build.flag_if_supported("-Wno-vla");
     build.opt_level(3);
 
     // On host targets the vendored code uses ARM inline assembly unless TEST is
@@ -76,6 +84,9 @@ fn main() {
 
     // Plaits voice shim and the voice implementation it wraps.
     build.file(manifest_dir.join("src/mi_dsp_shim.cc"));
+    build.file(manifest_dir.join("src/mi_warps_shim.cc"));
+    build.file(manifest_dir.join("src/mi_stages_shim.cc"));
+    build.file(manifest_dir.join("src/mi_clouds_shim.cc"));
 
     // Engine set 1.
     for name in [
@@ -136,14 +147,38 @@ fn main() {
 
     // stmlib utilities used by Plaits.
     build.file(vendor.join("stmlib/dsp/units.cc"));
+    build.file(vendor.join("stmlib/dsp/atan.cc"));
     build.file(vendor.join("stmlib/utils/random.cc"));
     // Note: user_data_receiver.cc is not compiled because it depends on the
     // stm_audio_bootloader library which we do not vendor.
+
+    // Warps meta-modulator.
+    for name in ["oscillator", "modulator", "vocoder", "filter_bank"] {
+        build.file(vendor.join(format!("warps/dsp/{name}.cc")));
+    }
+    build.file(vendor.join("warps/resources.cc"));
+
+    // Stages segment generator / LFO / envelope.
+    build.file(vendor.join("stages/segment_generator.cc"));
+    build.file(vendor.join("stages/resources.cc"));
+    build.file(vendor.join("tides2/ramp/ramp_extractor.cc"));
+
+    // Clouds texture synthesizer.
+    build.file(vendor.join("clouds/resources.cc"));
+    build.file(vendor.join("clouds/dsp/granular_processor.cc"));
+    build.file(vendor.join("clouds/dsp/correlator.cc"));
+    build.file(vendor.join("clouds/dsp/mu_law.cc"));
+    for name in ["phase_vocoder", "frame_transformation", "stft"] {
+        build.file(vendor.join(format!("clouds/dsp/pvoc/{name}.cc")));
+    }
 
     build.compile("mi_dsp");
 
     // Tell cargo to rerun if vendored sources or the shim change.
     println!("cargo:rerun-if-changed=src/mi_dsp_shim.cc");
+    println!("cargo:rerun-if-changed=src/mi_warps_shim.cc");
+    println!("cargo:rerun-if-changed=src/mi_stages_shim.cc");
+    println!("cargo:rerun-if-changed=src/mi_clouds_shim.cc");
     println!("cargo:rerun-if-changed=include/mi_dsp_shim.h");
     println!("cargo:rerun-if-changed=vendor");
 

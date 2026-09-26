@@ -109,6 +109,98 @@ void mi_resonator_process(
     float* out,
     size_t size);
 
+// ---------------------------------------------------------------------------
+// Warps
+// ---------------------------------------------------------------------------
+
+#define MI_WARPS_STORAGE_SIZE 4112
+#define MI_WARPS_STORAGE_ALIGN 16
+
+// `algorithm` is 0..1 mapped to the 9 Warps algorithms; `parameter` is the
+// algorithm timbre; `drive` is the per-channel drive.
+void mi_warps_init(void* storage, float sample_rate);
+void mi_warps_process(
+    void* storage,
+    const float* in_l,
+    const float* in_r,
+    float* out_l,
+    float* out_r,
+    size_t size);
+void mi_warps_set_parameters(
+    void* storage,
+    float algorithm,
+    float parameter,
+    float drive);
+
+// ---------------------------------------------------------------------------
+// Stages
+// ---------------------------------------------------------------------------
+
+#define MI_STAGES_STORAGE_SIZE 4184
+#define MI_STAGES_STORAGE_ALIGN 8
+
+// Segment types matching stages::segment::Type.
+#define MI_STAGES_SEGMENT_RAMP 0
+#define MI_STAGES_SEGMENT_STEP 1
+#define MI_STAGES_SEGMENT_HOLD 2
+#define MI_STAGES_SEGMENT_ALT 3
+
+void mi_stages_init(void* storage);
+// Configure as a single looping segment (LFO / free-running oscillator).
+void mi_stages_configure_single(
+    void* storage,
+    int type,
+    int loop,
+    int has_trigger,
+    float primary,
+    float secondary);
+// Configure as a two-segment AD envelope (attack ramp + decay ramp).
+void mi_stages_configure_ad(void* storage, float attack, float decay);
+// Trigger the envelope. Call at note-on; ignored by LFO modes.
+void mi_stages_trigger(void* storage);
+// Process one block. `gate_flags` is a uint8_t per sample (0 or non-zero).
+void mi_stages_process(
+    void* storage,
+    const uint8_t* gate_flags,
+    float* out,
+    size_t size);
+
+// ---------------------------------------------------------------------------
+// Clouds
+// ---------------------------------------------------------------------------
+
+#define MI_CLOUDS_STORAGE_SIZE 9096
+#define MI_CLOUDS_STORAGE_ALIGN 8
+
+void mi_clouds_init(
+    void* storage,
+    void* large_buffer,
+    size_t large_buffer_size,
+    void* small_buffer,
+    size_t small_buffer_size);
+void mi_clouds_process(
+    void* storage,
+    const float* in_l,
+    const float* in_r,
+    float* out_l,
+    float* out_r,
+    size_t size);
+void mi_clouds_prepare(void* storage);
+void mi_clouds_set_parameters(
+    void* storage,
+    float position,
+    float size,
+    float pitch,
+    float density,
+    float texture,
+    float dry_wet,
+    float stereo_spread,
+    float feedback,
+    float reverb,
+    int freeze,
+    int trigger,
+    int gate);
+
 // Placement-new a voice into `memory` (which must be at least
 // PLAITS_VOICE_STORAGE_SIZE bytes and aligned to PLAITS_VOICE_STORAGE_ALIGN),
 // using `buffer` (PLAITS_VOICE_BUFFER_SIZE bytes) for engine scratch.

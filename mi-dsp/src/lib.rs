@@ -21,8 +21,12 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod clouds;
 pub mod plaits;
+pub mod spike_stages;
+pub mod stages;
 pub mod sys;
+pub mod warps;
 
 /// Seed the noise generator shared by every Plaits engine.
 ///
@@ -47,5 +51,3 @@ pub fn seed_random(seed: u32) {
 /// The seed `stmlib::Random` starts at in the vendored source, and therefore
 /// the one a render must use to reproduce a from-process-start result.
 pub const DEFAULT_RANDOM_SEED: u32 = 0x21;
-
-pub mod stages;
