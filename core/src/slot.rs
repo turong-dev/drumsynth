@@ -110,7 +110,7 @@ pub trait Slot<const N: usize>: Sized {
     /// The engine collects raw source samples into `Track::source_segment` via
     /// [`tick`](Self::tick), then calls this hook so devices with block-rate
     /// strip modules (e.g. mi-drum's Warps → Ripples) can process the segment
-    /// before pan, level and sends are applied. The default implementation is
-    /// a no-op.
-    fn process_audio_strip(&mut self, _buf: &mut [f32]) {}
+    /// before pan, level and sends are applied. `start` is the sample offset
+    /// of this segment within the block. The default implementation is a no-op.
+    fn process_audio_strip(&mut self, _buf: &mut [f32], _start: usize) {}
 }

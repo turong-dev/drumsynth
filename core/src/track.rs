@@ -376,30 +376,39 @@ where
         // modulation state, not the slot DSP, so they are intercepted before
         // the generic slot-macro path below. Each stores the macro value and
         // applies the derived parameter immediately.
-        if idx == SLOT_STRIP_CUT
-            || idx == SLOT_STRIP_RESO
-            || idx == SLOT_STRIP_ATK
-            || idx == SLOT_STRIP_HOLD
-            || idx == SLOT_STRIP_DEC
-        {
-            self.base_macros[idx] = v;
-            self.macro_smooth[idx] = v;
-            self.macro_pending &= !(1 << idx);
-            self.apply_strip_macros();
-            return;
-        }
-        if idx == SLOT_LFO1_RATE
-            || idx == SLOT_LFO1_DEPTH
-            || idx == SLOT_LFO1_DEST
-            || idx == SLOT_LFO2_RATE
-            || idx == SLOT_LFO2_DEPTH
-            || idx == SLOT_LFO2_DEST
-        {
-            self.base_macros[idx] = v;
-            self.macro_smooth[idx] = v;
-            self.macro_pending &= !(1 << idx);
-            self.apply_lfo_macros();
-            return;
+        //
+        // A track with `strip_bypass` set runs its own strip and its own
+        // modulation inside the slot, and reinterprets these same slots for
+        // that chain (mi-drum maps FILT 2..5 to Warps/Ripples and MOD 0..7 to
+        // Stages depths). So the interception is skipped there and the value
+        // falls through to `slot.set_macros` like any other machine macro —
+        // otherwise the slot would never see its own controls.
+        if !self.strip_bypass {
+            if idx == SLOT_STRIP_CUT
+                || idx == SLOT_STRIP_RESO
+                || idx == SLOT_STRIP_ATK
+                || idx == SLOT_STRIP_HOLD
+                || idx == SLOT_STRIP_DEC
+            {
+                self.base_macros[idx] = v;
+                self.macro_smooth[idx] = v;
+                self.macro_pending &= !(1 << idx);
+                self.apply_strip_macros();
+                return;
+            }
+            if idx == SLOT_LFO1_RATE
+                || idx == SLOT_LFO1_DEPTH
+                || idx == SLOT_LFO1_DEST
+                || idx == SLOT_LFO2_RATE
+                || idx == SLOT_LFO2_DEPTH
+                || idx == SLOT_LFO2_DEST
+            {
+                self.base_macros[idx] = v;
+                self.macro_smooth[idx] = v;
+                self.macro_pending &= !(1 << idx);
+                self.apply_lfo_macros();
+                return;
+            }
         }
         self.base_macros[idx] = v;
         // Keep the CC smoother in sync: a direct set is the new current

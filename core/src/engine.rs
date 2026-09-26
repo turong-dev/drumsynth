@@ -411,7 +411,7 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
                 if self.tracks[t].is_active() {
                     self.tracks[t]
                         .slot
-                        .process_audio_strip(&mut self.tracks[t].source_segment[..n]);
+                        .process_audio_strip(&mut self.tracks[t].source_segment[..n], start);
                 }
                 t += 1;
             }

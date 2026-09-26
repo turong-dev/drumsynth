@@ -180,6 +180,12 @@ extern "C" {
         secondary: f32,
     );
     pub fn mi_stages_configure_ad(storage: *mut c_void, attack: f32, decay: f32);
+    pub fn mi_stages_set_segment_parameters(
+        storage: *mut c_void,
+        index: i32,
+        primary: f32,
+        secondary: f32,
+    );
     pub fn mi_stages_trigger(storage: *mut c_void);
     pub fn mi_stages_process(
         storage: *mut c_void,

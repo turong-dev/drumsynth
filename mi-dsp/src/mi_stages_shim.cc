@@ -50,6 +50,15 @@ void mi_stages_configure_ad(void* storage, float attack, float decay) {
   g->set_segment_parameters(1, decay, 0.5f);
 }
 
+void mi_stages_set_segment_parameters(
+    void* storage,
+    int index,
+    float primary,
+    float secondary) {
+  stages::SegmentGenerator* g = reinterpret_cast<stages::SegmentGenerator*>(storage);
+  g->set_segment_parameters(index, primary, secondary);
+}
+
 void mi_stages_trigger(void* storage) {
   // The SegmentGenerator reads gate flags per sample. A single trigger is
   // delivered by setting the first sample's flag to RISING.
@@ -63,10 +72,30 @@ void mi_stages_process(
     size_t size) {
   stages::SegmentGenerator* g = reinterpret_cast<stages::SegmentGenerator*>(storage);
 
-  // Convert uint8_t gate flags to stmlib::GateFlags.
-  stmlib::GateFlags flags[96];
-  for (size_t i = 0; i < size; ++i) {
-    flags[i] = gate_flags[i] ? stmlib::GATE_FLAG_HIGH : stmlib::GATE_FLAG_LOW;
+  // A null `gate_flags` means free-running: `SegmentGenerator::Process`
+  // switches to its internal oscillator clock instead of the gate-clocked
+  // ramp extractor, which is what an LFO segment needs. Anything else is
+  // converted sample-by-sample.
+  const stmlib::GateFlags* flags = nullptr;
+  stmlib::GateFlags flags_buf[96];
+  if (gate_flags) {
+    for (size_t i = 0; i < size; ++i) {
+      switch (gate_flags[i]) {
+        case 1:
+          flags_buf[i] = stmlib::GATE_FLAG_HIGH;
+          break;
+        case 2:
+          flags_buf[i] = stmlib::GATE_FLAG_RISING;
+          break;
+        case 3:
+          flags_buf[i] = stmlib::GATE_FLAG_FALLING;
+          break;
+        default:
+          flags_buf[i] = stmlib::GATE_FLAG_LOW;
+          break;
+      }
+    }
+    flags = flags_buf;
   }
 
   stages::SegmentGenerator::Output output[96];

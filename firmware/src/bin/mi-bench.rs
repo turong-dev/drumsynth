@@ -55,7 +55,10 @@
 use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
-use mi_drum_engine::{DeviceEngine, MiDrumEngine, BLOCK, SAMPLE_RATE, SLOT_FILT_0, TRACKS};
+use mi_drum_engine::{
+    DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH, SLOT_FILT_0,
+    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_WARPS_DEPTH, BLOCK, SAMPLE_RATE, TRACKS,
+};
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
 
@@ -207,6 +210,17 @@ fn main() -> ! {
         // planned.
         let res_send = measure_resonator_send(engine, &mut left, &mut right, &mut res_send_fx);
         report("6 + RES SND", res_send, &mut poller, &mut pit);
+
+        // --- Phase 14.3: Stages modulation on all six tracks ---
+        // The strip already runs Warps + Ripples; this adds the four Stages
+        // segment generators (2 LFOs + 2 AD envelopes) per track with all four
+        // static routes at full depth, which is the 14.3 worst case. The delta
+        // against `6 + WARP+DR` is the cost of the modulation bus.
+        let mod_off = measure_modulation(engine, &mut left, &mut right, 0.0);
+        report("6 + MOD off", mod_off, &mut poller, &mut pit);
+
+        let mod_on = measure_modulation(engine, &mut left, &mut right, 1.0);
+        report("6 + MOD on ", mod_on, &mut poller, &mut pit);
 
         log::info!("");
 
@@ -366,6 +380,41 @@ fn measure_with_stage(
 
     for t in 0..TRACKS {
         engine.tracks_mut()[t].set_macro(SLOT_FILT_0, WARPS_ALGO_NONE);
+    }
+
+    stats
+}
+
+/// Worst case with the Stages modulation bus driven at `depth` on every track.
+///
+/// Sets all four static routes — LFO 1 to Ripples cutoff, LFO 2 to Warps
+/// timbre, AD 1 to Ripples cutoff, AD 2 to Warps timbre — so this is the full
+/// 14.3 modulation cost times six tracks. Restores zero depth on the way out
+/// for the same reason `measure_with_stage` restores its algorithm.
+fn measure_modulation(
+    engine: &mut MiDrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+    depth: f32,
+) -> Stats {
+    const ROUTES: [usize; 4] = [
+        SLOT_LFO_FILTER_DEPTH,
+        SLOT_LFO_WARPS_DEPTH,
+        SLOT_AD_FILTER_DEPTH,
+        SLOT_AD_WARPS_DEPTH,
+    ];
+    for t in 0..TRACKS {
+        for &slot in &ROUTES {
+            engine.tracks_mut()[t].set_macro(slot, depth);
+        }
+    }
+
+    let stats = measure(engine, left, right, TRACKS);
+
+    for t in 0..TRACKS {
+        for &slot in &ROUTES {
+            engine.tracks_mut()[t].set_macro(slot, 0.0);
+        }
     }
 
     stats

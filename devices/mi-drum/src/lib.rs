@@ -30,14 +30,13 @@ pub use device_core::macros::{
 
 use device_core::dsp::Svf;
 use device_core::macros::{
-    mi, resv, MacroInfo, LFO1_DEPTH_INFO, LFO1_DEST_INFO, LFO1_RATE_INFO, LFO2_DEPTH_INFO,
-    LFO2_DEST_INFO, LFO2_RATE_INFO, MACH_INFO, NUM_MACROS, OUT_INFO, PAN_INFO, SEND_DLY_INFO,
-    SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3,
-    SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
-    SLOT_SEND_REVERB,
+    macro_index, mi, resv, MacroInfo, BANK_MOD, MACH_INFO, NUM_MACROS, OUT_INFO, PAN_INFO,
+    SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2,
+    SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN,
+    SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
-use mi_dsp::stages::Stages as ModStages;
+use mi_dsp::stages::{Stages as ModStages, GATE_LOW, GATE_RISING, SEGMENT_ALT};
 use mi_dsp::warps::{Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
 
 /// Seed the noise generator shared by every Plaits engine on this device.
@@ -260,6 +259,18 @@ impl MiMachineId {
         m[SLOT_RIPPLES_RESONANCE] = 0.01; // gentle Q
         m[SLOT_RIPPLES_FM] = 0.0;
 
+        // Modulation defaults. The per-target depths are 0 so the sound is
+        // unchanged until a macro is moved; the LFO master is 1 so turning up
+        // a per-target depth alone is enough to hear the route.
+        m[SLOT_LFO_RATE] = 0.5;
+        m[SLOT_LFO_DEPTH] = 1.0;
+        m[SLOT_AD_ATTACK] = 0.05;
+        m[SLOT_AD_DECAY] = 0.3;
+        m[SLOT_LFO_FILTER_DEPTH] = 0.0;
+        m[SLOT_LFO_WARPS_DEPTH] = 0.0;
+        m[SLOT_AD_FILTER_DEPTH] = 0.0;
+        m[SLOT_AD_WARPS_DEPTH] = 0.0;
+
         m
     }
 
@@ -312,12 +323,37 @@ const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
 const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
 
+/// MOD 0: Stages LFO period, 0..1 = slow..fast. Shared by LFO 1 and LFO 2.
+pub const SLOT_LFO_RATE: usize = macro_index(BANK_MOD, 0);
+/// MOD 1: master LFO depth scalar applied before the per-target depths.
+pub const SLOT_LFO_DEPTH: usize = macro_index(BANK_MOD, 1);
+/// MOD 2: Stages AD envelope attack time, 0..1 mapped to 1 ms..1 s.
+pub const SLOT_AD_ATTACK: usize = macro_index(BANK_MOD, 2);
+/// MOD 3: Stages AD envelope decay time, 0..1 mapped to 10 ms..5 s.
+pub const SLOT_AD_DECAY: usize = macro_index(BANK_MOD, 3);
+/// MOD 4: LFO depth into the Ripples cutoff, in octaves at full scale.
+pub const SLOT_LFO_FILTER_DEPTH: usize = macro_index(BANK_MOD, 4);
+/// MOD 5: LFO 2 depth into the Warps timbre parameter.
+pub const SLOT_LFO_WARPS_DEPTH: usize = macro_index(BANK_MOD, 5);
+/// MOD 6: AD env 1 depth into the Ripples cutoff, in octaves at full scale.
+pub const SLOT_AD_FILTER_DEPTH: usize = macro_index(BANK_MOD, 6);
+/// MOD 7: AD env 2 depth into the Warps timbre parameter.
+pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
+
 const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
 const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
 const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.7);
 const RIPPLES_CUTOFF_INFO: MacroInfo = mi("RIP.CUT", "RCT", 0.5);
 const RIPPLES_RESONANCE_INFO: MacroInfo = mi("RIP.RES", "RRS", 0.5);
 const RIPPLES_FM_INFO: MacroInfo = mi("RIP.FM", "RFM", 0.0);
+const LFO_RATE_INFO: MacroInfo = mi("LFO.RATE", "LRT", 0.5);
+const LFO_DEPTH_INFO: MacroInfo = mi("LFO.DEPTH", "LDPT", 1.0);
+const AD_ATTACK_INFO: MacroInfo = mi("AD.ATK", "AAT", 0.05);
+const AD_DECAY_INFO: MacroInfo = mi("AD.DEC", "ADEC", 0.3);
+const LFO_FILTER_DEPTH_INFO: MacroInfo = mi("LFO.FIL", "LFI", 0.0);
+const LFO_WARPS_DEPTH_INFO: MacroInfo = mi("LFO.WRP", "LWR", 0.0);
+const AD_FILTER_DEPTH_INFO: MacroInfo = mi("AD.FIL", "AFI", 0.0);
+const AD_WARPS_DEPTH_INFO: MacroInfo = mi("AD.WRP", "AWR", 0.0);
 
 /// Shared macro metadata table for all MI machines.
 static MACROS: [MacroInfo; NUM_MACROS] = [
@@ -345,14 +381,14 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     SEND_RVB_INFO,            // TRACK 5
     resv(),                   // TRACK 6
     resv(),                   // TRACK 7
-    resv(),                   // MOD 0
-    resv(),                   // MOD 1
-    LFO1_RATE_INFO,           // MOD 2
-    LFO1_DEPTH_INFO,          // MOD 3
-    LFO1_DEST_INFO,           // MOD 4
-    LFO2_RATE_INFO,           // MOD 5
-    LFO2_DEPTH_INFO,          // MOD 6
-    LFO2_DEST_INFO,           // MOD 7
+    LFO_RATE_INFO,            // MOD 0
+    LFO_DEPTH_INFO,           // MOD 1
+    AD_ATTACK_INFO,           // MOD 2
+    AD_DECAY_INFO,            // MOD 3
+    LFO_FILTER_DEPTH_INFO,    // MOD 4
+    LFO_WARPS_DEPTH_INFO,     // MOD 5
+    AD_FILTER_DEPTH_INFO,     // MOD 6
+    AD_WARPS_DEPTH_INFO,      // MOD 7
 ];
 
 /// A block-buffered Plaits voice implementing the per-sample `Slot` trait.
@@ -374,15 +410,30 @@ pub struct MiSlot {
     // Phase 14 fixed-strip modules.
     warps: Warps,
     ripples: Svf,
-    mod_stages_lfo: ModStages,
-    mod_stages_env: ModStages,
+    lfo1: ModStages,
+    lfo2: ModStages,
+    env1: ModStages,
+    env2: ModStages,
     segment: [f32; BLOCK],
+    lfo1_out: [f32; BLOCK],
+    lfo2_out: [f32; BLOCK],
+    env1_out: [f32; BLOCK],
+    env2_out: [f32; BLOCK],
     // Cached strip parameters, derived from macros each block.
     warps_algorithm: f32,
     warps_timbre: f32,
     warps_drive: f32,
     ripples_cutoff_hz: f32,
     ripples_reso_q: f32,
+    lfo_rate: f32,
+    lfo_depth: f32,
+    ad_attack: f32,
+    ad_decay: f32,
+    lfo_filter_depth: f32,
+    lfo_warps_depth: f32,
+    ad_filter_depth: f32,
+    ad_warps_depth: f32,
+    env_trigger_pending: bool,
     warps_initialized: bool,
 }
 
@@ -395,6 +446,19 @@ impl MiSlot {
     /// Recompute `patch.note` from stored tune macro and retune offset.
     fn update_note(&mut self) {
         self.patch.note = Self::tune_to_note(self.tune_macro) + self.retune_semitones;
+    }
+
+    /// Set up the four Stages segment generators as 2 LFOs + 2 AD envelopes.
+    fn configure_stages(&mut self) {
+        // Two looping LFOs. SEGMENT_ALT is an alternating oscillator; rate and
+        // shape are updated from macros in set_macros.
+        self.lfo1
+            .configure_single(SEGMENT_ALT, true, false, 0.5, 0.5);
+        self.lfo2
+            .configure_single(SEGMENT_ALT, true, false, 0.5, 0.5);
+        // Two triggered AD envelopes.
+        self.env1.configure_ad(self.ad_attack, self.ad_decay);
+        self.env2.configure_ad(self.ad_attack, self.ad_decay);
     }
 
     /// Render the next block if the buffer is exhausted, honouring any pending
@@ -479,16 +543,32 @@ impl Slot<NUM_MACROS> for MiSlot {
             retune_semitones: 0.0,
             warps: Warps::new(SAMPLE_RATE),
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
-            mod_stages_lfo: ModStages::new(),
-            mod_stages_env: ModStages::new(),
+            lfo1: ModStages::new(),
+            lfo2: ModStages::new(),
+            env1: ModStages::new(),
+            env2: ModStages::new(),
             segment: [0.0f32; BLOCK],
+            lfo1_out: [0.0f32; BLOCK],
+            lfo2_out: [0.0f32; BLOCK],
+            env1_out: [0.0f32; BLOCK],
+            env2_out: [0.0f32; BLOCK],
             warps_algorithm: 0.0,
             warps_timbre: 0.0,
             warps_drive: 0.0,
             ripples_cutoff_hz: 1000.0,
             ripples_reso_q: 0.707,
+            lfo_rate: 0.5,
+            lfo_depth: 1.0,
+            ad_attack: 0.01,
+            ad_decay: 0.3,
+            lfo_filter_depth: 0.0,
+            lfo_warps_depth: 0.0,
+            ad_filter_depth: 0.0,
+            ad_warps_depth: 0.0,
+            env_trigger_pending: false,
             warps_initialized: false,
         };
+        slot.configure_stages();
         slot.set_macros(macros);
         slot.ripples
             .recalc(slot.ripples_cutoff_hz, slot.ripples_reso_q, SAMPLE_RATE);
@@ -536,15 +616,31 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
-            core::ptr::addr_of_mut!((*ptr).mod_stages_lfo).write(ModStages::new());
-            core::ptr::addr_of_mut!((*ptr).mod_stages_env).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).lfo1).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).lfo2).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).env1).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).env2).write(ModStages::new());
             core::ptr::addr_of_mut!((*ptr).segment).write([0.0f32; BLOCK]);
+            core::ptr::addr_of_mut!((*ptr).lfo1_out).write([0.0f32; BLOCK]);
+            core::ptr::addr_of_mut!((*ptr).lfo2_out).write([0.0f32; BLOCK]);
+            core::ptr::addr_of_mut!((*ptr).env1_out).write([0.0f32; BLOCK]);
+            core::ptr::addr_of_mut!((*ptr).env2_out).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).warps_algorithm).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps_timbre).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps_drive).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ripples_cutoff_hz).write(1000.0);
             core::ptr::addr_of_mut!((*ptr).ripples_reso_q).write(0.707);
+            core::ptr::addr_of_mut!((*ptr).lfo_rate).write(0.5);
+            core::ptr::addr_of_mut!((*ptr).lfo_depth).write(1.0);
+            core::ptr::addr_of_mut!((*ptr).ad_attack).write(0.01);
+            core::ptr::addr_of_mut!((*ptr).ad_decay).write(0.3);
+            core::ptr::addr_of_mut!((*ptr).lfo_filter_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).lfo_warps_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).ad_filter_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).ad_warps_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).env_trigger_pending).write(false);
             core::ptr::addr_of_mut!((*ptr).warps_initialized).write(false);
+            (*ptr).configure_stages();
             (*ptr).set_macros(macros);
             (*ptr)
                 .ripples
@@ -574,10 +670,33 @@ impl Slot<NUM_MACROS> for MiSlot {
         self.ripples_reso_q = 0.5 + 19.5 * macros[SLOT_RIPPLES_RESONANCE];
         self.ripples
             .recalc(self.ripples_cutoff_hz, self.ripples_reso_q, SAMPLE_RATE);
+
+        self.lfo_rate = macros[SLOT_LFO_RATE];
+        self.lfo_depth = macros[SLOT_LFO_DEPTH];
+        self.ad_attack = 0.001 + 0.999 * macros[SLOT_AD_ATTACK];
+        self.ad_decay = 0.01 + 4.99 * macros[SLOT_AD_DECAY];
+        self.lfo_filter_depth = macros[SLOT_LFO_FILTER_DEPTH];
+        self.lfo_warps_depth = macros[SLOT_LFO_WARPS_DEPTH];
+        self.ad_filter_depth = macros[SLOT_AD_FILTER_DEPTH];
+        self.ad_warps_depth = macros[SLOT_AD_WARPS_DEPTH];
+
+        // Update Stages parameters from macros. A Stages segment's `primary`
+        // is a normalised rate: the free-running path maps it as
+        // `SemitonesToRatio(96 * (primary - 0.5)) * 2.044 Hz`, so the useful
+        // LFO band is roughly -0.05..0.9 rather than the 0..1 the parameter
+        // nominally takes. This maps the knob onto ~0.1 Hz .. ~19 Hz, with
+        // centre (0.5) at ~1.4 Hz. LFO 2 runs a fifth above LFO 1.
+        let lfo_primary = -0.05 + 0.95 * self.lfo_rate;
+        self.lfo1.set_parameters(lfo_primary, 0.5);
+        self.lfo2.set_parameters(lfo_primary + 0.12, 0.5);
+        self.env1.configure_ad(self.ad_attack, self.ad_decay);
+        self.env2
+            .configure_ad(self.ad_attack * 0.8, self.ad_decay * 1.2);
     }
 
     fn trigger(&mut self, _velocity: f32) {
         self.trigger_pending = true;
+        self.env_trigger_pending = true;
         self.active = true;
         self.silence_counter = 0;
     }
@@ -608,7 +727,9 @@ impl Slot<NUM_MACROS> for MiSlot {
         s
     }
 
-    fn process_audio_strip(&mut self, buf: &mut [f32]) {
+    fn process_audio_strip(&mut self, buf: &mut [f32], _start: usize) {
+        let n = buf.len();
+
         // Warps' C++ state contains a self-referential pointer. It must be
         // initialised at its final memory location, which for `new()` happens
         // to be after the struct has been moved into the engine. Lazy-init on
@@ -618,16 +739,63 @@ impl Slot<NUM_MACROS> for MiSlot {
             self.warps_initialized = true;
         }
 
-        // Warps is limited to 32-sample blocks; chunk the engine segment.
-        self.warps
-            .set_parameters(self.warps_algorithm, self.warps_timbre, self.warps_drive);
-        for chunk in buf.chunks_mut(WARPS_MAX_BLOCK) {
+        // Render the four Stages modulators into per-segment buffers. The LFOs
+        // must free-run: a gate array would clock them from the gates and hold
+        // them at a constant. `SEGMENT_ALT` already emits bipolar output, so
+        // the LFO buffers need no recentring; the AD envelopes are unipolar.
+        let mut gate = [GATE_LOW; BLOCK];
+        if self.env_trigger_pending {
+            gate[0] = GATE_RISING;
+            self.env_trigger_pending = false;
+        }
+        self.lfo1.process_free_running(&mut self.lfo1_out[..n]);
+        self.lfo2.process_free_running(&mut self.lfo2_out[..n]);
+        self.env1.process(&gate[..n], &mut self.env1_out[..n]);
+        self.env2.process(&gate[..n], &mut self.env2_out[..n]);
+
+        // Modulate Warps timbre once per Warps-sized chunk (Warps interpolates
+        // parameters internally over the chunk). Ripples cutoff is updated per
+        // sample because tick() is cheap. `lfo_depth` is the master LFO scalar
+        // applied on top of each per-target depth, so the whole LFO bus can be
+        // scaled without touching four separate macros.
+        let lfo_master = self.lfo_depth;
+        let lfo_warps_scale = self.lfo_warps_depth * lfo_master;
+        let ad_warps_scale = self.ad_warps_depth;
+        let base_warps_timbre = self.warps_timbre;
+
+        for (chunk_idx, chunk) in buf.chunks_mut(WARPS_MAX_BLOCK).enumerate() {
+            let chunk_start = chunk_idx * WARPS_MAX_BLOCK;
+
+            // Point-sample the modulators at the chunk's first sample rather
+            // than averaging across it. Warps interpolates its own parameters
+            // between calls, so this is already smooth, and averaging a 32-sample
+            // window against a ~1.4 Hz LFO would cancel most of the sweep and
+            // leave the route silent.
+            let modulated_timbre = (base_warps_timbre
+                + self.lfo2_out[chunk_start] * lfo_warps_scale
+                + self.env2_out[chunk_start] * ad_warps_scale)
+                .clamp(0.0, 1.0);
+
+            self.warps
+                .set_parameters(self.warps_algorithm, modulated_timbre, self.warps_drive);
             self.warps.process(chunk);
         }
 
-        // Ripples multimode SVF after Warps.
-        for s in buf.iter_mut() {
-            *s = self.ripples.tick(*s);
+        // Ripples multimode SVF after Warps, with per-sample cutoff modulation
+        // from LFO 1 and AD envelope 1.
+        let lfo_filter_scale = self.lfo_filter_depth * lfo_master * 3.0;
+        let ad_filter_scale = self.ad_filter_depth * 3.0;
+        let base_cutoff = self.ripples_cutoff_hz;
+
+        for i in 0..n {
+            let cutoff = (base_cutoff
+                * libm::powf(
+                    2.0,
+                    self.lfo1_out[i] * lfo_filter_scale + self.env1_out[i] * ad_filter_scale,
+                ))
+            .clamp(20.0, 20000.0);
+            self.ripples.set_cutoff(cutoff, SAMPLE_RATE);
+            buf[i] = self.ripples.tick(buf[i]);
         }
     }
 }
@@ -900,6 +1068,93 @@ mod tests {
             for &s in l.iter().chain(r.iter()) {
                 assert!(s.abs() <= 1.0, "clipper let {s} through");
                 assert!(s.is_finite(), "non-finite sample");
+            }
+        }
+    }
+
+    /// Capture length for the modulation-route tests. Two channels per frame,
+    /// a whole number of blocks.
+    const MOD_CAPTURE: usize = 2 * BLOCK * 40;
+
+    /// Render a single hit with every modulation depth at `depth`, for the
+    /// per-route test.
+    fn render_depth(slot: usize, depth: f32) -> [f32; MOD_CAPTURE] {
+        let mut e = engine_box();
+        for t in e.tracks.iter_mut() {
+            t.set_macro(slot, depth);
+        }
+        e.trigger(0, 1.0);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        let mut out = [0.0f32; MOD_CAPTURE];
+        let mut w = 0usize;
+        for _ in 0..(MOD_CAPTURE / (2 * BLOCK)) {
+            e.process(&mut l, &mut r);
+            for i in 0..BLOCK {
+                out[w] = l[i];
+                out[w + 1] = r[i];
+                w += 2;
+            }
+        }
+        out
+    }
+
+    /// Phase 14.3 gate: every static route must actually reach its target. If a
+    /// depth macro does nothing, the route is dead and the map is wrong.
+
+    #[test]
+    fn every_modulation_route_changes_the_sound() {
+        for route in [
+            SLOT_LFO_FILTER_DEPTH,
+            SLOT_LFO_WARPS_DEPTH,
+            SLOT_AD_FILTER_DEPTH,
+            SLOT_AD_WARPS_DEPTH,
+        ] {
+            let dry = render_depth(route, 0.0);
+            let wet = render_depth(route, 0.8);
+            let moved = dry
+                .iter()
+                .zip(wet.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                moved > 1.0e-4,
+                "modulation route at slot {route} is dead (max delta {moved})"
+            );
+        }
+    }
+
+    /// Extremes on every modulation macro must stay finite and bounded.
+    #[test]
+    fn extreme_modulation_macros_stay_finite() {
+        let slots = [
+            SLOT_LFO_RATE,
+            SLOT_LFO_DEPTH,
+            SLOT_AD_ATTACK,
+            SLOT_AD_DECAY,
+            SLOT_LFO_FILTER_DEPTH,
+            SLOT_LFO_WARPS_DEPTH,
+            SLOT_AD_FILTER_DEPTH,
+            SLOT_AD_WARPS_DEPTH,
+        ];
+        for &slot in &slots {
+            for &v in &[0.0f32, 1.0] {
+                let mut e = engine_box();
+                for t in e.tracks.iter_mut() {
+                    t.set_macro(slot, v);
+                }
+                e.trigger(0, 1.0);
+                let mut l = [0.0f32; BLOCK];
+                let mut r = [0.0f32; BLOCK];
+                for _ in 0..20 {
+                    e.process(&mut l, &mut r);
+                    for &s in l.iter().chain(r.iter()) {
+                        assert!(
+                            s.is_finite() && s.abs() <= 1.0,
+                            "slot {slot} at {v} produced {s}"
+                        );
+                    }
+                }
             }
         }
     }

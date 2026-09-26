@@ -341,6 +341,66 @@ to the six targets. Add modulation-depth macros.
 *Gate:* each routed target responds to its source; static map is correct;
 bench delta reported for worst case (all 8 tracks, all modulators active).
 
+#### As built (2026-09-26): 2 LFOs + 2 AD envelopes, not 6 + 3
+
+The plan's source count is not affordable, and the reason is worth recording
+because it is not obvious from the hardware. One Mutable Instruments Stages
+module is six *segments*, each with its own DAC output. The vendored
+`stages::SegmentGenerator` models **one segment**, i.e. one output. So "two
+Stages modules per track" is nine `SegmentGenerator` instances per track, not
+two — there is no multi-output class to collapse them into, and a wrapper owning
+six of them costs the same six.
+
+At 4,184 bytes each, 9 × 6 tracks is ~226 KB on top of a 420 KB engine: ~646 KB,
+past both the 500 KB cap and the 512 KB OCRAM limit. 14.3 therefore ships **2
+LFOs + 2 AD envelopes** (4 instances/track, engine 473,520 bytes) and the
+6 + 3 target becomes a follow-up that needs memory back from somewhere.
+
+Two consequences for the macro map, both forced by the 32-slot ceiling:
+
+- The MOD bank's 8 slots are fully consumed, so `LFO.DEPTH` is a master scalar
+  on the LFO bus and the per-target depths are what actually route.
+- MOD 0..7 collide with the core `Track` LFO1/LFO2 slots, so `Track::set_macro`
+  skips its strip/LFO interception when `strip_bypass` is set. Without that the
+  slot never sees its own depth macros and the routes are silently dead — the
+  first symptom was a modulation route that changed nothing at all.
+
+The static map that shipped, all four sources routed:
+
+| Source | Target | Depth macro |
+|---|---|---|
+| LFO 1 | Ripples cutoff (±3 octaves) | `LFO.FILT` |
+| LFO 2 | Warps timbre | `LFO.WRP` |
+| AD env 1 | Ripples cutoff (±3 octaves) | `AD.FILT` |
+| AD env 2 | Warps timbre | `AD.WRP` |
+
+`Ripples mode` (FILT 6) and the LFO 2 → Ripples FM route are still unbuilt.
+
+Two DSP details that cost real debugging time and are easy to get wrong again:
+
+- **Stages LFOs must be driven free-running.** Passing *any* gate array,
+  including an all-low one, switches `SegmentGenerator::Process` onto its
+  gate-clocked ramp extractor. The segment then sits near-constant and every
+  depth routed to it is dead. `Stages::process_free_running` passes a null
+  pointer; `process` is for gate-clocked segments only.
+- **Do not average the LFO across a Warps chunk.** Warps is limited to 32
+  samples and interpolates its own parameters between calls, so the modulator
+  is point-sampled at the chunk start. Averaging a 32-sample window against a
+  ~1.4 Hz LFO cancels most of the sweep — the route measured exactly zero.
+
+The `SEGMENT_ALT` shape is already bipolar; the AD envelopes are unipolar. The
+shim also had to learn `GATE_RISING`/`GATE_FALLING` — it folded everything
+non-zero into `HIGH`, which left one-shot AD envelopes stuck at their start.
+
+#### Memory headroom after 14.3
+
+`MiDrumEngine` is now **473,520 bytes** against the 500 KB cap — **26,480 bytes
+spare**, about 6 `SegmentGenerator` instances total, i.e. **one more per track**
+if all six go to modulation. The 8th track (14.4) plus Clouds (14.5) do not fit
+in that, so something has to give before 14.4: revisit the cap, move Stages
+state to DTCM, or carry fewer Stages instances per track. Measured, not
+estimated — the number is printed by `engine_size_fits_ocram_budget`.
+
 ### Phase 14.4 — Peaks drum voices
 
 Add the Peaks drum voice path for tracks 0–3. The track source becomes voice-

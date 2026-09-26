@@ -30,6 +30,15 @@ pub const SEGMENT_HOLD: i32 = sys::MI_STAGES_SEGMENT_HOLD as i32;
 /// Alt segment type (oscillator/LFO).
 pub const SEGMENT_ALT: i32 = sys::MI_STAGES_SEGMENT_ALT as i32;
 
+/// Gate flag: low.
+pub const GATE_LOW: u8 = 0;
+/// Gate flag: high.
+pub const GATE_HIGH: u8 = 1;
+/// Gate flag: rising edge (triggers AD envelopes).
+pub const GATE_RISING: u8 = 2;
+/// Gate flag: falling edge.
+pub const GATE_FALLING: u8 = 3;
+
 /// Mutable Instruments Stages segment generator.
 pub struct Stages {
     storage: Storage,
@@ -82,6 +91,16 @@ impl Stages {
         }
     }
 
+    /// Update the primary/secondary parameters of the current segment without
+    /// re-running configuration. Useful for changing LFO rate or envelope
+    /// times from macros at control rate.
+    pub fn set_parameters(&mut self, primary: f32, secondary: f32) {
+        #[allow(unsafe_code)]
+        unsafe {
+            sys::mi_stages_set_segment_parameters(self.storage.as_ptr(), 0, primary, secondary);
+        }
+    }
+
     /// Trigger the envelope. LFO modes ignore this.
     pub fn trigger(&mut self) {
         #[allow(unsafe_code)]
@@ -91,6 +110,10 @@ impl Stages {
     }
 
     /// Process one block, writing the generated modulation into `out`.
+    ///
+    /// `gate_flags` uses the `GATE_*` constants. Pass a gate array for
+    /// gate-clocked segments (AD envelopes); use
+    /// [`process_free_running`](Self::process_free_running) for LFOs.
     pub fn process(&mut self, gate_flags: &[u8], out: &mut [f32]) {
         let n = gate_flags.len().min(out.len());
         assert!(n <= 96, "Stages block size cannot exceed 96");
@@ -99,6 +122,24 @@ impl Stages {
             sys::mi_stages_process(
                 self.storage.as_ptr(),
                 gate_flags.as_ptr(),
+                out.as_mut_ptr(),
+                n,
+            );
+        }
+    }
+
+    /// Process one block with no gate input, so the segment free-runs on its
+    /// internal oscillator clock. This is the LFO path: handing `process` an
+    /// all-low gate array instead would clock the segment from the gates and
+    /// freeze it.
+    pub fn process_free_running(&mut self, out: &mut [f32]) {
+        let n = out.len();
+        assert!(n <= 96, "Stages block size cannot exceed 96");
+        #[allow(unsafe_code)]
+        unsafe {
+            sys::mi_stages_process(
+                self.storage.as_ptr(),
+                core::ptr::null(),
                 out.as_mut_ptr(),
                 n,
             );
@@ -140,5 +181,68 @@ mod tests {
         for &s in &out {
             assert!(s.is_finite(), "Stages AD produced non-finite sample");
         }
+    }
+
+    /// Render `blocks` free-running blocks from an LFO segment and return the
+    /// (min, max) span. A Stages LFO is slow enough that a single 32-sample
+    /// block can sit entirely on one side of the waveform, so any assertion
+    /// about its shape needs a window covering a good part of a cycle.
+    fn lfo_span(primary: f32, blocks: usize) -> (f32, f32) {
+        let mut stages = Stages::new();
+        stages.configure_single(SEGMENT_ALT, true, false, primary, 0.5);
+        let mut out = [0.0f32; 96];
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for _ in 0..blocks {
+            stages.process_free_running(&mut out);
+            for &s in &out {
+                lo = lo.min(s);
+                hi = hi.max(s);
+            }
+        }
+        (lo, hi)
+    }
+
+    /// A segment driven with no gate input free-runs on its internal clock. This
+    /// is the only mode that moves an LFO segment reliably, and it is what
+    /// [`Stages::process_free_running`] exists for.
+    #[test]
+    fn free_running_lfo_varies() {
+        let (lo, hi) = lfo_span(0.9, 64);
+        assert!(
+            hi - lo > 0.05,
+            "free-running LFO is not moving: span {}",
+            hi - lo
+        );
+    }
+
+    /// `SEGMENT_ALT` emits a bipolar waveform, so callers can use it directly
+    /// as a signed modulation source without recentring it to -1..1.
+    #[test]
+    fn alt_lfo_output_is_bipolar() {
+        let (lo, hi) = lfo_span(0.9, 64);
+        assert!(lo < -0.05, "expected negative swing, min {lo}");
+        assert!(hi > 0.05, "expected positive swing, max {hi}");
+    }
+
+    /// A RISING gate must actually move an AD envelope; the shim used to fold
+    /// RISING into HIGH, which left one-shot envelopes stuck.
+    #[test]
+    fn ad_envelope_rises_on_rising_gate() {
+        let mut stages = Stages::new();
+        stages.configure_ad(0.05, 0.3);
+        let mut gate = [GATE_LOW; 32];
+        gate[0] = GATE_RISING;
+        let mut first = [0.0f32; 32];
+        stages.process(&gate, &mut first);
+
+        let mut second = [0.0f32; 32];
+        stages.process(&[GATE_LOW; 32], &mut second);
+
+        let third = second[31];
+        assert!(
+            first[31] < third,
+            "AD envelope did not advance: first {} then {third}",
+            first[31]
+        );
     }
 }

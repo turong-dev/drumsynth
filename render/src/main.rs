@@ -1088,8 +1088,10 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
 /// the render covers the new strip chain.
 fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
     use mi_drum_engine::{
-        DeviceEngine, MiMachineId, SLOT_FILT_0, SLOT_FILT_1, SLOT_STRIP_CUT, SLOT_STRIP_HOLD,
-        SLOT_STRIP_RESO, TRACKS as MI_TRACKS,
+        DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
+        SLOT_AD_WARPS_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
+        SLOT_LFO_RATE, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
+        TRACKS as MI_TRACKS,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -1113,6 +1115,15 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
         engine.tracks_mut()[0].set_macro(SLOT_STRIP_CUT, 0.5);
         engine.tracks_mut()[0].set_macro(SLOT_STRIP_RESO, 0.25);
         engine.tracks_mut()[0].set_macro(SLOT_STRIP_HOLD, 0.7);
+        // Modulation live, so the Stages path is inside the hash.
+        engine.tracks_mut()[0].set_macro(SLOT_LFO_RATE, 0.45);
+        engine.tracks_mut()[0].set_macro(SLOT_LFO_DEPTH, 0.8);
+        engine.tracks_mut()[0].set_macro(SLOT_AD_ATTACK, 0.05);
+        engine.tracks_mut()[0].set_macro(SLOT_AD_DECAY, 0.35);
+        engine.tracks_mut()[0].set_macro(SLOT_LFO_FILTER_DEPTH, 0.30);
+        engine.tracks_mut()[0].set_macro(SLOT_LFO_WARPS_DEPTH, 0.20);
+        engine.tracks_mut()[0].set_macro(SLOT_AD_FILTER_DEPTH, 0.25);
+        engine.tracks_mut()[0].set_macro(SLOT_AD_WARPS_DEPTH, 0.20);
         engine.trigger(0, 1.0);
         for _ in 0..blocks_per_hit {
             engine.process(&mut l, &mut r);
@@ -1127,23 +1138,52 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
     // so the strip is actually exercised.
     engine.load_kit(&mi_drum_engine::DEFAULT_KIT);
 
-    // (warps timbre, ripples cutoff, ripples resonance, warps drive)
-    type StripSpec = (f32, f32, f32, f32);
+    // (warps timbre, ripples cutoff, ripples resonance, warps drive,
+    //  lfo rate, lfo depth, lfo->filter, lfo->warps, ad attack, ad decay,
+    //  ad->filter, ad->warps)
+    //
+    // Depths stay moderate: the full-scale end of the filter depth is three
+    // octaves, and six tracks all modulating at once drives the master sum
+    // into the clipper, which would make the baseline a test of the limiter
+    // rather than of the modulation map.
+    type StripSpec = (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32);
     let strips: [StripSpec; MI_TRACKS] = [
-        (0.40, 0.55, 0.20, 0.60),
-        (0.55, 0.35, 0.40, 0.75),
-        (0.30, 0.80, 0.10, 0.50),
-        (0.65, 0.45, 0.55, 0.80),
-        (0.25, 0.70, 0.30, 0.65),
-        (0.50, 0.60, 0.15, 0.55),
+        (
+            0.40, 0.55, 0.20, 0.60, 0.45, 0.80, 0.30, 0.20, 0.05, 0.35, 0.25, 0.20,
+        ),
+        (
+            0.55, 0.35, 0.40, 0.75, 0.55, 0.60, 0.20, 0.15, 0.10, 0.50, 0.20, 0.15,
+        ),
+        (
+            0.30, 0.80, 0.10, 0.50, 0.35, 0.90, 0.35, 0.10, 0.02, 0.25, 0.15, 0.10,
+        ),
+        (
+            0.65, 0.45, 0.55, 0.80, 0.60, 0.70, 0.15, 0.30, 0.15, 0.60, 0.30, 0.20,
+        ),
+        (
+            0.25, 0.70, 0.30, 0.65, 0.40, 0.75, 0.25, 0.25, 0.08, 0.40, 0.20, 0.25,
+        ),
+        (
+            0.50, 0.60, 0.15, 0.55, 0.50, 0.65, 0.20, 0.15, 0.12, 0.30, 0.25, 0.15,
+        ),
     ];
 
-    for (track, &(timbre, cutoff, resonance, drive)) in strips.iter().enumerate() {
-        engine.tracks_mut()[track].set_macro(SLOT_FILT_0, warps_algorithm);
-        engine.tracks_mut()[track].set_macro(SLOT_FILT_1, timbre);
-        engine.tracks_mut()[track].set_macro(SLOT_STRIP_CUT, cutoff);
-        engine.tracks_mut()[track].set_macro(SLOT_STRIP_RESO, resonance);
-        engine.tracks_mut()[track].set_macro(SLOT_STRIP_HOLD, drive);
+    for (idx, &s) in strips.iter().enumerate() {
+        let (timbre, cutoff, resonance, drive) = (s.0, s.1, s.2, s.3);
+        let track = &mut engine.tracks_mut()[idx];
+        track.set_macro(SLOT_FILT_0, warps_algorithm);
+        track.set_macro(SLOT_FILT_1, timbre);
+        track.set_macro(SLOT_STRIP_CUT, cutoff);
+        track.set_macro(SLOT_STRIP_RESO, resonance);
+        track.set_macro(SLOT_STRIP_HOLD, drive);
+        track.set_macro(SLOT_LFO_RATE, s.4);
+        track.set_macro(SLOT_LFO_DEPTH, s.5);
+        track.set_macro(SLOT_LFO_FILTER_DEPTH, s.6);
+        track.set_macro(SLOT_LFO_WARPS_DEPTH, s.7);
+        track.set_macro(SLOT_AD_ATTACK, s.8);
+        track.set_macro(SLOT_AD_DECAY, s.9);
+        track.set_macro(SLOT_AD_FILTER_DEPTH, s.10);
+        track.set_macro(SLOT_AD_WARPS_DEPTH, s.11);
     }
 
     // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
@@ -1687,7 +1727,7 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0x2626_751b_455c_d325;
+    const BASELINE_DIGEST: u64 = 0xf645_7110_384d_8325;
 
     /// One test, one render, deliberately.
     ///
