@@ -15,6 +15,7 @@ use crate::slot::{Slot, SlotId};
 use crate::sound::Sound;
 use crate::strip::StripParams;
 use crate::OutPair;
+use crate::BLOCK;
 use crate::SAMPLE_RATE;
 
 /// One velocity-modulation slot: maps incoming velocity to a destination with
@@ -166,6 +167,11 @@ where
     declick_r: f32,
     /// Samples left in the choke fade-out window. 0 = no fade in progress.
     choke_fade_left: usize,
+    /// Mono source samples collected for the current segment. Filled by the
+    /// engine via [`Slot::tick`](crate::slot::Slot::tick) so that source voices
+    /// with a shared random generator stay sample-interleaved across tracks;
+    /// the strip then processes this buffer block-wise.
+    pub(crate) source_segment: [f32; BLOCK],
 }
 
 impl<S, const N: usize> Track<S, N>
@@ -210,6 +216,7 @@ where
             declick_l: 0.0,
             declick_r: 0.0,
             choke_fade_left: 0,
+            source_segment: [0.0f32; BLOCK],
         }
     }
 
@@ -264,6 +271,7 @@ where
         core::ptr::addr_of_mut!((*ptr).declick_l).write(0.0);
         core::ptr::addr_of_mut!((*ptr).declick_r).write(0.0);
         core::ptr::addr_of_mut!((*ptr).choke_fade_left).write(0);
+        core::ptr::addr_of_mut!((*ptr).source_segment).write([0.0f32; BLOCK]);
     }
 
     /// Replace the slot on this track, resetting macros to its defaults. Strip
@@ -863,6 +871,97 @@ where
         }
 
         (l, r)
+    }
+
+    /// Render one contiguous segment into the output and send buses.
+    ///
+    /// `source` is a mono buffer of `n` source samples collected by the engine
+    /// (typically via [`Slot::tick`](crate::slot::Slot::tick)). `start` is the
+    /// offset into the block. The strip (amp env, drive, filter, level, pan,
+    /// sends, choke, de-click) is applied sample-wise. This is the segment-
+    /// based equivalent of calling [`tick`](Self::tick) `n` times.
+    pub fn process_segment(
+        &mut self,
+        source: &[f32],
+        start: usize,
+        n: usize,
+        master_l: &mut [f32; BLOCK],
+        master_r: &mut [f32; BLOCK],
+        aux: &mut [[f32; BLOCK]; 6],
+        send_dl: &mut [f32; BLOCK],
+        send_dr: &mut [f32; BLOCK],
+        send_rl: &mut [f32; BLOCK],
+        send_rr: &mut [f32; BLOCK],
+    ) {
+        debug_assert!(start + n <= BLOCK);
+        debug_assert!(source.len() >= n);
+
+        let sd = self.eff_send_delay;
+        let sr = self.eff_send_reverb;
+        let out = self.strip.out;
+
+        for i in 0..n {
+            let machine_sample = source[i];
+            let amp = self.amp_env.tick();
+            let stage = machine_sample * amp;
+            let driven = fast::soft_clip(stage * self.eff_drive);
+            let filtered = self.filter.tick(driven);
+            let mixed = filtered * self.eff_level;
+            let mut l = mixed * self.pan_l;
+            let mut r = mixed * self.pan_r;
+
+            // Choke fade-out: linear ramp to silence, then hard-reset the voice.
+            if self.choke_fade_left > 0 {
+                self.choke_fade_left -= 1;
+                let g = self.choke_fade_left as f32 / CHOKE_SAMPLES as f32;
+                l *= g;
+                r *= g;
+                if self.choke_fade_left == 0 {
+                    self.slot.reset();
+                    self.amp_env.reset();
+                    self.filter.reset();
+                    self.mod_state.reset();
+                    self.declick_left = 0;
+                }
+            }
+
+            // Retrigger de-click: sync the last output, then if a window is
+            // armed, crossfade from the pre-trigger output toward the new voice.
+            self.declick_l = l;
+            self.declick_r = r;
+            if self.declick_left > 0 {
+                self.declick_left -= 1;
+                self.declick_t += DECLICK_STEP;
+                let t = self.declick_t.min(1.0);
+                let inv = 1.0 - t;
+                l = self.declick_from_l * inv + l * t;
+                r = self.declick_from_r * inv + r * t;
+            }
+
+            let idx = start + i;
+            send_dl[idx] += l * sd;
+            send_dr[idx] += r * sd;
+            send_rl[idx] += l * sr;
+            send_rr[idx] += r * sr;
+            match out {
+                OutPair::Master => {
+                    master_l[idx] += l;
+                    master_r[idx] += r;
+                }
+                OutPair::Aux1 => {
+                    aux[0][idx] += l;
+                    aux[1][idx] += r;
+                }
+                OutPair::Aux2 => {
+                    aux[2][idx] += l;
+                    aux[3][idx] += r;
+                }
+                OutPair::Aux3 => {
+                    aux[4][idx] += l;
+                    aux[5][idx] += r;
+                }
+            }
+        }
     }
 }
 

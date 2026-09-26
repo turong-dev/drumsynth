@@ -25,18 +25,20 @@ pub use device_core::{
 
 pub use device_core::macros::SLOT_FILT_0;
 
+use device_core::dsp::Svf;
 use device_core::macros::{
     mi, resv, MacroInfo, LFO1_DEPTH_INFO, LFO1_DEST_INFO, LFO1_RATE_INFO, LFO2_DEPTH_INFO,
     LFO2_DEST_INFO, LFO2_RATE_INFO, MACH_INFO, NUM_MACROS, OUT_INFO, PAN_INFO, SEND_DLY_INFO,
     SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3,
-    SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN,
-    SLOT_SEND_DELAY,
+    SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
     SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
     SLOT_STRIP_RESO, STRIP_ATK_INFO, STRIP_CUT_INFO, STRIP_DEC_INFO, STRIP_HOLD_INFO,
     STRIP_RESO_INFO,
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::spike_stages::{Lpg, Overdrive, Resonator};
+use mi_dsp::stages::Stages as ModStages;
+use mi_dsp::warps::Warps;
 
 /// Seed the noise generator shared by every Plaits engine on this device.
 ///
@@ -448,6 +450,13 @@ pub struct MiSlot {
     retune_semitones: f32,
     stage_kind: StageKind,
     stages: Stages,
+    // Phase 14 fixed-strip modules. Pass-through in Phase 14.1; activated in
+    // 14.2 (Warps + Ripples SVF) and 14.3 (Stages modulation).
+    warps: Warps,
+    ripples: Svf,
+    mod_stages_lfo: ModStages,
+    mod_stages_env: ModStages,
+    segment: [f32; BLOCK],
 }
 
 impl MiSlot {
@@ -553,6 +562,11 @@ impl Slot<NUM_MACROS> for MiSlot {
             retune_semitones: 0.0,
             stage_kind: StageKind::None,
             stages: Stages::new(),
+            warps: Warps::new(SAMPLE_RATE),
+            ripples: Svf::new(device_core::dsp::SvfMode::Off),
+            mod_stages_lfo: ModStages::new(),
+            mod_stages_env: ModStages::new(),
+            segment: [0.0f32; BLOCK],
         };
         slot.set_macros(macros);
         slot
@@ -599,6 +613,11 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
             core::ptr::addr_of_mut!((*ptr).stage_kind).write(StageKind::None);
             core::ptr::addr_of_mut!((*ptr).stages).write(Stages::new());
+            core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
+            core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Off));
+            core::ptr::addr_of_mut!((*ptr).mod_stages_lfo).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).mod_stages_env).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).segment).write([0.0f32; BLOCK]);
             (*ptr).set_macros(macros);
         }
     }

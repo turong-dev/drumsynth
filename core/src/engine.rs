@@ -13,7 +13,7 @@ use crate::midi::CHROMATIC_REFERENCE_NOTE;
 use crate::slot::Slot;
 use crate::sound::Sound;
 use crate::track::Track;
-use crate::{EngineEvent, OutPair, TimedQueue, BLOCK};
+use crate::{EngineEvent, TimedQueue, BLOCK};
 
 /// Trait surface shared by every device engine.
 ///
@@ -343,13 +343,34 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
         let mut send_rl = [0.0f32; BLOCK];
         let mut send_rr = [0.0f32; BLOCK];
 
-        let all_master = self.tracks.iter().all(|t| t.strip.out == OutPair::Master);
+        // Split the block into segments at timed-event boundaries so that
+        // block-rate slots can render each contiguous run in one call while
+        // still honouring sample-accurate triggers.
+        let mut segment_ends = [BLOCK; crate::MAX_TIMED_EVENTS + 1];
+        let mut n_segments = 0;
+        let mut last_end = 0;
+        for k in 0..n_timed {
+            let offset = timed[k].expect("drained entries are Some").offset;
+            if offset > last_end && offset <= BLOCK {
+                segment_ends[n_segments] = offset;
+                n_segments += 1;
+                last_end = offset;
+            }
+        }
+        if last_end < BLOCK {
+            segment_ends[n_segments] = BLOCK;
+            n_segments += 1;
+        }
 
-        for i in 0..BLOCK {
-            let mut k = 0;
+        let mut k = 0;
+        let mut start = 0;
+        for seg in 0..n_segments {
+            let end = segment_ends[seg];
+
+            // Process every timed event at this segment boundary.
             while k < n_timed {
                 let ev = timed[k].expect("drained entries are Some");
-                if ev.offset != i {
+                if ev.offset != start {
                     break;
                 }
                 match ev.event {
@@ -365,55 +386,49 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
                 k += 1;
             }
 
-            if all_master {
+            let n = end - start;
+
+            // Collect source samples for this segment, interleaved across
+            // tracks. Voices that share a process-global random generator
+            // (e.g. Plaits) must stay sample-interleaved to preserve the
+            // exact draw sequence and keep renders bit-identical.
+            for i in 0..n {
                 let mut t = 0;
                 while t < T {
-                    if self.tracks[t].is_active() {
-                        let (l, r) = self.tracks[t].tick();
-                        let sd = self.tracks[t].eff_send_delay;
-                        let sr = self.tracks[t].eff_send_reverb;
-                        send_dl[i] += l * sd;
-                        send_dr[i] += r * sd;
-                        send_rl[i] += l * sr;
-                        send_rr[i] += r * sr;
-                        master_l[i] += l;
-                        master_r[i] += r;
-                    }
-                    t += 1;
-                }
-            } else {
-                let mut t = 0;
-                while t < T {
-                    if self.tracks[t].is_active() {
-                        let (l, r) = self.tracks[t].tick();
-                        let sd = self.tracks[t].eff_send_delay;
-                        let sr = self.tracks[t].eff_send_reverb;
-                        send_dl[i] += l * sd;
-                        send_dr[i] += r * sd;
-                        send_rl[i] += l * sr;
-                        send_rr[i] += r * sr;
-                        match self.tracks[t].strip.out {
-                            OutPair::Master => {
-                                master_l[i] += l;
-                                master_r[i] += r;
-                            }
-                            OutPair::Aux1 => {
-                                aux[0][i] += l;
-                                aux[1][i] += r;
-                            }
-                            OutPair::Aux2 => {
-                                aux[2][i] += l;
-                                aux[3][i] += r;
-                            }
-                            OutPair::Aux3 => {
-                                aux[4][i] += l;
-                                aux[5][i] += r;
-                            }
-                        }
-                    }
+                    self.tracks[t].source_segment[i] = if self.tracks[t].is_active() {
+                        self.tracks[t].slot.tick()
+                    } else {
+                        0.0
+                    };
                     t += 1;
                 }
             }
+
+            // Apply the strip to each track's collected segment. Copy the
+            // source out first so the process_segment mutable borrow does not
+            // conflict with the immutable borrow of source_segment.
+            let mut source = [0.0f32; BLOCK];
+            let mut t = 0;
+            while t < T {
+                if self.tracks[t].is_active() {
+                    source[..n].copy_from_slice(&self.tracks[t].source_segment[..n]);
+                    self.tracks[t].process_segment(
+                        &source[..n],
+                        start,
+                        n,
+                        master_l,
+                        master_r,
+                        aux,
+                        &mut send_dl,
+                        &mut send_dr,
+                        &mut send_rl,
+                        &mut send_rr,
+                    );
+                }
+                t += 1;
+            }
+
+            start = end;
         }
 
         let mut wet_dl = [0.0f32; BLOCK];

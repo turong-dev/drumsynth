@@ -89,4 +89,19 @@ pub trait Slot<const N: usize>: Sized {
 
     /// One sample of output, pre-strip.
     fn tick(&mut self) -> f32;
+
+    /// Render one contiguous segment of samples into `out`.
+    ///
+    /// The default implementation calls [`tick`](Self::tick) for each sample,
+    /// which is correct for any per-sample voice. Block-rate devices can
+    /// override this to render the segment in one call and keep the strip
+    /// processing block-aligned.
+    ///
+    /// `out` is a mono buffer; pan, level and sends are applied by the
+    /// containing [`Track`](crate::track::Track).
+    fn process_segment(&mut self, out: &mut [f32]) {
+        for s in out.iter_mut() {
+            *s = self.tick();
+        }
+    }
 }
