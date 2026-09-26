@@ -1160,12 +1160,30 @@ fn render_mi_drum(stage_macro: f32) -> Vec<f32> {
     // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
     // modal / noise / string against the default kit.
     const PATTERN: [[bool; 16]; MI_TRACKS] = [
-        [true, false, false, false, true, false, false, false, true, false, false, true, true, false, false, false],
-        [false, false, false, false, true, false, false, false, false, false, false, false, true, false, true, false],
-        [true, false, true, false, true, false, true, false, true, false, true, false, true, false, true, true],
-        [false, false, true, false, false, false, false, true, false, false, true, false, false, false, false, false],
-        [false, false, false, true, false, false, false, false, false, true, false, false, false, false, true, false],
-        [true, false, false, false, false, false, true, false, false, false, false, false, true, false, false, false],
+        [
+            true, false, false, false, true, false, false, false, true, false, false, true, true,
+            false, false, false,
+        ],
+        [
+            false, false, false, false, true, false, false, false, false, false, false, false,
+            true, false, true, false,
+        ],
+        [
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, true,
+        ],
+        [
+            false, false, true, false, false, false, false, true, false, false, true, false, false,
+            false, false, false,
+        ],
+        [
+            false, false, false, true, false, false, false, false, false, true, false, false,
+            false, false, true, false,
+        ],
+        [
+            true, false, false, false, false, false, true, false, false, false, false, false, true,
+            false, false, false,
+        ],
     ];
 
     let bpm = 130.0f32;
