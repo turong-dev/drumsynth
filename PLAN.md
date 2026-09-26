@@ -374,7 +374,32 @@ The static map that shipped, all four sources routed:
 | AD env 1 | Ripples cutoff (±3 octaves) | `AD.FILT` |
 | AD env 2 | Warps timbre | `AD.WRP` |
 
-`Ripples mode` (FILT 6) and the LFO 2 → Ripples FM route are still unbuilt.
+`Ripples mode` and the LFO 2 → Ripples FM route are still unbuilt. `Ripples mode`
+is now free to add — FILT 7 is the last free `resv()` in the FILT bank and
+`SvfMode` already has `Bp`/`Hp`/`Notch` implemented and tested in `core`.
+
+### Warps internal carrier (landed with 14.3)
+
+`Parameters::carrier_shape` selects one of Warps' five internal oscillators
+(sine, triangle, saw, pulse, band-limited noise) *in place of* the external
+input, with the input as its FM index and a MIDI note as the centre pitch. The
+shim hardcoded `carrier_shape = 0`, so the module could only cross-modulate its
+own input. `WARP.CAR` on FILT 6 now selects it, quantised over six positions
+with 0.0 keeping the old behaviour, and the oscillator is pitched from the
+voice's own note so Warps tracks pitch. Costs no RAM.
+
+Two corrections to earlier claims in this document, both worth keeping:
+
+- Warps does **not** have nine reachable algorithms. The front-panel
+  `ModulationAlgorithm` enum lists `SPECTRAL`, `MORPH` and `VOCODER`, but the
+  DSP-side `ALGORITHM_` enum is trimmed to six plus `NOP`, because those three
+  all route through the vocoder whose member is commented out for memory. The
+  existing 0..1 mapping already spans all six.
+- `Modulator`'s constructor is empty and `Init` only seeds
+  `previous_parameters_`, so `parameters_` was read as whatever was in the
+  placement-new storage — uninitialised OCRAM in the firmware. `mi_warps_init`
+  now seeds it.
+
 
 Two DSP details that cost real debugging time and are easy to get wrong again:
 
@@ -408,6 +433,63 @@ type-aware. Plaits tracks remain unchanged.
 
 *Gate:* all 8 tracks render; Peaks voices trigger and decay; combined bench
 under the budget ceiling.
+
+#### Vendoring: closed 2026-09-26
+
+The missing files were in **`pichenettes/eurorack`**, not `pichenettes/peaks`.
+`gate_processor.h`, `resources.h` and `resources.cc` are now vendored verbatim
+and all four models compile and sound. Two traps are recorded in
+`docs/peaks-vendoring.md`:
+
+- `GateFlags` is a **Peaks-local `uint8_t`** with its own bit values, not
+  `stmlib::GateFlags`, and `ControlMode` is two states, not three. A shim that
+  passes `stmlib` gate flags through will mistrigger.
+- The raw `Process` output **saturates** — BassDrum clips 99.98% of samples with
+  no output limiting, because the real module applies gain staging and a limiter
+  downstream that we bypass. The wrapper needs a per-model trim or every Peaks
+  voice is a square wave.
+
+`resources.cc` is 376 KB and only ~5 of its tables are used; the rest is
+`wav_digits` and wavefolding tables belonging to the display engine. Vendored
+whole to keep the tree a faithful copy; it is the obvious trim if flash gets
+tight. Not compiled until the Rust wrapper lands, to avoid adding 40 KB of dead
+data to the image for nothing.
+
+
+#### Memory: the plan is to give Peaks tracks 1 LFO + 1 AD envelope
+
+Per-track Stages instances dominate the budget, and each is 4,184 B. Measured
+component sizes:
+
+| | bytes |
+|---|---|
+| one `SegmentGenerator` (Stages) | 4,184 |
+| one Plaits voice | 12,304 |
+| all four Peaks models together | 440 |
+
+Peaks voices are ~28× cheaper than Plaits, so trading Plaits voices for Peaks
+voices *frees* the memory the extra tracks need. Modelling the engine at
+473,520 bytes today with 263,184 of that non-track overhead:
+
+| 8-track config | Stages | Voices | est. engine | spare |
+|---|---|---|---|---|
+| 4 Plaits + 4 Peaks, all 2 LFO + 2 AD | 32 | 4 Plaits + 440 | ~493,400 | ~6,600 |
+| **4 Plaits (2+2) + 4 Peaks (1+1)** | **24** | 4 Plaits + 440 | **~458,900** | **~41,000** |
+
+The second row is the plan: it costs **no** extra Stages instances versus today,
+and frees ~41 KB instead of the 26 KB currently spare. It is also musically
+defensible — MI's own Peaks module has no modulation concept at all, just a raw
+parameter array, so one LFO and one envelope on a drum voice is already
+generous. The estimates are built from measured component sizes; the real number
+comes from `engine_size_fits_ocram_budget`, which prints it.
+
+**Clouds must not live inside the engine.** Its buffers are 118,784 + 65,536 B
+plus a 9,096 B processor — ~193 KB, which no row above absorbs. It is a send-bus
+effect, not per-track, so it belongs in a firmware `.uninit` static fed from the
+engine's existing `wet_l`/`wet_r` output, leaving one macro slot (`TRACK 6`, now
+a free `resv()`) for the send amount. Decide this before 14.5; if Clouds ends up
+inside `SendFx` the whole plan is dead.
+
 
 ### Phase 14.5 — Clouds send FX
 

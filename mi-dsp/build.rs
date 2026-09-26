@@ -152,6 +152,13 @@ fn main() {
     // Note: user_data_receiver.cc is not compiled because it depends on the
     // stm_audio_bootloader library which we do not vendor.
 
+    // NOTE: `peaks/` is vendored and complete as of 2026-09-26, but still
+    // deliberately NOT compiled. The Rust wrapper does not exist yet, and
+    // pulling the C++ in now would add ~40 KB of dead `wav_digits` to the
+    // image for nothing. Phase 14.4 adds both together. See
+    // docs/peaks-vendoring.md for provenance and two integration traps (the
+    // GateFlags type is Peaks-local, and the raw output needs a trim).
+
     // Warps meta-modulator.
     for name in ["oscillator", "modulator", "vocoder", "filter_bank"] {
         build.file(vendor.join(format!("warps/dsp/{name}.cc")));
