@@ -126,11 +126,16 @@ void mi_warps_process(
     float* out_l,
     float* out_r,
     size_t size);
+// `carrier_shape`: 0 uses the input as its own carrier (cross-modulation);
+// 1..5 selects an internal Warps oscillator as the carrier, FM-indexed by the
+// input, at MIDI pitch `note`.
 void mi_warps_set_parameters(
     void* storage,
     float algorithm,
     float parameter,
-    float drive);
+    float drive,
+    int32_t carrier_shape,
+    float note);
 
 // ---------------------------------------------------------------------------
 // Stages

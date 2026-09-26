@@ -1091,7 +1091,7 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
         DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
         SLOT_AD_WARPS_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
         SLOT_LFO_RATE, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
-        TRACKS as MI_TRACKS,
+        SLOT_WARPS_CARRIER, TRACKS as MI_TRACKS,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -1124,6 +1124,11 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
         engine.tracks_mut()[0].set_macro(SLOT_LFO_WARPS_DEPTH, 0.20);
         engine.tracks_mut()[0].set_macro(SLOT_AD_FILTER_DEPTH, 0.25);
         engine.tracks_mut()[0].set_macro(SLOT_AD_WARPS_DEPTH, 0.20);
+        // Walk the carrier through all six sources across the machine sweep, so
+        // the baseline covers Warps' internal oscillators as well as the
+        // cross-modulator.
+        let carrier = (MiMachineId::ALL.len() % 6) as f32 / 6.0;
+        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, carrier);
         engine.trigger(0, 1.0);
         for _ in 0..blocks_per_hit {
             engine.process(&mut l, &mut r);
@@ -1140,31 +1145,45 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
 
     // (warps timbre, ripples cutoff, ripples resonance, warps drive,
     //  lfo rate, lfo depth, lfo->filter, lfo->warps, ad attack, ad decay,
-    //  ad->filter, ad->warps)
+    //  ad->filter, ad->warps, warps carrier)
     //
     // Depths stay moderate: the full-scale end of the filter depth is three
     // octaves, and six tracks all modulating at once drives the master sum
     // into the clipper, which would make the baseline a test of the limiter
     // rather than of the modulation map.
-    type StripSpec = (f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32);
+    type StripSpec = (
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+        f32,
+    );
     let strips: [StripSpec; MI_TRACKS] = [
         (
-            0.40, 0.55, 0.20, 0.60, 0.45, 0.80, 0.30, 0.20, 0.05, 0.35, 0.25, 0.20,
+            0.40, 0.55, 0.20, 0.60, 0.45, 0.80, 0.30, 0.20, 0.05, 0.35, 0.25, 0.20, 0.0,
         ),
         (
-            0.55, 0.35, 0.40, 0.75, 0.55, 0.60, 0.20, 0.15, 0.10, 0.50, 0.20, 0.15,
+            0.55, 0.35, 0.40, 0.75, 0.55, 0.60, 0.20, 0.15, 0.10, 0.50, 0.20, 0.15, 0.2,
         ),
         (
-            0.30, 0.80, 0.10, 0.50, 0.35, 0.90, 0.35, 0.10, 0.02, 0.25, 0.15, 0.10,
+            0.30, 0.80, 0.10, 0.50, 0.35, 0.90, 0.35, 0.10, 0.02, 0.25, 0.15, 0.10, 0.4,
         ),
         (
-            0.65, 0.45, 0.55, 0.80, 0.60, 0.70, 0.15, 0.30, 0.15, 0.60, 0.30, 0.20,
+            0.65, 0.45, 0.55, 0.80, 0.60, 0.70, 0.15, 0.30, 0.15, 0.60, 0.30, 0.20, 0.6,
         ),
         (
-            0.25, 0.70, 0.30, 0.65, 0.40, 0.75, 0.25, 0.25, 0.08, 0.40, 0.20, 0.25,
+            0.25, 0.70, 0.30, 0.65, 0.40, 0.75, 0.25, 0.25, 0.08, 0.40, 0.20, 0.25, 0.8,
         ),
         (
-            0.50, 0.60, 0.15, 0.55, 0.50, 0.65, 0.20, 0.15, 0.12, 0.30, 0.25, 0.15,
+            0.50, 0.60, 0.15, 0.55, 0.50, 0.65, 0.20, 0.15, 0.12, 0.30, 0.25, 0.15, 1.0,
         ),
     ];
 
@@ -1184,6 +1203,7 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
         track.set_macro(SLOT_AD_DECAY, s.9);
         track.set_macro(SLOT_AD_FILTER_DEPTH, s.10);
         track.set_macro(SLOT_AD_WARPS_DEPTH, s.11);
+        track.set_macro(SLOT_WARPS_CARRIER, s.12);
     }
 
     // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
@@ -1727,7 +1747,7 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0xf645_7110_384d_8325;
+    const BASELINE_DIGEST: u64 = 0xe09f_f063_4b6c_aa61;
 
     /// One test, one render, deliberately.
     ///

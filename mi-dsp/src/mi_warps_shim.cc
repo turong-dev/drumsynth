@@ -18,6 +18,22 @@ extern "C" {
 void mi_warps_init(void* storage, float sample_rate) {
   warps::Modulator* m = new (storage) warps::Modulator();
   m->Init(sample_rate);
+
+  // `Modulator`'s constructor is empty and `Init` only seeds
+  // `previous_parameters_`, so `parameters_` is left as whatever was in the
+  // placement-new storage — in the firmware that is uninitialised OCRAM. Seed
+  // it to a sane external-carrier cross-modulator so a `Process` before any
+  // `set_parameters` is still well-defined rather than reading garbage.
+  warps::Parameters* p = m->mutable_parameters();
+  p->channel_drive[0] = 1.0f;
+  p->channel_drive[1] = 1.0f;
+  p->modulation_algorithm = 0.0f;
+  p->modulation_parameter = 0.5f;
+  p->frequency_shift_pot = 0.5f;
+  p->frequency_shift_cv = 0.5f;
+  p->phase_shift = 0.5f;
+  p->note = 48.0f;
+  p->carrier_shape = 0;  // external carrier
 }
 
 void mi_warps_process(
@@ -50,14 +66,20 @@ void mi_warps_set_parameters(
     void* storage,
     float algorithm,
     float parameter,
-    float drive) {
+    float drive,
+    int32_t carrier_shape,
+    float note) {
   warps::Modulator* m = reinterpret_cast<warps::Modulator*>(storage);
   warps::Parameters* p = m->mutable_parameters();
   p->modulation_algorithm = algorithm;
   p->modulation_parameter = parameter;
   p->channel_drive[0] = drive;
   p->channel_drive[1] = drive;
-  p->carrier_shape = 0;  // external carrier
+  // 0 = external carrier (the input cross-modulates itself). 1..5 selects an
+  // internal oscillator as the carrier, with the input as its FM index; the
+  // shape is `OscillatorShape(carrier_shape - 1)` and `note` is a MIDI pitch.
+  p->carrier_shape = carrier_shape;
+  p->note = note;
 }
 
 }  // extern "C"

@@ -167,6 +167,8 @@ extern "C" {
         algorithm: f32,
         parameter: f32,
         drive: f32,
+        carrier_shape: i32,
+        note: f32,
     );
 
     // Stages

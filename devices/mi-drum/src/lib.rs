@@ -30,14 +30,14 @@ pub use device_core::macros::{
 
 use device_core::dsp::Svf;
 use device_core::macros::{
-    macro_index, mi, resv, MacroInfo, BANK_MOD, MACH_INFO, NUM_MACROS, OUT_INFO, PAN_INFO,
-    SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2,
-    SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN,
-    SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    macro_index, mi, resv, MacroInfo, BANK_FILT, BANK_MOD, MACH_INFO, NUM_MACROS, OUT_INFO,
+    PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1,
+    SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
+    SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::stages::{Stages as ModStages, GATE_LOW, GATE_RISING, SEGMENT_ALT};
-use mi_dsp::warps::{Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
+use mi_dsp::warps::{Carrier, Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
 
 /// Seed the noise generator shared by every Plaits engine on this device.
 ///
@@ -255,6 +255,7 @@ impl MiMachineId {
         m[SLOT_WARPS_ALGO] = 0.0;
         m[SLOT_WARPS_TIMBRE] = 0.5;
         m[SLOT_WARPS_DRIVE] = 0.7; // Warps input VCA; 0 is silent
+        m[SLOT_WARPS_CARRIER] = 0.0; // external cross-modulation
         m[SLOT_RIPPLES_CUTOFF] = 0.5; // ~1 kHz
         m[SLOT_RIPPLES_RESONANCE] = 0.01; // gentle Q
         m[SLOT_RIPPLES_FM] = 0.0;
@@ -318,6 +319,10 @@ impl DeviceModel<NUM_MACROS> for MiMachineId {
 // Macro slot aliases for the Phase 14 fixed strip.
 const SLOT_WARPS_ALGO: usize = SLOT_FILT_0;
 const SLOT_WARPS_TIMBRE: usize = SLOT_FILT_1;
+/// FILT 6: Warps carrier source. 0 = the input cross-modulates itself (the
+/// pre-14.4 behaviour); the rest select Warps' internal sine/triangle/saw/
+/// pulse/noise oscillators, pitched from the voice's own note.
+pub const SLOT_WARPS_CARRIER: usize = macro_index(BANK_FILT, 6);
 const SLOT_WARPS_DRIVE: usize = SLOT_STRIP_HOLD;
 const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
@@ -342,6 +347,7 @@ pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
 
 const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
 const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
+const WARPS_CARRIER_INFO: MacroInfo = mi("WARP.CAR", "WCA", 0.0);
 const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.7);
 const RIPPLES_CUTOFF_INFO: MacroInfo = mi("RIP.CUT", "RCT", 0.5);
 const RIPPLES_RESONANCE_INFO: MacroInfo = mi("RIP.RES", "RRS", 0.5);
@@ -371,7 +377,7 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     RIPPLES_RESONANCE_INFO,   // FILT 3 — Ripples resonance
     RIPPLES_FM_INFO,          // FILT 4 — Ripples FM amount
     WARPS_DRIVE_INFO,         // FILT 5 — Warps input drive / VCA
-    resv(),                   // FILT 6
+    WARPS_CARRIER_INFO,       // FILT 6 — Warps carrier source
     resv(),                   // FILT 7
     MACH_INFO,                // TRACK 0
     OUT_INFO,                 // TRACK 1
@@ -409,6 +415,7 @@ pub struct MiSlot {
     retune_semitones: f32,
     // Phase 14 fixed-strip modules.
     warps: Warps,
+    warps_carrier: Carrier,
     ripples: Svf,
     lfo1: ModStages,
     lfo2: ModStages,
@@ -446,6 +453,23 @@ impl MiSlot {
     /// Recompute `patch.note` from stored tune macro and retune offset.
     fn update_note(&mut self) {
         self.patch.note = Self::tune_to_note(self.tune_macro) + self.retune_semitones;
+    }
+
+    /// Quantise the `WARP.CAR` macro onto the six Warps carrier sources.
+    ///
+    /// Six positions across 0..1, with 0.0 selecting [`Carrier::External`] so an
+    /// untouched macro keeps the cross-modulator behaviour the strip had before
+    /// this control existed. The remaining five select Warps' internal
+    /// oscillators, which turn the same block into a small FM voice.
+    fn carrier_from_macro(v: f32) -> Carrier {
+        match (v * 6.0) as u32 {
+            0 => Carrier::External,
+            1 => Carrier::Sine,
+            2 => Carrier::Triangle,
+            3 => Carrier::Saw,
+            4 => Carrier::Pulse,
+            _ => Carrier::NoiseLp,
+        }
     }
 
     /// Set up the four Stages segment generators as 2 LFOs + 2 AD envelopes.
@@ -542,6 +566,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             tune_macro: 0.45,
             retune_semitones: 0.0,
             warps: Warps::new(SAMPLE_RATE),
+            warps_carrier: Carrier::External,
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
             lfo1: ModStages::new(),
             lfo2: ModStages::new(),
@@ -615,6 +640,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
+            core::ptr::addr_of_mut!((*ptr).warps_carrier).write(Carrier::External);
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
             core::ptr::addr_of_mut!((*ptr).lfo1).write(ModStages::new());
             core::ptr::addr_of_mut!((*ptr).lfo2).write(ModStages::new());
@@ -666,6 +692,7 @@ impl Slot<NUM_MACROS> for MiSlot {
         self.warps_algorithm = macros[SLOT_WARPS_ALGO];
         self.warps_timbre = macros[SLOT_WARPS_TIMBRE];
         self.warps_drive = macros[SLOT_WARPS_DRIVE];
+        self.warps_carrier = Self::carrier_from_macro(macros[SLOT_WARPS_CARRIER]);
         self.ripples_cutoff_hz = 20.0 * libm::powf(1000.0, macros[SLOT_RIPPLES_CUTOFF]);
         self.ripples_reso_q = 0.5 + 19.5 * macros[SLOT_RIPPLES_RESONANCE];
         self.ripples
@@ -776,8 +803,16 @@ impl Slot<NUM_MACROS> for MiSlot {
                 + self.env2_out[chunk_start] * ad_warps_scale)
                 .clamp(0.0, 1.0);
 
-            self.warps
-                .set_parameters(self.warps_algorithm, modulated_timbre, self.warps_drive);
+            // The internal carrier is pitched from the voice's own note, so
+            // Warps tracks pitch instead of sitting on one fixed frequency. It
+            // is ignored for `Carrier::External`.
+            self.warps.set_parameters(
+                self.warps_algorithm,
+                modulated_timbre,
+                self.warps_drive,
+                self.warps_carrier,
+                self.patch.note,
+            );
             self.warps.process(chunk);
         }
 
@@ -1156,6 +1191,40 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every Warps carrier source must be reachable and audible through the
+    /// strip. `WARP.CAR` at 0 keeps the cross-modulator; the rest select Warps'
+    /// internal oscillators, which the strip now pitches from the voice's note.
+    #[test]
+    fn every_warps_carrier_is_live() {
+        let external = render_depth(SLOT_WARPS_CARRIER, 0.0);
+        let mut prev_peak = 0.0f32;
+        for (i, v) in [0.2f32, 0.4, 0.6, 0.8, 1.0].iter().enumerate() {
+            let out = render_depth(SLOT_WARPS_CARRIER, *v);
+            let peak = out.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+            assert!(
+                peak > 0.01,
+                "carrier step {i} (macro {v}) was silent (peak {peak})"
+            );
+            for &s in &out {
+                assert!(s.is_finite(), "carrier step {i} produced {s}");
+            }
+            let delta = external
+                .iter()
+                .zip(out.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                delta > 1.0e-4,
+                "carrier step {i} (macro {v}) is dead (max delta {delta})"
+            );
+            assert!(
+                (peak - prev_peak).abs() > 1.0e-4,
+                "carrier step {i} (macro {v}) is inaudible in level (peak {peak})"
+            );
+            prev_peak = peak;
         }
     }
 
