@@ -1,8 +1,8 @@
 Vendored third-party code in this directory is by Mutable Instruments
 (Emilie Gillet) and licensed under the MIT License.
 
-Plaits and Peaks firmware code is from the Mutable Instruments Eurorack
-repository: <https://github.com/pichenettes/eurorack>
+Plaits, Peaks, Warps, Stages, and Clouds firmware code is from the Mutable
+Instruments Eurorack repository: <https://github.com/pichenettes/eurorack>
 
 stmlib is from: <https://github.com/pichenettes/stmlib>
 
