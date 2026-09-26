@@ -322,7 +322,7 @@ mod tests {
         // The gesture contract: a sweep is *sustained*, not a hit. At
         // default DEC (~1.9 s) the machine must still be active past
         // 1 s. This is the test that pins the budget argument — see
-        // Phase 12's "sustained-gesture test" line in PLAN.md.
+        // DESIGN.md records the sustained-gesture contract this pins.
         let id = MachineId::SweepFx;
         let macros = id.default_macros();
         let mut s = SweepFx::new(&macros);

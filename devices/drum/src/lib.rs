@@ -75,7 +75,7 @@ pub use device_core::engine::{DeviceEngine, Engine};
 /// How many tracks the engine owns.
 ///
 /// The 8-track count is matched to a comfortably-sized drum kit on a Teensy
-/// 4.1's cycle budget; see `PLAN.md` for the bench-driven sizing rationale. A
+/// 4.1's cycle budget; see `BENCHMARKS.md` for the sizing rationale. A
 /// `const` rather than const-generic because consumers say `engine.tracks[i]`
 /// a lot and need a known length.
 pub const TRACKS: usize = 8;
