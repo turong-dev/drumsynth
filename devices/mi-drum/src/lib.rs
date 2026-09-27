@@ -35,6 +35,7 @@ use device_core::macros::{
     SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
     SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
+use mi_dsp::peaks::{PeaksModel, PeaksVoice};
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::stages::{Stages as ModStages, GATE_LOW, GATE_RISING, SEGMENT_ALT};
 use mi_dsp::warps::{Carrier, Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
@@ -60,8 +61,17 @@ pub const TRACKS: usize = 6;
 /// `kMaxBlockSize` so every render call is one native block.
 const VOICE_BLOCK: usize = 24;
 
-/// Consider a block silent when every sample is below this magnitude.
+/// Consider a Plaits block silent when every sample is below this magnitude.
+/// Plaits reaches true zero, so this can be tight.
 const SILENCE_THRESHOLD: f32 = 1.0e-6;
+
+/// The same gate for a Peaks block.
+///
+/// Peaks is 16-bit fixed point with a saturating `CLIP` at the end of every
+/// model, so its tail settles onto a limit cycle of roughly 60-100 int16
+/// (about -70 dBFS) instead of reaching zero. Measured, not assumed — see
+/// docs/peaks-vendoring.md. -50 dBFS clears that floor and is inaudible.
+const PEAKS_SILENCE_THRESHOLD: f32 = mi_dsp::peaks::SILENCE_F32;
 /// Number of consecutive silent blocks before the slot declares itself idle.
 const SILENCE_BLOCKS: u8 = 4;
 
@@ -116,11 +126,24 @@ pub enum MiMachineId {
     SnareDrum,
     /// Plaits hi-hat.
     HiHat,
+    /// Peaks bass drum. Phase 14.4.
+    PeaksBassDrum,
+    /// Peaks snare drum. Phase 14.4.
+    PeaksSnareDrum,
+    /// Peaks high hat. Phase 14.4.
+    PeaksHighHat,
+    /// Peaks FM drum. Phase 14.4.
+    PeaksFmDrum,
 }
 
 impl MiMachineId {
     /// Number of machines currently catalogued.
-    pub const COUNT: usize = 24;
+    pub const COUNT: usize = 28;
+
+    /// Number of Plaits engines, i.e. the machine indices below
+    /// [`PLAITS_COUNT`](Self::PLAITS_COUNT). Peaks models are appended after
+    /// them so no existing catalogue index moves.
+    pub const PLAITS_COUNT: usize = 24;
 
     /// All machines, in catalogue order. This order is stable ABI: the
     /// `SLOT_MACHINE` macro quantises over it.
@@ -149,6 +172,10 @@ impl MiMachineId {
         Self::BassDrum,
         Self::SnareDrum,
         Self::HiHat,
+        Self::PeaksBassDrum,
+        Self::PeaksSnareDrum,
+        Self::PeaksHighHat,
+        Self::PeaksFmDrum,
     ];
 
     /// Catalogue index of this machine.
@@ -183,8 +210,74 @@ impl MiMachineId {
             Self::BassDrum => "mi-bd",
             Self::SnareDrum => "mi-sd",
             Self::HiHat => "mi-hh",
+            Self::PeaksBassDrum => "pk-bd",
+            Self::PeaksSnareDrum => "pk-sd",
+            Self::PeaksHighHat => "pk-hh",
+            Self::PeaksFmDrum => "pk-fm",
         }
     }
+
+    /// Whether this machine is a Peaks drum rather than a Plaits engine.
+    pub const fn is_peaks(self) -> bool {
+        self.index() >= Self::PLAITS_COUNT
+    }
+
+    /// The Peaks model this machine maps to. `None` for Plaits engines.
+    pub const fn peaks_model(self) -> Option<PeaksModel> {
+        match self {
+            Self::PeaksBassDrum => Some(PeaksModel::BassDrum),
+            Self::PeaksSnareDrum => Some(PeaksModel::SnareDrum),
+            Self::PeaksHighHat => Some(PeaksModel::HighHat),
+            Self::PeaksFmDrum => Some(PeaksModel::FmDrum),
+            _ => None,
+        }
+    }
+
+    /// The Peaks machine for a model, the inverse of [`Self::peaks_model`].
+    pub const fn from_peaks_model(model: PeaksModel) -> Self {
+        match model {
+            PeaksModel::BassDrum => Self::PeaksBassDrum,
+            PeaksModel::SnareDrum => Self::PeaksSnareDrum,
+            PeaksModel::HighHat => Self::PeaksHighHat,
+            PeaksModel::FmDrum => Self::PeaksFmDrum,
+        }
+    }
+
+    /// The Plaits engines, as a sub-catalogue.
+    pub const PLAITS: [Self; Self::PLAITS_COUNT] = [
+        Self::VirtualAnalogVcf,
+        Self::PhaseDistortion,
+        Self::SixOp1,
+        Self::SixOp2,
+        Self::SixOp3,
+        Self::WaveTerrain,
+        Self::StringMachine,
+        Self::Chiptune,
+        Self::VirtualAnalog,
+        Self::Waveshaping,
+        Self::Fm,
+        Self::Grain,
+        Self::Additive,
+        Self::Wavetable,
+        Self::Chord,
+        Self::Speech,
+        Self::Swarm,
+        Self::Noise,
+        Self::Particle,
+        Self::String,
+        Self::Modal,
+        Self::BassDrum,
+        Self::SnareDrum,
+        Self::HiHat,
+    ];
+
+    /// The Peaks drums, as a sub-catalogue.
+    pub const PEAKS: [Self; 4] = [
+        Self::PeaksBassDrum,
+        Self::PeaksSnareDrum,
+        Self::PeaksHighHat,
+        Self::PeaksFmDrum,
+    ];
 
     /// Human-readable label for display.
     pub fn label(self) -> &'static str {
@@ -213,6 +306,10 @@ impl MiMachineId {
             Self::BassDrum => "MI BassDrum",
             Self::SnareDrum => "MI Snare",
             Self::HiHat => "MI HiHat",
+            Self::PeaksBassDrum => "PK BassDrum",
+            Self::PeaksSnareDrum => "PK Snare",
+            Self::PeaksHighHat => "PK HiHat",
+            Self::PeaksFmDrum => "PK FmDrum",
         }
     }
 
@@ -234,13 +331,26 @@ impl MiMachineId {
             _ => 0.50,
         };
         let mut m = [0.0f32; NUM_MACROS];
-        m[SLOT_MACH_0] = tune;
-        m[SLOT_MACH_1] = 0.5;
-        m[SLOT_MACH_2] = 0.5;
-        m[SLOT_MACH_3] = 0.5;
-        m[SLOT_MACH_4] = 0.0;
-        m[SLOT_MACH_5] = 0.0;
-        m[SLOT_MACH_6] = 0.0;
+        if self.is_peaks() {
+            // A Peaks model's MACH 1..4 are its own parameters, not Plaits
+            // patch fields, and the TUNE slot is unused because pitch comes
+            // from the MIDI note. Defaults are per model:
+            //   bass  [punch, tone, decay]
+            //   snare [tone, snap, decay]
+            //   fm    [fm amount, decay, noise]
+            m[SLOT_MACH_1] = 0.30; // punch / tone / FM amount
+            m[SLOT_MACH_2] = 0.50; // tone / snap / decay
+            m[SLOT_MACH_3] = 0.30; // decay / decay / noise
+            m[SLOT_MACH_4] = 0.0;
+        } else {
+            m[SLOT_MACH_0] = tune;
+            m[SLOT_MACH_1] = 0.5;
+            m[SLOT_MACH_2] = 0.5;
+            m[SLOT_MACH_3] = 0.5;
+            m[SLOT_MACH_4] = 0.0;
+            m[SLOT_MACH_5] = 0.0;
+            m[SLOT_MACH_6] = 0.0;
+        }
         m[SLOT_MACH_7] = decay;
 
         // Track-routed defaults.
@@ -401,8 +511,31 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
 ///
 /// `PlaitsVoice` renders 24-sample blocks; this slot feeds the core engine's
 /// per-sample `tick()` by buffering one block and stepping through it.
+/// Which voice a track is currently sounding.
+///
+/// Both voices are held and `is_peaks` picks between them, rather than an enum
+/// of the two. Two reasons, both practical:
+///
+/// - `PlaitsVoice` owns self-referential C++ state and must be placement-new'd
+///   into its final address, which an enum gives no way to express for a
+///   variant that does not exist yet. `PeaksVoice` has no such state — the
+///   models are PODs with inline arrays and no internal pointers — so it is
+///   freely movable and needs no `new_in_place`.
+/// - The crate is `#![deny(unsafe_code)]`. Owning both as plain fields keeps
+///   the single unavoidable `unsafe` confined to `new_in_place`, where the
+///   Plaits voice is already constructed that way.
+///
+/// The cost is the unused partner voice: a Peaks track carries a dormant
+/// 12,304 B PlaitsVoice it never sounds, and a Plaits track a 193 B PeaksVoice.
+/// That is the price of not touching `core`, and it is small — 193 B per track
+/// over the 12,304 B we already spend.
 pub struct MiSlot {
-    voice: PlaitsVoice,
+    /// Sounded only on a Plaits track.
+    plaits: PlaitsVoice,
+    /// Sounded only on a Peaks track.
+    peaks: PeaksVoice,
+    /// Which of the two this track is currently using.
+    is_peaks: bool,
     block_out: [f32; VOICE_BLOCK],
     block_aux: [f32; VOICE_BLOCK],
     block_pos: usize,
@@ -442,6 +575,12 @@ pub struct MiSlot {
     ad_warps_depth: f32,
     env_trigger_pending: bool,
     warps_initialized: bool,
+    // Peaks-only state. The 16-bit parameter block the model was configured
+    // with, kept so a macro edit can reconfigure without a voice restart.
+    peaks_params: [f32; 4],
+    // Gate flag handed to the Peaks model on the sample a note starts. Plaits
+    // carries its trigger inside the patch; Peaks needs it per sample.
+    peaks_gate: u8,
 }
 
 impl MiSlot {
@@ -472,6 +611,24 @@ impl MiSlot {
         }
     }
 
+    /// Peak absolute sample of a rendered block.
+    fn peak_of(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |a, &s| a.max(libm::fabsf(s)))
+    }
+
+    /// The level below which this voice counts as finished.
+    ///
+    /// Per voice type, and not a detail: Plaits reaches true zero so it can use
+    /// a tight gate, while Peaks parks on a fixed-point limit cycle. Using
+    /// Plaits' threshold for Peaks would keep the track active indefinitely.
+    const fn silence_floor(&self) -> f32 {
+        if self.is_peaks {
+            PEAKS_SILENCE_THRESHOLD
+        } else {
+            SILENCE_THRESHOLD
+        }
+    }
+
     /// Set up the four Stages segment generators as 2 LFOs + 2 AD envelopes.
     fn configure_stages(&mut self) {
         // Two looping LFOs. SEGMENT_ALT is an alternating oscillator; rate and
@@ -492,28 +649,39 @@ impl MiSlot {
             return;
         }
 
-        self.modulations.trigger = if self.trigger_pending {
-            self.trigger_pending = false;
-            1.0
+        // Consume the pending trigger once, for both voice types. Leaving it
+        // set on a Peaks track would keep `is_active` true forever -- the
+        // silence counter would climb past `SILENCE_BLOCKS`, `active` would go
+        // false, and the slot would still never be allowed to rest.
+        let triggered = self.trigger_pending;
+        self.trigger_pending = false;
+
+        let peak = if self.is_peaks {
+            // Peaks is sample-driven: the trigger is a gate edge on the first
+            // sample of the block and nothing carries across, so `peaks_gate`
+            // is armed by `trigger` and consumed here.
+            let mut gate = [GATE_LOW; VOICE_BLOCK];
+            gate[0] = if triggered { self.peaks_gate } else { GATE_LOW };
+            self.peaks_gate = GATE_LOW;
+            self.peaks
+                .process(&gate[..VOICE_BLOCK], &mut self.block_out[..VOICE_BLOCK]);
+            self.block_aux = [0.0f32; VOICE_BLOCK];
+            self.block_pos = 0;
+            Self::peak_of(&self.block_out[..VOICE_BLOCK])
         } else {
-            0.0
+            self.modulations.trigger = if triggered { 1.0 } else { 0.0 };
+            self.plaits.render_f32(
+                &self.patch,
+                &self.modulations,
+                &mut self.block_out,
+                &mut self.block_aux,
+                VOICE_BLOCK,
+            );
+            self.block_pos = 0;
+            Self::peak_of(&self.block_out[..VOICE_BLOCK])
         };
 
-        self.voice.render_f32(
-            &self.patch,
-            &self.modulations,
-            &mut self.block_out,
-            &mut self.block_aux,
-            VOICE_BLOCK,
-        );
-
-        self.block_pos = 0;
-
-        let mut peak = 0.0f32;
-        for &s in &self.block_out {
-            peak = peak.max(libm::fabsf(s));
-        }
-        if peak < SILENCE_THRESHOLD {
+        if peak < self.silence_floor() {
             self.silence_counter += 1;
             if self.silence_counter >= SILENCE_BLOCKS {
                 self.active = false;
@@ -529,7 +697,11 @@ impl Slot<NUM_MACROS> for MiSlot {
 
     fn new(id: Self::Id, macros: &[f32; NUM_MACROS]) -> Self {
         let mut slot = Self {
-            voice: PlaitsVoice::new(),
+            plaits: PlaitsVoice::new(),
+            peaks: PeaksVoice::new(id.peaks_model().unwrap_or(PeaksModel::FmDrum)),
+            is_peaks: id.is_peaks(),
+            peaks_params: [0.5, 0.3, 0.5, 0.3],
+            peaks_gate: GATE_LOW,
             block_out: [0.0f32; VOICE_BLOCK],
             block_aux: [0.0f32; VOICE_BLOCK],
             block_pos: VOICE_BLOCK, // force a render on the first tick
@@ -615,7 +787,7 @@ impl Slot<NUM_MACROS> for MiSlot {
     #[allow(unsafe_code)]
     unsafe fn load_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
         unsafe {
-            PlaitsVoice::free_in_place(core::ptr::addr_of_mut!((*ptr).voice));
+            PlaitsVoice::free_in_place(core::ptr::addr_of_mut!((*ptr).plaits));
             Self::new_in_place(id, macros, ptr);
         }
     }
@@ -623,7 +795,13 @@ impl Slot<NUM_MACROS> for MiSlot {
     #[allow(unsafe_code)]
     unsafe fn new_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
         unsafe {
-            PlaitsVoice::new_in_place(core::ptr::addr_of_mut!((*ptr).voice));
+            PlaitsVoice::new_in_place(core::ptr::addr_of_mut!((*ptr).plaits));
+            core::ptr::addr_of_mut!((*ptr).peaks).write(PeaksVoice::new(
+                id.peaks_model().unwrap_or(PeaksModel::FmDrum),
+            ));
+            core::ptr::addr_of_mut!((*ptr).is_peaks).write(id.is_peaks());
+            core::ptr::addr_of_mut!((*ptr).peaks_params).write([0.5, 0.3, 0.5, 0.3]);
+            core::ptr::addr_of_mut!((*ptr).peaks_gate).write(GATE_LOW);
             core::ptr::addr_of_mut!((*ptr).block_out).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_aux).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_pos).write(VOICE_BLOCK);
@@ -695,19 +873,39 @@ impl Slot<NUM_MACROS> for MiSlot {
     }
 
     fn id(&self) -> Self::Id {
-        MiMachineId::from_index(self.patch.engine as usize).unwrap_or(MiMachineId::VirtualAnalog)
+        if self.is_peaks {
+            MiMachineId::from_peaks_model(self.peaks.model())
+        } else {
+            MiMachineId::from_index(self.patch.engine as usize)
+                .unwrap_or(MiMachineId::VirtualAnalog)
+        }
     }
 
     fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        self.tune_macro = macros[SLOT_MACH_0];
-        self.update_note();
-        self.patch.harmonics = macros[SLOT_MACH_1];
-        self.patch.timbre = macros[SLOT_MACH_2];
-        self.patch.morph = macros[SLOT_MACH_3];
-        self.patch.frequency_modulation_amount = macros[SLOT_MACH_4];
-        self.patch.timbre_modulation_amount = macros[SLOT_MACH_5];
-        self.patch.morph_modulation_amount = macros[SLOT_MACH_6];
-        self.patch.decay = macros[SLOT_MACH_7];
+        if self.is_peaks {
+            // A Peaks track reads the MACH bank as its own four parameters
+            // rather than as Plaits patch fields. MACH 0 is the machine
+            // selector (handled by `Track::load_machine`, not here), so the
+            // model takes MACH 1..4 and TUNE is unused -- a Peaks model's
+            // pitch comes from the MIDI note, not a macro.
+            self.peaks_params = [
+                macros[SLOT_MACH_1],
+                macros[SLOT_MACH_2],
+                macros[SLOT_MACH_3],
+                macros[SLOT_MACH_4],
+            ];
+            self.peaks.configure(self.peaks_params);
+        } else {
+            self.tune_macro = macros[SLOT_MACH_0];
+            self.update_note();
+            self.patch.harmonics = macros[SLOT_MACH_1];
+            self.patch.timbre = macros[SLOT_MACH_2];
+            self.patch.morph = macros[SLOT_MACH_3];
+            self.patch.frequency_modulation_amount = macros[SLOT_MACH_4];
+            self.patch.timbre_modulation_amount = macros[SLOT_MACH_5];
+            self.patch.morph_modulation_amount = macros[SLOT_MACH_6];
+            self.patch.decay = macros[SLOT_MACH_7];
+        }
 
         self.warps_algorithm = macros[SLOT_WARPS_ALGO];
         self.warps_timbre = macros[SLOT_WARPS_TIMBRE];
@@ -744,6 +942,12 @@ impl Slot<NUM_MACROS> for MiSlot {
     fn trigger(&mut self, _velocity: f32) {
         self.trigger_pending = true;
         self.env_trigger_pending = true;
+        // Velocity is intentionally ignored -- see docs/peaks-vendoring.md.
+        // A Peaks track still needs the gate edge, though, so arm it here
+        // rather than leaving a Plaits trigger nothing will read.
+        if self.is_peaks {
+            self.peaks_gate = GATE_RISING;
+        }
         self.active = true;
         self.silence_counter = 0;
     }
@@ -755,6 +959,7 @@ impl Slot<NUM_MACROS> for MiSlot {
 
     fn reset(&mut self) {
         self.trigger_pending = false;
+        self.peaks_gate = GATE_LOW;
         self.active = false;
         self.silence_counter = 0;
         self.block_pos = VOICE_BLOCK;
@@ -866,13 +1071,21 @@ pub type Sound = device_core::sound::Sound<MiSlot, NUM_MACROS>;
 ///
 /// Public so the host renderer can restore it after auditioning other
 /// machines on a track.
+/// Tracks 0-3 are Peaks drums and 4-5 are Plaits oscillators.
+///
+/// The split is a kit choice, not a hardware rule: a slot holds one `PlaitsVoice`
+/// and one `PeaksVoice` and whichever machine is loaded decides which sounds,
+/// so the `MACH` selector can still reach all [`MiMachineId::COUNT`] machines on
+/// any track. Tracks 0-3 default to Peaks because a drum kit wants actual drum
+/// models there, and because the whole point of vendoring Peaks was to have
+/// them, not 24 more oscillators.
 pub const DEFAULT_KIT: [MiMachineId; TRACKS] = [
-    MiMachineId::BassDrum,  // 0: kick
-    MiMachineId::SnareDrum, // 1: snare
-    MiMachineId::HiHat,     // 2: closed hat
-    MiMachineId::Modal,     // 3: tom/conga-like
-    MiMachineId::Noise,     // 4: clap/noise
-    MiMachineId::String,    // 5: melodic/string
+    MiMachineId::PeaksBassDrum,  // 0: kick
+    MiMachineId::PeaksSnareDrum, // 1: snare
+    MiMachineId::PeaksHighHat,   // 2: closed hat
+    MiMachineId::PeaksFmDrum,    // 3: FM tom/conga-like
+    MiMachineId::String,         // 4: melodic/string
+    MiMachineId::Modal,          // 5: resonant/modal
 ];
 
 /// The mi-drum engine: a [`DeviceEngine`] pre-configured for the kit.
@@ -1338,6 +1551,157 @@ mod tests {
                 "carrier step {i} (macro {v}) is inaudible in level (peak {peak})"
             );
             prev_peak = peak;
+        }
+    }
+
+    /// Every Peaks model must be selectable, sound, and come to rest. Peaks
+    /// needs its own silence gate, so this is also the test that would catch a
+    /// regression there -- a track that never goes idle is a leak.
+    #[test]
+    fn every_peaks_model_sounds_and_decays() {
+        for &id in &MiMachineId::PEAKS {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            assert_eq!(e.tracks_mut()[0].id(), id, "machine did not load");
+            e.trigger(0, 1.0);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut peak = 0.0f32;
+            for _ in 0..8 {
+                e.process(&mut l, &mut r);
+                for &s in l.iter().chain(r.iter()) {
+                    assert!(s.is_finite(), "{id:?} produced {s}");
+                    peak = peak.max(s.abs());
+                }
+            }
+            // The threshold is low because one model deserves it: Peaks'
+            // `HighHat::Configure` is empty upstream, so the hi-hat runs on
+            // `Init()`'s fixed defaults and peaks around 0.022 raw, where the
+            // bass drum reaches ~0.5. It is audible, and the track `LEVEL`
+            // fader is what balances it -- a per-model output trim was
+            // deliberately not added, see docs/peaks-vendoring.md.
+            assert!(peak > 5.0e-3, "{id:?} was silent (peak {peak})");
+
+            // Five seconds is far longer than any of these decays.
+            for _ in 0..(5.0 * SAMPLE_RATE / BLOCK as f32) as usize {
+                e.process(&mut l, &mut r);
+            }
+            assert!(!e.is_active(), "{id:?} never came to rest");
+        }
+    }
+
+    /// A Peaks track must be silent until it is struck, like every other slot.
+    #[test]
+    fn peaks_is_silent_until_struck() {
+        for &id in &MiMachineId::PEAKS {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            for _ in 0..16 {
+                e.process(&mut l, &mut r);
+                for &s in l.iter().chain(r.iter()) {
+                    assert_eq!(s, 0.0, "{id:?} made sound before being struck");
+                }
+            }
+        }
+    }
+
+    /// Peaks models take their four parameters from MACH 1..4, and turning
+    /// them must change the sound. Guards against the machine being loadable
+    /// but inert.
+    #[test]
+    fn peaks_parameters_are_live() {
+        let mut dry = engine_box();
+        dry.tracks_mut()[0].load_machine(MiMachineId::PeaksBassDrum);
+        dry.trigger(0, 1.0);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        const BLOCKS: usize = 20;
+        let mut a = [0.0f32; BLOCK * BLOCKS];
+        for i in 0..BLOCK * BLOCKS {
+            dry.process(&mut l, &mut r);
+            a[i] = l[i % BLOCK];
+        }
+
+        let mut wet = engine_box();
+        wet.tracks_mut()[0].load_machine(MiMachineId::PeaksBassDrum);
+        // MACH 3 is the bass drum's decay; push it long.
+        wet.tracks_mut()[0].set_macro(SLOT_MACH_3, 0.95);
+        wet.trigger(0, 1.0);
+        let mut b = [0.0f32; BLOCK * BLOCKS];
+        for i in 0..BLOCK * BLOCKS {
+            wet.process(&mut l, &mut r);
+            b[i] = l[i % BLOCK];
+        }
+
+        let delta = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            delta > 1.0e-3,
+            "Peaks parameters are inert (max delta {delta})"
+        );
+    }
+
+    /// Documented, deliberate: Peaks has no velocity input, so a soft hit and a
+    /// hard hit sound the same. This pins that as a known gap so it cannot be
+    /// mistaken for a bug -- see docs/peaks-vendoring.md for why it is
+    /// deliberately not "fixed" by scaling velocity onto the output.
+    #[test]
+    fn peaks_velocity_is_intentionally_ignored() {
+        let peak_for = |velocity: f32| {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(MiMachineId::PeaksBassDrum);
+            e.trigger(0, velocity);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut peak = 0.0f32;
+            for _ in 0..8 {
+                e.process(&mut l, &mut r);
+                for &s in l.iter() {
+                    peak = peak.max(s.abs());
+                }
+            }
+            peak
+        };
+        let soft = peak_for(0.15);
+        let hard = peak_for(1.0);
+        assert!(soft > 0.01, "the soft hit should still be audible");
+        assert_eq!(
+            soft, hard,
+            "Peaks velocity is deliberately ignored -- if this now differs, \
+             velocity has been wired up and docs/peaks-vendoring.md needs updating"
+        );
+    }
+
+    /// Switching a track between the two voice families must work in both
+    /// directions, since the machine selector spans all 28 machines.
+    #[test]
+    fn tracks_switch_voice_type() {
+        let mut e = engine_box();
+        for &id in &[
+            MiMachineId::PeaksBassDrum,
+            MiMachineId::String,
+            MiMachineId::PeaksSnareDrum,
+            MiMachineId::Modal,
+        ] {
+            e.tracks_mut()[0].load_machine(id);
+            assert_eq!(e.tracks_mut()[0].id(), id);
+            e.trigger(0, 1.0);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut peak = 0.0f32;
+            for _ in 0..8 {
+                e.process(&mut l, &mut r);
+                for &s in l.iter() {
+                    assert!(s.is_finite(), "{id:?} produced {s}");
+                    peak = peak.max(s.abs());
+                }
+            }
+            assert!(peak > 5.0e-3, "{id:?} silent after a voice-type switch");
         }
     }
 

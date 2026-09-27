@@ -169,6 +169,8 @@ impl PeaksVoice {
 
 /// A level below which a Peaks voice counts as silent, in f32.
 ///
+/// Exported so consumers gate on the same number the wrapper's own tests use.
+///
 /// Peaks is 16-bit fixed point with a saturating `CLIP` at the end of each
 /// model, so its tail settles onto a limit-cycle floor rather than true zero:
 /// measured at roughly 60-100 int16, about -70 dBFS, depending on parameters.
@@ -178,7 +180,7 @@ impl PeaksVoice {
 /// The mi-drum slot's own `SILENCE_THRESHOLD` is 1e-6, which a Peaks voice will
 /// never reach, so a voice-type-aware slot has to gate more loosely for Peaks
 /// or the track would stay active forever.
-const SILENCE_F32: f32 = 3.0e-3;
+pub const SILENCE_F32: f32 = 3.0e-3;
 
 #[cfg(test)]
 mod tests {
