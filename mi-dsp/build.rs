@@ -152,13 +152,17 @@ fn main() {
     // Note: user_data_receiver.cc is not compiled because it depends on the
     // stm_audio_bootloader library which we do not vendor.
 
-    // NOTE: `peaks/` is vendored and complete as of 2026-09-26, but still
-    // deliberately NOT compiled. The Rust wrapper does not exist yet, and
-    // pulling the C++ in now would add ~40 KB of dead `wav_digits` to the
-    // image for nothing. Phase 14.4 adds both together. See
-    // docs/peaks-vendoring.md for provenance and the two things that will bite
-    // when the wrapper lands: GateFlags is a Peaks-local type with its own bit
-    // values, and the models have no velocity input at all.
+    // Peaks drum voices. `resources.cc` is 376 KB and mostly display-engine
+    // tables the four drum models never touch; it is compiled whole so the tree
+    // stays a faithful copy. See docs/peaks-vendoring.md.
+    build
+        .flag_if_supported("-I")
+        .flag_if_supported(vendor.join("peaks").as_os_str());
+    for name in ["bass_drum", "snare_drum", "high_hat", "fm_drum"] {
+        build.file(vendor.join(format!("peaks/drums/{name}.cc")));
+    }
+    build.file(vendor.join("peaks/resources.cc"));
+    build.file(manifest_dir.join("src/mi_peaks_shim.cc"));
 
     // Warps meta-modulator.
     for name in ["oscillator", "modulator", "vocoder", "filter_bank"] {
@@ -184,6 +188,7 @@ fn main() {
 
     // Tell cargo to rerun if vendored sources or the shim change.
     println!("cargo:rerun-if-changed=src/mi_dsp_shim.cc");
+    println!("cargo:rerun-if-changed=src/mi_peaks_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_warps_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_stages_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_clouds_shim.cc");

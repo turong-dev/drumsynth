@@ -157,10 +157,54 @@ never touch. It is dead weight in flash — harmless now that `.rodata` lives
 there, but it is the obvious trim if flash ever gets tight. The table is
 vendored whole rather than cut down so the tree stays a faithful copy.
 
-## Not started
+## 3. The tail settles onto a limit cycle, so "silence" needs a looser gate
 
-The Rust side. `mi-dsp` has no `peaks.rs` and no shim; `build.rs` compiles no
-`peaks/` sources. The wrapper needs Peaks' 16-bit
-`Configure(uint16_t*, ControlMode)` parameter interface rather than Plaits'
-float `Patch`, so `MiSlot` has to become voice-type-aware — the enum split the
-Phase 14 risk table already anticipates.
+Each model ends in a fixed-point `CLIP`, and the filter settles rather than
+reaching zero. Measured tail peaks, int16, at blocks 25/100/175/250/325/400
+after one trigger:
+
+| parameters | envelope |
+|---|---|
+| punch 0.3 (wrapper default) | 11035, 1585, 129, **103, 103, 103** |
+| punch 0.125 | 6317, 15, 15, 15, 15, 15 |
+| punch 0 | 13619, 1809, 159, 62, 62, 62 |
+| punch 0, long decay | 24670, 18431, 3760, 7734, 4400, 2399 |
+
+So a bass drum decays properly and then **parks at 60-100 int16, about
+-70 dBFS**, instead of reaching zero. The `mi-drum` slot's `SILENCE_THRESHOLD`
+is `1.0e-6`, which a Peaks voice can never satisfy — a voice-type-aware slot
+has to gate Peaks more loosely or the track would stay active forever. The
+wrapper's own test gate is `3.0e-3` (-50 dBFS); export it rather than
+re-deriving it.
+
+Note the long-decay row is still ringing at block 400 (0.8 s). That is correct
+behaviour, not a leak, so a silence test needs a generous window.
+
+## Rust wrapper: landed
+
+`mi-dsp/src/peaks.rs` with `PeaksVoice` + `PeaksModel`, the C shim in
+`mi_peaks_shim.cc`, and storage sized 192 B (the largest model,
+`SnareDrum`, is 188 B). Flash cost measured at +19.4 KB on `mi-bench` — less
+than the 40 KB of dead `wav_digits` suggested, because the linker drops what is
+unreferenced.
+
+Per-model parameter mapping, following Peaks' own front panel:
+
+| slot | BassDrum | SnareDrum | FmDrum | HighHat |
+|---|---|---|---|---|
+| 0 | pitch (centred) | pitch (centred) | pitch (absolute MIDI) | — |
+| 1 | punch | tone | FM amount | — |
+| 2 | tone | snap | decay | — |
+| 3 | decay | decay | noise | — |
+
+BassDrum and SnareDrum read parameter 0 as a *signed* offset
+(`parameter[0] - 32768`) so it is centred on 0.5; FmDrum reads it as an absolute
+MIDI pitch, so it is mapped 24..120.
+
+## Still to do
+
+`MiSlot` has to become voice-type-aware to host these — the enum split the
+Phase 14 risk table already anticipates. Per the plan the Plaits tracks keep 2
+LFOs + 2 AD envelopes and the Peaks tracks get 1 + 1, which costs no extra
+Stages instances and frees ~41 KB.
+

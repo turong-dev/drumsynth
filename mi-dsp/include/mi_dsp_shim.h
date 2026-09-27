@@ -110,6 +110,34 @@ void mi_resonator_process(
     size_t size);
 
 // ---------------------------------------------------------------------------
+// Peaks
+// ---------------------------------------------------------------------------
+
+// Sized for the largest model (peaks::SnareDrum, 188 B). A voice holds whichever
+// model is selected and re-inits in place when it changes.
+#define MI_PEAKS_STORAGE_SIZE 192
+#define MI_PEAKS_STORAGE_ALIGN 4
+
+#define MI_PEAKS_MODEL_BASS_DRUM 0
+#define MI_PEAKS_MODEL_SNARE_DRUM 1
+#define MI_PEAKS_MODEL_HIGH_HAT 2
+#define MI_PEAKS_MODEL_FM_DRUM 3
+
+// `gate_flags` uses the drumsynth convention (0 low, 1 high, 2 rising,
+// 3 falling) and is translated to Peaks' own bit flags inside the shim.
+void mi_peaks_init(void* storage, int32_t model);
+void mi_peaks_configure(
+    void* storage,
+    int32_t model,
+    const uint16_t* parameters);
+void mi_peaks_process(
+    void* storage,
+    int32_t model,
+    const uint8_t* gate_flags,
+    float* out,
+    size_t size);
+
+// ---------------------------------------------------------------------------
 // Warps
 // ---------------------------------------------------------------------------
 

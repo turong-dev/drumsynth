@@ -15,6 +15,20 @@ pub const MI_WARPS_STORAGE_SIZE: usize = 4112;
 /// Required alignment for the C++ `warps::Modulator` object.
 pub const MI_WARPS_STORAGE_ALIGN: usize = 16;
 
+/// Bytes required for the largest C++ Peaks drum model (SnareDrum, 188 B).
+pub const MI_PEAKS_STORAGE_SIZE: usize = 192;
+/// Required alignment for the C++ Peaks drum models.
+pub const MI_PEAKS_STORAGE_ALIGN: usize = 4;
+/// Model tags for the four Peaks drums, matching the shim.
+/// Bass drum model tag.
+pub const MI_PEAKS_MODEL_BASS_DRUM: i32 = 0;
+/// Snare drum model tag.
+pub const MI_PEAKS_MODEL_SNARE_DRUM: i32 = 1;
+/// High hat model tag.
+pub const MI_PEAKS_MODEL_HIGH_HAT: i32 = 2;
+/// FM drum model tag.
+pub const MI_PEAKS_MODEL_FM_DRUM: i32 = 3;
+
 /// Bytes required for the C++ `stages::SegmentGenerator` object.
 pub const MI_STAGES_STORAGE_SIZE: usize = 4184;
 /// Required alignment for the C++ `stages::SegmentGenerator` object.
@@ -191,6 +205,17 @@ extern "C" {
     pub fn mi_stages_trigger(storage: *mut c_void);
     pub fn mi_stages_process(
         storage: *mut c_void,
+        gate_flags: *const u8,
+        out: *mut f32,
+        size: usize,
+    );
+
+    // Peaks
+    pub fn mi_peaks_init(storage: *mut c_void, model: i32);
+    pub fn mi_peaks_configure(storage: *mut c_void, model: i32, parameters: *const u16);
+    pub fn mi_peaks_process(
+        storage: *mut c_void,
+        model: i32,
         gate_flags: *const u8,
         out: *mut f32,
         size: usize,
