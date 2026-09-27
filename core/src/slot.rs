@@ -67,6 +67,23 @@ pub trait Slot<const N: usize>: Sized {
         ptr.write(Self::new(id, macros));
     }
 
+    /// Rebuild this slot in place for a different machine.
+    ///
+    /// Unlike [`Self::new_in_place`], this is only ever called on a slot that
+    /// has already been constructed, so an implementation may safely release
+    /// per-voice resources before rebuilding. The default forwards to
+    /// `new_in_place`, which is correct for slots that hold nothing that has
+    /// to be handed back.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to an already-constructed slot of this type, as
+    /// returned by a previous `new_in_place` or `load_in_place`.
+    #[allow(unsafe_code)]
+    unsafe fn load_in_place(id: Self::Id, macros: &[f32; N], ptr: *mut Self) {
+        Self::new_in_place(id, macros, ptr);
+    }
+
     /// Which identifier this slot was built from.
     fn id(&self) -> Self::Id;
 

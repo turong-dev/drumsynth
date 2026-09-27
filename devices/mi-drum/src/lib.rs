@@ -600,6 +600,26 @@ impl Slot<NUM_MACROS> for MiSlot {
         slot
     }
 
+    /// Hand the outgoing Plaits voice's pool buffer back before rebuilding.
+    ///
+    /// `Track::load_machine` only reaches this on an already-constructed
+    /// slot, which is what makes the free safe: `new_in_place` on its own also
+    /// runs on a `.uninit` static, where the old `buffer_index` would be
+    /// garbage. Without the free, every machine reload leaks one of the
+    /// pool's eight (firmware) buffers and a reload-heavy render panics with
+    /// `Plaits buffer pool exhausted`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a slot previously built by `new_in_place`.
+    #[allow(unsafe_code)]
+    unsafe fn load_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
+        unsafe {
+            PlaitsVoice::free_in_place(core::ptr::addr_of_mut!((*ptr).voice));
+            Self::new_in_place(id, macros, ptr);
+        }
+    }
+
     #[allow(unsafe_code)]
     unsafe fn new_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
         unsafe {
@@ -1034,6 +1054,26 @@ mod tests {
             MiDrumEngine::new_in_place(ptr);
             std::boxed::Box::from_raw(ptr)
         }
+    }
+
+    /// Reloading machines must hand the outgoing voice's pool buffer back.
+    ///
+    /// `PlaitsVoice::new_in_place` cannot free what it overwrites, because it
+    /// also runs on a `.uninit` static where the old buffer index is garbage.
+    /// The free therefore lives in `MiSlot::load_in_place`, which only ever
+    /// sees a constructed slot. If that hook stops being called, every reload
+    /// below leaks one buffer and the finite pool runs dry — 200 reloads is
+    /// well past the host pool's 128 entries, and past the firmware's 8.
+    #[test]
+    fn repeated_machine_reloads_do_not_exhaust_the_voice_pool() {
+        let mut engine = engine_box();
+        for i in 0..200 {
+            let id = MiMachineId::ALL[i % MiMachineId::ALL.len()];
+            engine.tracks_mut()[i % TRACKS].load_machine(id);
+        }
+        // A leaked pool would have panicked inside `load_machine`; reaching
+        // here is the assertion. Render once so the voices are actually used.
+        let _ = render_peak(&mut engine, 0, 2);
     }
 
     fn render_peak(engine: &mut MiDrumEngine, track: usize, blocks: usize) -> f32 {

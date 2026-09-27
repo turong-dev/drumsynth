@@ -152,7 +152,14 @@ void mi_plaits_voice_render(
   // The Voice writes interleaved short frames into a contiguous buffer.
   // Allocate a temporary block on the stack — frames is at most the host
   // engine block size (32), so this is tiny.
-  plaits::Voice::Frame temp[64];
+  //
+  // Zero it first: an engine is not obliged to write every frame it is handed
+  // before the shim reads it back, and a partially-written stack buffer makes
+  // the render depend on whatever the previous stack frame left behind.
+  plaits::Voice::Frame temp[64] = {};
+  if (frames > 64) {
+    return;
+  }
   v->Render(p, m, temp, frames);
 
   for (size_t i = 0; i < frames; ++i) {

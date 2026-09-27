@@ -297,9 +297,17 @@ where
         // Construct the new slot in-place at its existing address. Slots that
         // own self-referential state (e.g. C++ voices with internal buffer
         // pointers) cannot survive a stack-to-heap move.
+        //
+        // This goes through `load_in_place` rather than `new_in_place`
+        // because the slot is already constructed here, so a slot holding
+        // pooled or otherwise reclaimable resources gets the chance to hand
+        // them back before it is overwritten. `new_in_place` also runs on
+        // never-constructed memory, so it must not read the old contents.
+        //
         // SAFETY: `&mut self.slot` is a valid, aligned pointer to the slot's
-        // existing storage, which is exactly what `new_in_place` requires.
-        unsafe { S::new_in_place(id, &self.base_macros, &mut self.slot) };
+        // existing storage, and the slot was built by a previous
+        // `new_in_place`, so `load_in_place`'s contract holds.
+        unsafe { S::load_in_place(id, &self.base_macros, &mut self.slot) };
         // Macros reset wholesale: the CC smoother must follow, not ramp from
         // a value that no longer means anything on the new voice.
         self.sync_macro_smoothing();

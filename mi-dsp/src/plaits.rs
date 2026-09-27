@@ -119,6 +119,16 @@ fn alloc_buffer() -> Option<(*mut u8, u8)> {
                     // other thread can hand out the same pointer until
                     // `free_buffer` clears the bit in `Drop`.
                     let ptr = unsafe { (*VOICE_BUFFER_POOL.0.get())[index].0.as_mut_ptr() };
+                    // Hand out a cleared buffer. The pool is static memory
+                    // that is never scrubbed on free, so a recycled buffer
+                    // still holds the previous voice's samples; anything the
+                    // model reads before writing it (filter memory, delay
+                    // lines, the LPG) would then carry another voice's audio
+                    // into this one and make renders depend on allocation
+                    // history rather than on the seed.
+                    unsafe {
+                        core::ptr::write_bytes(ptr, 0, PLAITS_VOICE_BUFFER_SIZE);
+                    }
                     return Some((ptr, index as u8));
                 }
                 // Lost the race (or a spurious weak failure); retry this word
@@ -170,11 +180,37 @@ impl PlaitsVoice {
         voice
     }
 
+    /// Release this voice's scratch buffer back to the pool.
+    ///
+    /// Kept separate from [`Self::new_in_place`] because that also runs on
+    /// never-constructed memory — a `.uninit` static on firmware — where
+    /// reading the old `buffer_index` would mean reading uninitialised bytes
+    /// and freeing a garbage index. Callers reloading a slot they already
+    /// built free it first, via the `Slot::load_in_place` hook.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a `PlaitsVoice` previously built by
+    /// [`Self::new_in_place`] that has not already been freed.
+    #[allow(unsafe_code)]
+    pub unsafe fn free_in_place(ptr: *mut PlaitsVoice) {
+        if core::ptr::addr_of!((*ptr).initialized).read() {
+            let index = core::ptr::addr_of!((*ptr).buffer_index).read();
+            free_buffer(index);
+            core::ptr::addr_of_mut!((*ptr).initialized).write(false);
+        }
+    }
+
     /// Initialize a Plaits voice directly at `ptr`.
     ///
     /// This avoids putting the voice on the stack, which is useful when the
     /// surrounding struct is huge. The buffer still comes from the static pool,
     /// so the resulting voice can be moved safely.
+    ///
+    /// Any voice already at `ptr` has its buffer leaked, not freed: `ptr` may
+    /// be uninitialised memory, so there is no old `buffer_index` that can be
+    /// trusted. Reloading a constructed slot must therefore call
+    /// [`Self::free_in_place`] first.
     ///
     /// # Safety
     ///
