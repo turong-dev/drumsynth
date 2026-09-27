@@ -306,6 +306,19 @@ and is independent of the redesign. It remains a separate investigation.
 
 ## Phase breakdown
 
+> **Track count: 6, not 8.** The original plan specified 8 tracks (4 Peaks +
+> 4 Plaits). The decision was cut to **6 tracks — 0–3 Peaks, 4–5 Plaits** —
+> after measuring the engine at 474,864 B with all six tracks, and deferring
+> the send-FX question to 14.5. Eight tracks in this shape does not fit: the
+> send bus alone is 262,656 B (192,000 B stereo delay + 70,656 B reverb), so
+> Clouds cannot be added without removing or externalising both.
+>
+> Every "8 track" / "tracks 4–7" reference below is **stale** and predates that
+> decision. They are left as written rather than silently rewritten, because
+> the cycle and RAM estimates in this document were all taken against 8 tracks
+> and need redoing against 6. The landed `DEFAULT_KIT` is already the 6-track
+> split.
+
 ### Phase 14.0 — Vendoring and wrappers
 
 Bring Warps, Stages, and Clouds into `mi-dsp` with no audio-path integration.
@@ -513,15 +526,104 @@ reported for the worst-case send configuration.
 
 ### Phase 14.6 — New baseline and kit
 
-Pin the new 8-track baseline digest, update the default kit to use Peaks drums
-on tracks 0–3 and Plaits voices on tracks 4–7, and update `mi-bench` scenarios.
+Pin the new 6-track baseline digest, update the default kit to use Peaks drums
+on tracks 0–3 and Plaits voices on tracks 4–5, and update `mi-bench` scenarios.
 
 *Gate:* `mi_drum_baseline_is_unchanged` passes with the new digest; bench
 worst-case under the ~70% ceiling; `MiDrumEngine` size still fits OCRAM.
 
+**Blocked on the uninitialised-read bug above.** Until that is fixed there is no
+digest worth pinning: the gate currently passes or fails by luck. The
+`DEFAULT_KIT` half of this phase is already done in `100ade8`.
+
 ### Phase 14.7 (future) — Mod matrix
 
 User-configurable modulation patching. Not part of the first deliverable.
+
+## Open bug: mi-drum render reads uninitialised memory
+
+**Status:** open. Blocks 14.6. The `mi_drum_baseline_is_unchanged` digest gate
+is currently meaningless and must not be re-pinned until this is fixed.
+
+### Symptom
+
+The same test binary, run in separate processes, produces different FNV digests
+of the same render, and sometimes dies with `SIGSEGV` (exit 139). Five renders
+inside one process are byte-identical, so the synthesis itself is deterministic
+— the input it is reading is not.
+
+### Established facts
+
+- **Pre-existing, not a Phase 14 regression.** Reproduced at `aa1a33e`, before
+  any Peaks work.
+- Reproducible with the engine's heap allocation zeroed first, so the read is
+  not the engine struct.
+- All mutable C++ statics are accounted for: the only one is
+  `stmlib::Random::rng_state_`, which `seed_random` sets. No function-local
+  statics in the vendored tree.
+- Ruled out by inspection: `plaits::Patch` (all 10 fields assigned by the shim),
+  `EngineParameters` (all 6 assigned in `Voice::Render`), and `UserData::ptr()`
+  (stubbed to return `NULL` during vendoring).
+- `MallocScribble=1` changes the digest, so the garbage is malloc-backed.
+
+### Bisected so far
+
+Progressively richer renders, one subsystem at a time, against a fixed binary
+with the engine zeroed:
+
+| Render | Stable across processes? |
+|---|---|
+| idle, no trigger | yes |
+| single trigger | yes |
+| all 28 machines reloaded + trigger, no macros | yes |
+| Plaits-only machine sweep + trigger | yes |
+| all 28 machines + trigger + trailing blocks | **no** |
+| full `render_mi_drum` (macros, strip, engaged sends) | **no** |
+| full render with an all-Plaits `DEFAULT_KIT` | **no** |
+
+The last row matters: the remaining bug is on the **Plaits** side and predates
+Peaks, so it is not in the new Peaks code.
+
+Note the send macros default to `0.0`, so every early bisect stage bypassed the
+send FX entirely. **The next thing to try is a minimal render with
+`SLOT_SEND_DELAY` / `SLOT_SEND_REVERB` driven** — that is the one untested
+variable, and `Reverb` is a plausible home for it (comb and allpass `phase_`
+indices, and `Reverb::new_in_place` zero-fills then patches only some fields).
+`SLOT_SEND_DELAY` and `SLOT_SEND_REVERB` are currently not re-exported from
+`mi-drum-engine`, so that test needs them public first.
+
+### Tooling notes
+
+ASan is a dead end for this: it reports no out-of-bounds or use-after-free, and
+structurally cannot see uninitialised reads. MSan is the tool that names the
+exact bytes, and it is Linux-only — Docker is available, so a
+`linux/amd64` MSan run is the fastest route if bisecting stalls.
+
+If ASan is wanted again, note the working configuration. Instrumenting Rust
+*and* the C++ fails to link (`rustc`'s `librustc-nightly_rt.asan` and Xcode's
+ASan runtime collide on `_asan.module_ctor`). The build that works instruments
+only the C++ and lets clang link the runtime:
+
+```bash
+CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+CXXFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+RUSTFLAGS="-C link-arg=-fsanitize=address" \
+cargo test -p render
+```
+
+## Known gaps in the landed Peaks integration
+
+`100ade8` added the Peaks voices but deliberately stopped short of three things
+the design calls for. All are additive.
+
+1. **Peaks pitch is not chromatic.** The wrapper expects parameter 0 to be
+   pitch, but `MiSlot::set_macros` currently places `MACH 1` there, so a Peaks
+   track ignores the incoming note. Fix by deriving pitch from the note plus
+   the TUNE offset, mapping `MACH 1..3` to the remaining model parameters, and
+   reconfiguring on `retune`.
+2. **"Tracks 0–3 are Peaks" is a default, not a constraint.** The machine
+   selector still reaches all 28 machines on any track.
+3. **Peaks tracks still run 2 LFO + 2 AD** rather than the intended 1 + 1.
 
 ## Gates
 
