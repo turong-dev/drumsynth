@@ -110,12 +110,32 @@ architecture.
 > saturation. If a Peaks voice ever sounds like a square wave, suspect the
 > harness before the model.
 
-**Velocity is a genuine gap, but not a bypassed one.** Peaks has no per-voice
-velocity at all — the excitation level is a literal in `Process`, and
-`Slot::trigger(velocity)` would be ignored. Our `Slot` contract requires
-velocity to affect amplitude, so the wrapper has to apply it as an output gain.
-That is a new feature for Peaks voices rather than the restoration of something
-the vendor tree had.
+**Velocity is absent, and that is a decision, not an oversight.** Peaks has no
+per-voice velocity: the excitation level is a literal in `Process` and the gate
+is binary. So `Slot::trigger(velocity)` has nothing to drive.
+
+The obvious reading — apply velocity as an output gain — is **deliberately not
+taken yet** (2026-09-26). It is trivially easy to write and impossible to
+unwind later without changing how the voice sounds, and it is a real design
+choice rather than plumbing: gain-scaled velocity sounds different from
+excitation-scaled velocity, and Peaks' `Excitation::Trigger(level)` is right
+there accepting a level, so the better answer may well be to drive *that* rather
+than the output. Better to decide with a Peaks voice in context than to commit
+now and regret it.
+
+Until then, Peaks voices take velocity and discard it: a soft and a hard hit
+sound the same, and the track `LEVEL` macro is the only amplitude control. This
+is an intentional exception to the `velocity-scales` rule in AGENTS.md for new
+machines, and `peaks_velocity_is_intentionally_ignored` in the mi-drum tests
+pins it as a known gap so it cannot be mistaken for a bug.
+
+If velocity is added later, the three options in rough order of fidelity are:
+(1) scale `Excitation::Trigger(level)` per model, which is what the hardware
+class was designed for but needs per-model plumbing since the level is currently
+a literal in each `Process`; (2) scale the model output, cheap and immediately
+available; (3) drive the excitation *and* let timbre follow, closest to a real
+drum machine.
+
 
 
 ## Table sizes in `resources.cc`

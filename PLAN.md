@@ -447,8 +447,18 @@ and all four models compile and sound. Two traps are recorded in
 - Peaks has **no gain staging, no limiter and no per-voice velocity**, and none
   is being bypassed: `peaks.cc:116` sends the model straight to the DAC. The
   models peak at full scale by design (a saturating drum circuit is the sound),
-  so no trim is needed. But `Slot::trigger(velocity)` will be *ignored* until the
-  wrapper applies velocity as an output gain — a new feature, not a restored one.
+  so no trim is needed.
+- **Velocity is deliberately ignored for now.** `Slot::trigger(velocity)` has
+  nothing to drive, and the obvious fix — scaling it onto the output — is a
+  commitment that cannot be unwound later without changing how the voice sounds.
+  Gain-scaled velocity is not the same as excitation-scaled velocity, and
+  `Excitation::Trigger(level)` sits right there accepting a level, so the better
+  answer may be to drive that instead. Deciding with a Peaks voice in context
+  beats committing now. Peaks voices therefore take velocity and discard it, and
+  `LEVEL` is the only amplitude control. This is an explicit exception to the
+  `velocity-scales` rule in AGENTS.md, pinned by a test so it reads as a known
+  gap rather than a bug. See `docs/peaks-vendoring.md` for the three options
+  when it is revisited.
 
 `resources.cc` is 376 KB and only ~5 of its tables are used; the rest is
 `wav_digits` and wavefolding tables belonging to the display engine. Vendored
