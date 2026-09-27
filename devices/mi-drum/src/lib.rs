@@ -970,7 +970,6 @@ impl MiDrumEngine {
         let mut e = Self {
             inner: Engine::new_with_kit(&DEFAULT_KIT),
         };
-        configure_default_notes(&mut e.note_map);
         e.configure_strip();
         e
     }
@@ -983,7 +982,6 @@ impl MiDrumEngine {
     pub unsafe fn new_in_place<'a>(dst: *mut MiDrumEngine) -> &'a mut MiDrumEngine {
         Engine::new_in_place_with_kit(core::ptr::addr_of_mut!((*dst).inner), &DEFAULT_KIT);
         let engine = &mut *dst;
-        configure_default_notes(&mut engine.note_map);
         engine.configure_strip();
         engine
     }
@@ -997,15 +995,27 @@ impl MiDrumEngine {
     }
 }
 
-/// Default GM-percussion note map.
-fn configure_default_notes(map: &mut [Option<u8>; 128]) {
-    map[36] = Some(0); // Acoustic bass drum → track 0 (BassDrum)
-    map[38] = Some(1); // Acoustic snare → track 1 (SnareDrum)
-    map[42] = Some(2); // Closed hat → track 2 (HiHat)
-    map[46] = Some(3); // Open hat/tom → track 3 (Modal)
-    map[39] = Some(4); // Hand clap → track 4 (Noise)
-    map[50] = Some(5); // High tom → track 5 (String)
-}
+/// No default note map, and that is deliberate.
+///
+/// This device used to preload a GM-percussion map — note 36 to the kick, 38 to
+/// the snare, and so on — inherited from the drum machine when the two devices
+/// were split in Phase 13. It was wrong here, and worse, it hid a capability
+/// that already worked: live MIDI routes NoteOn through
+/// [`DeviceEngine::trigger_channel`](device_core::engine::DeviceEngine::trigger_channel),
+/// which never consults `note_map` at all.
+///
+/// The device is a channel-per-track voice, so the conventions are:
+///
+/// - **MIDI channel selects the track** (`channel < TRACKS`).
+/// - **The note selects pitch.** `TUNE` sets the pitch the voice plays at
+///   middle C; every semitone away transposes the whole voice via
+///   [`Track::retune`](device_core::track::Track::retune). That is
+///   `core`'s existing chromatic convention, and it is what
+///   `chromatic_play_transposes_by_octave` pins.
+/// - `note_map` stays empty, so the programmatic [`trigger_note`](DeviceEngine::trigger_note)
+///   path is silent unless a host assigns notes with `set_note`. A host that
+///   wants a fixed note-to-track layout can build one; the device does not
+///   impose a GM kit on a player who wants six instruments.
 
 #[cfg(test)]
 mod tests {
@@ -1073,13 +1083,6 @@ mod tests {
     }
 
     #[test]
-    fn trigger_note_routes_kick_to_track_zero() {
-        let mut e = engine_box();
-        assert_eq!(e.trigger_note(36, 1.0), Some(0));
-        assert!(e.is_active());
-    }
-
-    #[test]
     fn trigger_channel_routes_channel_to_track() {
         let mut e = engine_box();
         assert_eq!(e.trigger_channel(3, 60, 1.0), Some(3));
@@ -1105,6 +1108,24 @@ mod tests {
                 assert!(s.is_finite(), "non-finite sample");
             }
         }
+    }
+
+    /// The note map is empty on purpose, so the programmatic `trigger_note`
+    /// path is silent until a host assigns notes. Live MIDI is unaffected: it
+    /// routes through `trigger_channel`, which never reads the map.
+    #[test]
+    fn trigger_note_is_silent_until_a_host_maps_it() {
+        let mut e = engine_box();
+        assert_eq!(
+            e.trigger_note(36, 1.0),
+            None,
+            "no note map should be loaded"
+        );
+        assert!(!e.is_active());
+
+        e.set_note(36, Some(0));
+        assert_eq!(e.trigger_note(36, 1.0), Some(0));
+        assert!(e.is_active());
     }
 
     /// Capture length for the modulation-route tests. Two channels per frame,
@@ -1134,8 +1155,60 @@ mod tests {
         out
     }
 
-    /// Phase 14.3 gate: every static route must actually reach its target. If a
-    /// depth macro does nothing, the route is dead and the map is wrong.
+    /// Count zero crossings of a track's *source* voice over a fixed window,
+    /// as a pitch proxy.
+    ///
+    /// Measured before the strip, deliberately. Warps cross-modulates the
+    /// signal with itself and Ripples low-passes it, so the post-strip waveform
+    /// carries difference frequencies and harmonics that make zero crossings a
+    /// meaningless pitch proxy — the strip is a colour stage and is allowed to
+    /// change the spectrum. The source is where pitch lives, and it is what
+    /// chromatic play actually depends on.
+    fn source_crossings(e: &mut MiDrumEngine, samples: usize) -> u32 {
+        let slot = &mut e.tracks_mut()[0].slot;
+        let mut prev = 0.0f32;
+        let mut count = 0u32;
+        for _ in 0..samples {
+            let s = slot.tick();
+            if (prev < 0.0) != (s < 0.0) {
+                count += 1;
+            }
+            prev = s;
+        }
+        count
+    }
+
+    /// The headline capability the GM note map used to mask: the tracks are
+    /// separate instruments playable chromatically, not six fixed percussion
+    /// keys. Channel picks the track, the note picks the pitch, and two
+    /// octaves must give four times the frequency.
+    #[test]
+    fn chromatic_play_transposes_by_octave() {
+        const SAMPLES: usize = 1600;
+
+        let crossings_at = |note: u8| {
+            let mut e = engine_box();
+            // A tonal oscillator, so crossings track the fundamental.
+            e.tracks_mut()[0].load_machine(MiMachineId::VirtualAnalog);
+            e.tracks_mut()[0].set_macro(SLOT_MACH_7, 0.95); // sustain
+            assert_eq!(e.trigger_channel(0, note, 1.0), Some(0));
+            source_crossings(&mut e, SAMPLES)
+        };
+
+        let middle = crossings_at(60);
+        let octave_up = crossings_at(72);
+        let two_octaves = crossings_at(84);
+        assert!(middle > 4, "middle C should be clearly tonal, got {middle}");
+
+        assert!(
+            (1.8..2.2).contains(&(octave_up as f32 / middle as f32)),
+            "one octave up should double the frequency: {middle} -> {octave_up}"
+        );
+        assert!(
+            (3.6..4.4).contains(&(two_octaves as f32 / middle as f32)),
+            "two octaves up should quadruple the frequency: {middle} -> {two_octaves}"
+        );
+    }
 
     #[test]
     fn every_modulation_route_changes_the_sound() {
