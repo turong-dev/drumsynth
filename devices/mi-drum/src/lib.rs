@@ -5,6 +5,21 @@
 //! The C++ Plaits voice is block-rate, while `device_core::Slot` is
 //! per-sample, so [`MiSlot`] buffers one rendered block and yields samples one
 //! at a time.
+//!
+//! # The gate
+//!
+//! [`MiSlot`] holds the gate high from note-on to note-off, and
+//! [`Slot::release`] closes it. Plaits reads the gate as a *level* as well as
+//! an edge, so the pulse this replaced starved the three `SixOp` engines into
+//! digital silence; holding the level fixes them and gives every
+//! level-reading engine a note to sustain, while the edge still fires once.
+//! See `DESIGN.md` for the measurements and `PLAN.md` for what the gate still
+//! does not do.
+//!
+//! Release is the engine's own, not a cut: dropping the gate starts Plaits'
+//! LPG decay and Peaks' gate-processor release. A gate also ends when its
+//! voice does, so a one-shot drum model triggered from a grid that never sends
+//! a note-off still comes to rest.
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -28,16 +43,19 @@ pub use device_core::macros::{
     SLOT_STRIP_RESO,
 };
 
+use device_core::dsp::svf::stability_ceiling_hz;
 use device_core::dsp::Svf;
 use device_core::macros::{
-    macro_index, mi, resv, MacroInfo, BANK_FILT, BANK_MOD, MACH_INFO, NUM_MACROS, OUT_INFO,
+    macro_index, mi, MacroInfo, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO, NUM_MACROS, OUT_INFO,
     PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1,
     SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
     SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
-use mi_dsp::stages::{Stages as ModStages, GATE_LOW, GATE_RISING, SEGMENT_ALT};
+use mi_dsp::stages::{
+    Stages as ModStages, GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING, SEGMENT_ALT,
+};
 use mi_dsp::warps::{Carrier, Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
 
 /// Seed the noise generator shared by every Plaits engine on this device.
@@ -74,6 +92,26 @@ const SILENCE_THRESHOLD: f32 = 1.0e-6;
 const PEAKS_SILENCE_THRESHOLD: f32 = mi_dsp::peaks::SILENCE_F32;
 /// Number of consecutive silent blocks before the slot declares itself idle.
 const SILENCE_BLOCKS: u8 = 4;
+
+/// Watchdog on a held gate, in seconds.
+///
+/// A note-off that never arrives leaves the gate high, and a high gate is what
+/// makes a track render at full cost — `is_active` is the engine's per-track
+/// early-out, so a stuck key would keep one voice's full DSP in the cycle
+/// budget indefinitely. Ten seconds is far longer than a held note and short
+/// enough to bound the damage.
+///
+/// This is a backstop, not the note length. Raise it if you hold a key longer
+/// than ten seconds and hear the voice drop out.
+pub const GATED_MAX_HOLD_S: f32 = 10.0;
+
+/// [`GATED_MAX_HOLD_S`] in rendered voice blocks.
+///
+/// The watchdog is decremented once per `render_if_needed`, i.e. once per
+/// 24-sample `VOICE_BLOCK`, so it has to be counted in blocks. Counting in
+/// samples would make the gate last `VOICE_BLOCK` times too long — ten seconds
+/// of watchdog would be four minutes of held gate.
+const GATED_MAX_HOLD_BLOCKS: u32 = (GATED_MAX_HOLD_S * SAMPLE_RATE) as u32 / VOICE_BLOCK as u32;
 
 /// A named Plaits engine model.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -364,11 +402,16 @@ impl MiMachineId {
         // Phase 14 fixed strip defaults.
         m[SLOT_WARPS_ALGO] = 0.0;
         m[SLOT_WARPS_TIMBRE] = 0.5;
-        m[SLOT_WARPS_DRIVE] = 0.7; // Warps input VCA; 0 is silent
+        m[SLOT_WARPS_DRIVE] = 0.2; // light colour; 0.0 is a true bypass
         m[SLOT_WARPS_CARRIER] = 0.0; // external cross-modulation
-        m[SLOT_RIPPLES_CUTOFF] = 0.5; // ~1 kHz
+        m[SLOT_RIPPLES_CUTOFF] = 1.0; // fully open — see RIPPLES_CUTOFF_INFO
         m[SLOT_RIPPLES_RESONANCE] = 0.01; // gentle Q
         m[SLOT_RIPPLES_FM] = 0.0;
+        // Warps as a colour rather than a transform: a third wet by default,
+        // its modulator fed from Plaits' aux, taking the main output.
+        m[SLOT_WARPS_MIX] = 0.35;
+        m[SLOT_WARPS_MOD_SRC] = 1.0;
+        m[SLOT_WARPS_OUT_TAP] = 0.0;
 
         // Modulation defaults. The per-target depths are 0 so the sound is
         // unchanged until a macro is moved; the LFO master is 1 so turning up
@@ -438,6 +481,40 @@ const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
 const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
 
+/// FILT 7: dry/wet between the voice and the Warps stage.
+///
+/// Warps has no mix control of its own — `Modulator::Process` is 100% wet,
+/// and `channel_drive` only feeds the input saturators — so the strip
+/// supplies one. 0 is the untouched voice, 1 is Warps alone. This is the
+/// control that makes Warps usable as a colour; `WARP.DRV` is then purely how
+/// hard the inputs are driven.
+pub const SLOT_WARPS_MIX: usize = macro_index(BANK_FILT, 7);
+
+/// TRACK 6: what feeds Warps' modulator input (input 2).
+///
+/// 0 is the voice's own main output, which is what the strip did before: the
+/// same signal in both inputs, so every algorithm is the signal against
+/// itself. 1 is Plaits' **aux** output, which the slot renders on every block
+/// and used to discard. That is the patch Warps is designed for — two
+/// different but related signals — and it costs nothing, because the aux
+/// buffer was already being filled.
+///
+/// Continuous rather than a switch: the two sources are both audio, so
+/// crossfading between them is meaningful and free.
+///
+/// A Peaks voice has no aux output, so a Peaks track stays self-modulated
+/// whatever this says.
+pub const SLOT_WARPS_MOD_SRC: usize = macro_index(BANK_TRACK, 6);
+
+/// TRACK 7: which Warps output the strip takes.
+///
+/// 0 is **main**, the cross-modulation result. 1 is **aux**, which in the
+/// cross-modulation path is the sum of the two *saturated inputs* rather than
+/// a second cross-modulated voice (`modulator.cc:209`-`:222`) — so it is a
+/// drive-only tap, Warps as a saturator with the ring modulation taken out.
+/// Values in between crossfade.
+pub const SLOT_WARPS_OUT_TAP: usize = macro_index(BANK_TRACK, 7);
+
 /// MOD 0: Stages LFO period, 0..1 = slow..fast. Shared by LFO 1 and LFO 2.
 pub const SLOT_LFO_RATE: usize = macro_index(BANK_MOD, 0);
 /// MOD 1: master LFO depth scalar applied before the per-target depths.
@@ -451,6 +528,14 @@ pub const SLOT_LFO_FILTER_DEPTH: usize = macro_index(BANK_MOD, 4);
 /// MOD 5: LFO 2 depth into the Warps timbre parameter.
 pub const SLOT_LFO_WARPS_DEPTH: usize = macro_index(BANK_MOD, 5);
 /// MOD 6: AD env 1 depth into the Ripples cutoff, in octaves at full scale.
+///
+/// The AD envelopes are **unipolar**, so this route only ever *opens* the
+/// filter. With the default `RIP.CUT` now fully open there is nowhere to go,
+/// and the depth macro does nothing until `RIP.CUT` is pulled down. That is
+/// the same failure mode as a dead modulation route and it is worth knowing
+/// about before reaching for the knob: close the filter, then set the depth.
+/// `AD.FIL` is not bipolar and is not meant to be — a filter envelope that
+/// darkens the voice before it opens it is not what a drum machine wants.
 pub const SLOT_AD_FILTER_DEPTH: usize = macro_index(BANK_MOD, 6);
 /// MOD 7: AD env 2 depth into the Warps timbre parameter.
 pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
@@ -458,10 +543,84 @@ pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
 const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
 const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
 const WARPS_CARRIER_INFO: MacroInfo = mi("WARP.CAR", "WCA", 0.0);
-const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.7);
-const RIPPLES_CUTOFF_INFO: MacroInfo = mi("RIP.CUT", "RCT", 0.5);
+/// Warps input drive, and the clean end of the strip.
+///
+/// The macro is **not** Warps' `drive` directly. Warps'
+/// `SaturatingAmplifier` computes pre-gain as `0.5·drive` blended towards
+/// `24·drive⁵` (`modulator.h:88`-`:91`), with post-gain normalising it back.
+/// That makes the raw knob's travel:
+///
+/// | `WARP.DRV` | Warps `drive` | pre-gain | net gain | character |
+/// |---|---|---|---|---|
+/// | 0.00 | — | — | — | **bypass**: bit-transparent, no colour |
+/// | 0.01 | 0.51 | 0.39 | 1.08 | unity, gentle |
+/// | 0.25 | 0.63 | 1.05 | 1.19 | unity, cleanest saturation point |
+/// | 0.50 | 0.75 | 3.37 | 3.37 | 3× overdriven |
+/// | 0.75 | 0.88 | 9.72 | 9.72 | hard |
+/// | 1.00 | 1.00 | 24.0 | 24.0 | destroyed |
+///
+/// Two things fall out of that table, and both are why the remap exists:
+///
+/// - **`drive = 0` is silence, not clean.** Passing the macro straight through
+///   would make "no drive" mute the track. The bottom of the knob is a real
+///   `Modulator::set_bypass`, which is what makes a clean section possible.
+/// - **The top half of Warps' own knob covers 48× of gain.** The `drive⁵` term
+///   is nearly linear below 0.5 and explodes above it, which is where the
+///   "gets crazy past halfway" reputation comes from. Rescaling onto
+///   `0.50..1.00` keeps that character but spends the whole knob on it, so
+///   there is a usable clean-ish region below halfway and the destructive
+///   region is something you choose rather than something you inherit.
+///
+/// `0.0` is a discrete detent onto the bypass and the rest of the knob is
+/// strictly monotonic, so there is no dead zone between them.
+const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.2);
+
+/// Map the `WARP.DRV` macro onto Warps' own `drive` parameter.
+///
+/// Returns `(bypassed, warps_drive)`.
+///
+/// `0.0` is a discrete detent onto the bypass. Anything above it is rescaled
+/// `0.0..1.0` onto Warps' `0.50..1.00`, so the knob is strictly monotonic and
+/// spends its whole travel on the part of Warps' curve that is usable.
+/// Resolving this at control rate keeps the per-chunk strip path to two FFI
+/// calls with no arithmetic. See [`WARPS_DRIVE_INFO`].
+fn warps_drive_from_macro(macro_value: f32) -> (bool, f32) {
+    let m = macro_value.clamp(0.0, 1.0);
+    if m <= 0.0 {
+        return (true, 0.0);
+    }
+    (false, 0.50 + 0.50 * m)
+}
+/// Ripples cutoff. 1.0 = fully open, matching `core`'s own `STRIP_CUT_INFO`.
+///
+/// This was 0.5, which the `20 * 1000^macro` mapping turns into a **632 Hz**
+/// low-pass on every track. Measured on the rendered baseline, that put
+/// everything above 1 kHz at least 45 dB down — a telephone band, not a drum
+/// machine filter — and the comment here used to claim "~1 kHz", which was
+/// wrong by 1.6x. `core` already defaults the equivalent strip slot wide open,
+/// so the mi-drum strip is now neutral by default and the voice is heard
+/// unfiltered.
+///
+/// The range is the filter's own: `20 Hz` at 0 to the Chamberlin SVF's
+/// stability ceiling at 1.0 — ~6.4 kHz at the default `Q = 0.695`, and higher
+/// as resonance comes down. Mapping to a nominal 20 kHz instead left the top
+/// sixth of the knob flat and put modulation out of reach of the live region;
+/// see `MiSlot::ripples_cutoff_from_macro` and `core::dsp::svf`.
+const RIPPLES_CUTOFF_INFO: MacroInfo = mi("RIP.CUT", "RCT", 1.0);
 const RIPPLES_RESONANCE_INFO: MacroInfo = mi("RIP.RES", "RRS", 0.5);
+/// Ripples FM: audio-rate modulation of the filter cutoff by the signal
+/// entering the filter.
+///
+/// This macro existed, had a label and a default, and was never read by
+/// anything — `SLOT_RIPPLES_FM` appeared only in the table and in
+/// `default_macros`. It is wired now. The source is the post-Warps signal, so
+/// it is self-FM: the classic growling filter rather than a tremolo, and
+/// distinct from the `LFO.FIL` and `AD.FIL` routes, which are control-rate.
+/// Full scale is +/-2 octaves of cutoff swing per unit of input.
 const RIPPLES_FM_INFO: MacroInfo = mi("RIP.FM", "RFM", 0.0);
+const WARPS_MIX_INFO: MacroInfo = mi("WARP.MIX", "WMX", 0.35);
+const WARPS_MOD_SRC_INFO: MacroInfo = mi("WARP.IN", "WIN", 1.0);
+const WARPS_OUT_TAP_INFO: MacroInfo = mi("WARP.OUT", "WOU", 0.0);
 const LFO_RATE_INFO: MacroInfo = mi("LFO.RATE", "LRT", 0.5);
 const LFO_DEPTH_INFO: MacroInfo = mi("LFO.DEPTH", "LDPT", 1.0);
 const AD_ATTACK_INFO: MacroInfo = mi("AD.ATK", "AAT", 0.05);
@@ -488,15 +647,15 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     RIPPLES_FM_INFO,          // FILT 4 — Ripples FM amount
     WARPS_DRIVE_INFO,         // FILT 5 — Warps input drive / VCA
     WARPS_CARRIER_INFO,       // FILT 6 — Warps carrier source
-    resv(),                   // FILT 7
+    WARPS_MIX_INFO,           // FILT 7 — Warps dry/wet
     MACH_INFO,                // TRACK 0
     OUT_INFO,                 // TRACK 1
     PAN_INFO,                 // TRACK 2
     mi("LEVEL", "LVL", 0.85), // TRACK 3
     SEND_DLY_INFO,            // TRACK 4
     SEND_RVB_INFO,            // TRACK 5
-    resv(),                   // TRACK 6
-    resv(),                   // TRACK 7
+    WARPS_MOD_SRC_INFO,       // TRACK 6 — Warps modulator source
+    WARPS_OUT_TAP_INFO,       // TRACK 7 — Warps output tap
     LFO_RATE_INFO,            // MOD 0
     LFO_DEPTH_INFO,           // MOD 1
     AD_ATTACK_INFO,           // MOD 2
@@ -541,7 +700,23 @@ pub struct MiSlot {
     block_pos: usize,
     patch: MiPlaitsPatch,
     modulations: MiPlaitsModulations,
+    /// A note-on is waiting to be rendered. Consumed by the next
+    /// [`Self::render_if_needed`], which is where the gate edges are placed.
     trigger_pending: bool,
+    /// The gate is held high, from note-on until note-off.
+    ///
+    /// This is the whole difference between a pulsing gate and a real one.
+    /// Plaits reads the trigger as a *level* as well as an edge
+    /// (`voice.cc:143`-`:150` derives `TRIGGER_HIGH` and `TRIGGER_RISING_EDGE`
+    /// from the same value), so holding it high gives an engine that reads the
+    /// level a note to sustain, while the edge still fires exactly once. The
+    /// previous one-block pulse starved the three `SixOp` engines, whose FM
+    /// operator envelopes rest at zero and only rise while the gate is high —
+    /// they emitted digital silence for the whole hit.
+    gate_open: bool,
+    /// A note-off is waiting to be rendered, so the next block can carry the
+    /// falling edge Peaks' gate processor needs.
+    gate_release_pending: bool,
     active: bool,
     silence_counter: u8,
     tune_macro: f32,
@@ -562,9 +737,34 @@ pub struct MiSlot {
     // Cached strip parameters, derived from macros each block.
     warps_algorithm: f32,
     warps_timbre: f32,
+    /// Resolved Warps input drive, 0.5..=1.0. Already remapped from the macro
+    /// by [`warps_drive_from_macro`] at control rate.
     warps_drive: f32,
+    /// Whether Warps is bypassed, i.e. `WARP.DRV` at 0.0.
+    warps_bypassed: bool,
     ripples_cutoff_hz: f32,
     ripples_reso_q: f32,
+    /// `RIP.FM`: audio-rate cutoff modulation depth, in octaves per unit of
+    /// input at full scale.
+    ripples_fm: f32,
+    /// `WARP.MIX`: 0 = dry voice, 1 = Warps alone.
+    warps_mix: f32,
+    /// `WARP.IN`: crossfade between the voice's main output (0) and its aux
+    /// output (1) as Warps' modulator input.
+    warps_mod_src: f32,
+    /// `WARP.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
+    warps_out_tap: f32,
+    /// Plaits' aux output for the current segment, captured by `tick` in the
+    /// same order the main output is consumed so the two stay aligned.
+    ///
+    /// Filled sample by sample because that is how the engine collects source
+    /// samples — interleaved across tracks, to keep the shared `stmlib::Random`
+    /// draw order stable — so the strip cannot simply read `block_aux`: by the
+    /// time it runs, `block_pos` has moved on and may have crossed a voice
+    /// block boundary.
+    aux_segment: [f32; BLOCK],
+    /// How many samples of `aux_segment` the current segment has filled.
+    aux_filled: usize,
     lfo_rate: f32,
     lfo_depth: f32,
     ad_attack: f32,
@@ -578,9 +778,17 @@ pub struct MiSlot {
     // Peaks-only state. The 16-bit parameter block the model was configured
     // with, kept so a macro edit can reconfigure without a voice restart.
     peaks_params: [f32; 4],
-    // Gate flag handed to the Peaks model on the sample a note starts. Plaits
-    // carries its trigger inside the patch; Peaks needs it per sample.
+    /// Gate flag handed to the Peaks model on the sample a note starts. Plaits
+    /// carries its trigger inside the patch; Peaks needs it per sample.
     peaks_gate: u8,
+    /// Watchdog on [`Self::gate_open`], in rendered voice blocks. Counted
+    /// down only while the gate is held.
+    ///
+    /// A held gate is what makes a track cost full price, because
+    /// `is_active` is the engine's per-track early-out. A note-off that never
+    /// arrives — a stuck key, a dropped cable — would otherwise keep the
+    /// track rendering for the life of the device. See [`GATED_MAX_HOLD_S`].
+    gate_watchdog: u32,
 }
 
 impl MiSlot {
@@ -642,26 +850,79 @@ impl MiSlot {
         self.env2.configure_ad(self.ad_attack, self.ad_decay);
     }
 
+    /// Map the `RIP.CUT` macro onto a cutoff in Hz, `20 Hz` at 0 to the
+    /// filter's stability ceiling at 1.0.
+    ///
+    /// The obvious mapping is `20 * 1000^macro`, i.e. 20 Hz to 20 kHz. It is
+    /// wrong here, and silently: the Chamberlin SVF cannot run at 20 kHz at
+    /// any usable Q, so `core::dsp::svf` clamps it — at the default
+    /// `RIP.RESO` the ceiling is ~6.4 kHz, which is **1.6 octaves** below
+    /// where the knob claims to be. Everything above `macro ≈ 0.84` was one
+    /// setting, and the default of 1.0 sat in the middle of that dead zone.
+    ///
+    /// That is not just a cosmetic knob problem. Modulation is applied to the
+    /// cutoff in octaves, so a route whose full depth is ±1.5 octaves could
+    /// never bring the cutoff back down into the live region — `LFO.FIL` at
+    /// full depth was *exactly* inaudible, not merely subtle, and the test
+    /// that is supposed to catch a dead route measured a delta of zero.
+    ///
+    /// Mapping the top of the macro onto the ceiling instead makes the knob
+    /// monotonic over its whole travel and puts the default at the edge of the
+    /// live region, where a downward modulation is immediately audible. The
+    /// ceiling moves with Q, so lowering resonance really does buy top end —
+    /// the same interaction the analog circuit has.
+    ///
+    /// Note this does not change what the *default* sounds like: at
+    /// `RIP.CUT = 1.0` the realised cutoff was already the ceiling, because
+    /// the filter clamped it there. It changes what the rest of the knob does,
+    /// and it makes the cutoff reachable by modulation.
+    fn ripples_cutoff_from_macro(macro_value: f32, q: f32) -> f32 {
+        let ceiling = stability_ceiling_hz(q, SAMPLE_RATE);
+        // 20 Hz at macro 0, `ceiling` at macro 1, exponential in between.
+        20.0 * libm::powf(ceiling / 20.0, macro_value.clamp(0.0, 1.0))
+    }
+
     /// Render the next block if the buffer is exhausted, honouring any pending
-    /// trigger, and update the active/silence state.
+    /// trigger or release, and update the active/silence state.
     fn render_if_needed(&mut self) {
         if self.block_pos < VOICE_BLOCK {
             return;
         }
 
-        // Consume the pending trigger once, for both voice types. Leaving it
-        // set on a Peaks track would keep `is_active` true forever -- the
-        // silence counter would climb past `SILENCE_BLOCKS`, `active` would go
-        // false, and the slot would still never be allowed to rest.
+        // Consume the pending edges once. Leaving a trigger set would keep
+        // `is_active` true forever — the silence counter would climb past
+        // `SILENCE_BLOCKS`, `active` would go false, and the slot would still
+        // never be allowed to rest.
         let triggered = self.trigger_pending;
         self.trigger_pending = false;
+        let released = self.gate_release_pending;
+        self.gate_release_pending = false;
+
+        // A held gate is the expensive state, so the watchdog runs here. It
+        // counts rendered samples, which is what the cycle budget is spent on.
+        if self.gate_open {
+            if self.gate_watchdog == 0 {
+                self.gate_open = false;
+            } else {
+                self.gate_watchdog -= 1;
+            }
+        }
 
         let peak = if self.is_peaks {
-            // Peaks is sample-driven: the trigger is a gate edge on the first
-            // sample of the block and nothing carries across, so `peaks_gate`
-            // is armed by `trigger` and consumed here.
-            let mut gate = [GATE_LOW; VOICE_BLOCK];
-            gate[0] = if triggered { self.peaks_gate } else { GATE_LOW };
+            // Peaks is sample-driven and wants real gate flags. The flags are
+            // per *sample*, not per block, so a held gate has to be spelled
+            // out across the whole block or the model sees a pulse again and
+            // retriggers nothing it should not.
+            let sustained = if self.gate_open { GATE_HIGH } else { GATE_LOW };
+            let mut gate = [sustained; VOICE_BLOCK];
+            // One edge sample carries the transition: rising on note-on,
+            // falling on note-off, steady otherwise. The shim translates
+            // these to Peaks' own bit values, which are NOT stmlib's.
+            if triggered {
+                gate[0] = GATE_RISING;
+            } else if released {
+                gate[0] = GATE_FALLING;
+            }
             self.peaks_gate = GATE_LOW;
             self.peaks
                 .process(&gate[..VOICE_BLOCK], &mut self.block_out[..VOICE_BLOCK]);
@@ -669,7 +930,12 @@ impl MiSlot {
             self.block_pos = 0;
             Self::peak_of(&self.block_out[..VOICE_BLOCK])
         } else {
-            self.modulations.trigger = if triggered { 1.0 } else { 0.0 };
+            // Plaits derives both the level and the rising edge from this one
+            // value, with hysteresis and a 1 ms trigger delay
+            // (`voice.cc:97`-`:150`). Holding it high for the note is
+            // therefore all it takes: the edge still fires once, on the first
+            // block where the delayed value crosses 0.3.
+            self.modulations.trigger = if self.gate_open { 1.0 } else { 0.0 };
             self.plaits.render_f32(
                 &self.patch,
                 &self.modulations,
@@ -685,6 +951,16 @@ impl MiSlot {
             self.silence_counter += 1;
             if self.silence_counter >= SILENCE_BLOCKS {
                 self.active = false;
+                // The voice has gone quiet, so the note is over. Close the
+                // gate with it, whatever the key is doing.
+                //
+                // This is what keeps a one-shot drum machine working: a
+                // drum-grid trigger sends no note-off, and without this a held
+                // gate would keep the track rendering for the full watchdog
+                // after every kick. A drum model's own envelope ends the
+                // note, and the gate has to end with it.
+                self.gate_open = false;
+                self.gate_watchdog = 0;
             }
         } else {
             self.silence_counter = 0;
@@ -702,6 +978,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             is_peaks: id.is_peaks(),
             peaks_params: [0.5, 0.3, 0.5, 0.3],
             peaks_gate: GATE_LOW,
+            gate_watchdog: 0,
             block_out: [0.0f32; VOICE_BLOCK],
             block_aux: [0.0f32; VOICE_BLOCK],
             block_pos: VOICE_BLOCK, // force a render on the first tick
@@ -733,6 +1010,8 @@ impl Slot<NUM_MACROS> for MiSlot {
                 level_patched: 0,
             },
             trigger_pending: false,
+            gate_open: false,
+            gate_release_pending: false,
             active: false,
             silence_counter: 0,
             tune_macro: 0.45,
@@ -752,8 +1031,15 @@ impl Slot<NUM_MACROS> for MiSlot {
             warps_algorithm: 0.0,
             warps_timbre: 0.0,
             warps_drive: 0.0,
+            warps_bypassed: true,
             ripples_cutoff_hz: 1000.0,
             ripples_reso_q: 0.707,
+            ripples_fm: 0.0,
+            warps_mix: 1.0,
+            warps_mod_src: 0.0,
+            warps_out_tap: 0.0,
+            aux_segment: [0.0f32; BLOCK],
+            aux_filled: 0,
             lfo_rate: 0.5,
             lfo_depth: 1.0,
             ad_attack: 0.01,
@@ -802,6 +1088,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).is_peaks).write(id.is_peaks());
             core::ptr::addr_of_mut!((*ptr).peaks_params).write([0.5, 0.3, 0.5, 0.3]);
             core::ptr::addr_of_mut!((*ptr).peaks_gate).write(GATE_LOW);
+            core::ptr::addr_of_mut!((*ptr).gate_watchdog).write(0);
             core::ptr::addr_of_mut!((*ptr).block_out).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_aux).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_pos).write(VOICE_BLOCK);
@@ -833,6 +1120,8 @@ impl Slot<NUM_MACROS> for MiSlot {
                 level_patched: 0,
             });
             core::ptr::addr_of_mut!((*ptr).trigger_pending).write(false);
+            core::ptr::addr_of_mut!((*ptr).gate_open).write(false);
+            core::ptr::addr_of_mut!((*ptr).gate_release_pending).write(false);
             core::ptr::addr_of_mut!((*ptr).active).write(false);
             core::ptr::addr_of_mut!((*ptr).silence_counter).write(0);
             core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
@@ -852,8 +1141,15 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).warps_algorithm).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps_timbre).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps_drive).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).warps_bypassed).write(true);
             core::ptr::addr_of_mut!((*ptr).ripples_cutoff_hz).write(1000.0);
             core::ptr::addr_of_mut!((*ptr).ripples_reso_q).write(0.707);
+            core::ptr::addr_of_mut!((*ptr).ripples_fm).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).warps_mix).write(1.0);
+            core::ptr::addr_of_mut!((*ptr).warps_mod_src).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).warps_out_tap).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).aux_segment).write([0.0f32; BLOCK]);
+            core::ptr::addr_of_mut!((*ptr).aux_filled).write(0);
             core::ptr::addr_of_mut!((*ptr).lfo_rate).write(0.5);
             core::ptr::addr_of_mut!((*ptr).lfo_depth).write(1.0);
             core::ptr::addr_of_mut!((*ptr).ad_attack).write(0.01);
@@ -909,12 +1205,24 @@ impl Slot<NUM_MACROS> for MiSlot {
 
         self.warps_algorithm = macros[SLOT_WARPS_ALGO];
         self.warps_timbre = macros[SLOT_WARPS_TIMBRE];
-        self.warps_drive = macros[SLOT_WARPS_DRIVE];
+        // Resolve the drive remap once, at control rate, so the per-chunk path
+        // stays two FFI calls with no arithmetic. See `warps_drive_from_macro`.
+        let (bypass, drive) = warps_drive_from_macro(macros[SLOT_WARPS_DRIVE]);
+        self.warps_bypassed = bypass;
+        self.warps_drive = drive;
         self.warps_carrier = Self::carrier_from_macro(macros[SLOT_WARPS_CARRIER]);
-        self.ripples_cutoff_hz = 20.0 * libm::powf(1000.0, macros[SLOT_RIPPLES_CUTOFF]);
+        // Resonance first: it sets the filter's stability ceiling, and the
+        // cutoff macro is mapped onto that ceiling rather than onto a fixed
+        // 20 kHz. See `ripples_cutoff_from_macro`.
         self.ripples_reso_q = 0.5 + 19.5 * macros[SLOT_RIPPLES_RESONANCE];
+        self.ripples_cutoff_hz =
+            Self::ripples_cutoff_from_macro(macros[SLOT_RIPPLES_CUTOFF], self.ripples_reso_q);
         self.ripples
             .recalc(self.ripples_cutoff_hz, self.ripples_reso_q, SAMPLE_RATE);
+        self.ripples_fm = macros[SLOT_RIPPLES_FM];
+        self.warps_mix = macros[SLOT_WARPS_MIX].clamp(0.0, 1.0);
+        self.warps_mod_src = macros[SLOT_WARPS_MOD_SRC].clamp(0.0, 1.0);
+        self.warps_out_tap = macros[SLOT_WARPS_OUT_TAP].clamp(0.0, 1.0);
 
         self.lfo_rate = macros[SLOT_LFO_RATE];
         self.lfo_depth = macros[SLOT_LFO_DEPTH];
@@ -942,14 +1250,37 @@ impl Slot<NUM_MACROS> for MiSlot {
     fn trigger(&mut self, _velocity: f32) {
         self.trigger_pending = true;
         self.env_trigger_pending = true;
-        // Velocity is intentionally ignored -- see docs/peaks-vendoring.md.
-        // A Peaks track still needs the gate edge, though, so arm it here
-        // rather than leaving a Plaits trigger nothing will read.
+        // Open the gate and (re)arm the watchdog. Velocity is intentionally
+        // ignored -- see docs/peaks-vendoring.md.
+        self.gate_open = true;
+        self.gate_release_pending = false;
+        self.gate_watchdog = GATED_MAX_HOLD_BLOCKS;
+        // A Peaks track also needs the edge flag on the sample the note
+        // starts, so a held gate still has to begin with a rising edge.
         if self.is_peaks {
             self.peaks_gate = GATE_RISING;
         }
         self.active = true;
         self.silence_counter = 0;
+    }
+
+    /// Close the gate — the note-off path.
+    ///
+    /// Plaits and Peaks both release natively once the gate is low: Plaits'
+    /// outer LPG decays, and Peaks' gate processor runs its own release on the
+    /// falling edge. Nothing else is needed, and nothing is forced — a
+    /// one-shot drum model finishes its own decay whether the gate came down
+    /// or not, which is why this does not cut.
+    ///
+    /// A no-op for a note that already ended, or a second release for the same
+    /// note.
+    fn release(&mut self) {
+        if !self.gate_open {
+            return;
+        }
+        self.gate_open = false;
+        self.gate_release_pending = true;
+        self.gate_watchdog = 0;
     }
 
     fn retune(&mut self, semis: f32) {
@@ -959,6 +1290,9 @@ impl Slot<NUM_MACROS> for MiSlot {
 
     fn reset(&mut self) {
         self.trigger_pending = false;
+        self.gate_open = false;
+        self.gate_release_pending = false;
+        self.gate_watchdog = 0;
         self.peaks_gate = GATE_LOW;
         self.active = false;
         self.silence_counter = 0;
@@ -966,7 +1300,11 @@ impl Slot<NUM_MACROS> for MiSlot {
     }
 
     fn is_active(&self) -> bool {
-        self.active || self.trigger_pending
+        // A held gate counts as active even if the voice has not produced
+        // output yet: the note has started and the engine still owes it
+        // samples. Without this, a gate opened on a voice that takes a few
+        // blocks to charge would be declared idle first.
+        self.active || self.trigger_pending || self.gate_open
     }
 
     fn tick(&mut self) -> f32 {
@@ -975,6 +1313,13 @@ impl Slot<NUM_MACROS> for MiSlot {
         }
         self.render_if_needed();
         let s = self.block_out[self.block_pos];
+        // Capture the matching aux sample for the strip. Peaks zeroes
+        // `block_aux`, so a Peaks track records silence here and
+        // `process_audio_strip` falls back to self-modulation.
+        if self.aux_filled < BLOCK {
+            self.aux_segment[self.aux_filled] = self.block_aux[self.block_pos];
+            self.aux_filled += 1;
+        }
         self.block_pos += 1;
         s
     }
@@ -1028,9 +1373,10 @@ impl Slot<NUM_MACROS> for MiSlot {
                 + self.env2_out[chunk_start] * ad_warps_scale)
                 .clamp(0.0, 1.0);
 
-            // The internal carrier is pitched from the voice's own note, so
-            // Warps tracks pitch instead of sitting on one fixed frequency. It
-            // is ignored for `Carrier::External`.
+            // Drive 0 is a real bypass, not silence — see `WARPS_DRIVE_INFO` for
+            // why the knob is remapped rather than passed straight through.
+            // Both flags were resolved at control rate in `set_macros`.
+            self.warps.set_bypass(self.warps_bypassed);
             self.warps.set_parameters(
                 self.warps_algorithm,
                 modulated_timbre,
@@ -1038,25 +1384,69 @@ impl Slot<NUM_MACROS> for MiSlot {
                 self.warps_carrier,
                 self.patch.note,
             );
-            self.warps.process(chunk);
+
+            let len = chunk.len();
+            // The dry signal, kept so `WARP.MIX` has something to blend back
+            // towards. Warps itself is always 100% wet.
+            let mut dry = [0.0f32; WARPS_MAX_BLOCK];
+            dry[..len].copy_from_slice(chunk);
+
+            // Warps' modulator input. `WARP.IN` crossfades between the voice's
+            // own main output — the degenerate self-modulation the strip used
+            // to do — and its aux output, which is a different but related
+            // signal and is what makes the cross-modulation mean anything.
+            let mut modulator = [0.0f32; WARPS_MAX_BLOCK];
+            let aux_available = !self.is_peaks && self.aux_filled >= chunk_start + len;
+            let mod_src = if aux_available {
+                self.warps_mod_src
+            } else {
+                0.0
+            };
+            for i in 0..len {
+                let aux = self.aux_segment[chunk_start + i];
+                modulator[i] = dry[i] + mod_src * (aux - dry[i]);
+            }
+
+            let mut warps_aux = [0.0f32; WARPS_MAX_BLOCK];
+            self.warps
+                .process_dual(chunk, &modulator[..len], &mut warps_aux[..len]);
+
+            // `WARP.OUT` picks the tap, then `WARP.MIX` decides how much of
+            // the result replaces the voice.
+            let tap = self.warps_out_tap;
+            let mix = self.warps_mix;
+            for i in 0..len {
+                let wet = chunk[i] + tap * (warps_aux[i] - chunk[i]);
+                chunk[i] = dry[i] + mix * (wet - dry[i]);
+            }
         }
 
         // Ripples multimode SVF after Warps, with per-sample cutoff modulation
         // from LFO 1 and AD envelope 1.
         let lfo_filter_scale = self.lfo_filter_depth * lfo_master * 3.0;
         let ad_filter_scale = self.ad_filter_depth * 3.0;
+        // `RIP.FM` is audio rate and self-sourced: the sample about to enter
+        // the filter also displaces the cutoff, which is what gives a
+        // state-variable filter its growl. It shares the exponent with the two
+        // control-rate routes, so it costs an add rather than a second `powf`.
+        let fm_scale = self.ripples_fm * 2.0;
         let base_cutoff = self.ripples_cutoff_hz;
 
         for i in 0..n {
             let cutoff = (base_cutoff
                 * libm::powf(
                     2.0,
-                    self.lfo1_out[i] * lfo_filter_scale + self.env1_out[i] * ad_filter_scale,
+                    self.lfo1_out[i] * lfo_filter_scale
+                        + self.env1_out[i] * ad_filter_scale
+                        + buf[i] * fm_scale,
                 ))
             .clamp(20.0, 20000.0);
             self.ripples.set_cutoff(cutoff, SAMPLE_RATE);
             buf[i] = self.ripples.tick(buf[i]);
         }
+
+        // The segment is done with; the next one refills from zero.
+        self.aux_filled = 0;
     }
 }
 
@@ -1354,8 +1744,21 @@ mod tests {
         assert!(e.tracks[3].is_active());
     }
 
+    /// The master clipper's bound, asserted against what the DAC can actually
+    /// see rather than against exact unity.
+    ///
+    /// `fast::soft_clip` is a rational approximation carrying `recip`'s ~2 ulp
+    /// of error, so a peak landing on its internal ±3 clamp can come out at
+    /// 1.0000001. That is -200 dB, and in 24-bit it converts to exactly full
+    /// scale rather than wrapping — so the real requirement is "cannot wrap the
+    /// DAC", not "is bit-exactly 1.0". Asserting exact unity here once forced a
+    /// `clamp` into a per-sample hot path on every device, which cost cycles and
+    /// moved the drum engine's bit-identity baseline to remove an artifact no
+    /// converter can distinguish from full scale.
     #[test]
     fn output_never_exceeds_unity() {
+        // 1 ulp at 1.0 is 1.19e-7. Allow the documented approximation error.
+        const TOL: f32 = 4.0 * 1.19e-7;
         let mut e = engine_box();
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
@@ -1363,14 +1766,18 @@ mod tests {
         for t in e.tracks.iter_mut() {
             t.set_strip(&strip);
         }
-        for _ in 0..200 {
-            for i in 0..TRACKS {
-                e.trigger(i, 1.0);
+        for i in 0..200 {
+            for trk in 0..TRACKS {
+                e.trigger(trk, 1.0);
             }
             e.process(&mut l, &mut r);
             for &s in l.iter().chain(r.iter()) {
-                assert!(s.abs() <= 1.0, "clipper let {s} through");
-                assert!(s.is_finite(), "non-finite sample");
+                assert!(s.is_finite(), "non-finite sample on block {i}");
+                assert!(
+                    s.abs() <= 1.0 + TOL,
+                    "clipper let {s} through on block {i} — more than the \
+                     approximation's own error, so this is a real overflow"
+                );
             }
         }
     }
@@ -1403,6 +1810,15 @@ mod tests {
         let mut e = engine_box();
         for t in e.tracks.iter_mut() {
             t.set_macro(slot, depth);
+            // The AD envelopes are unipolar, so `AD.FIL` can only open the
+            // filter. With the default `RIP.CUT` fully open there is no
+            // headroom above it and the route is *correctly* silent — so close
+            // the filter first, which is what a player does before reaching
+            // for a filter-envelope amount. Testing the route at the default
+            // would be testing the default, not the route.
+            if slot == SLOT_AD_FILTER_DEPTH {
+                t.set_macro(SLOT_STRIP_CUT, 0.4);
+            }
         }
         e.trigger(0, 1.0);
         let mut l = [0.0f32; BLOCK];
@@ -1497,7 +1913,408 @@ mod tests {
         }
     }
 
-    /// Extremes on every modulation macro must stay finite and bounded.
+    /// Render track 0 for a fixed window with a set of macro overrides.
+    fn render_with_macros(id: MiMachineId, overrides: &[(usize, f32)]) -> [f32; MOD_CAPTURE] {
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(id);
+        for &(slot, v) in overrides {
+            e.tracks_mut()[0].set_macro(slot, v);
+        }
+        e.trigger_channel(0, 60, 1.0);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        let mut out = [0.0f32; MOD_CAPTURE];
+        let mut w = 0usize;
+        for _ in 0..(MOD_CAPTURE / (2 * BLOCK)) {
+            e.process(&mut l, &mut r);
+            for i in 0..BLOCK {
+                out[w] = l[i];
+                out[w + 1] = r[i];
+                w += 2;
+            }
+        }
+        out
+    }
+
+    fn max_delta(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// `WARP.MIX` at 0 must be the voice, exactly.
+    ///
+    /// Not "close to": the blend is `dry + mix * (wet - dry)`, so at mix 0 the
+    /// wet path cannot contribute a single bit. This is the setting that makes
+    /// Warps optional without reaching for the bypass detent, and a strip that
+    /// leaked any wet signal here would be a strip you could not turn off.
+    #[test]
+    fn warps_mix_at_zero_is_the_dry_voice() {
+        let dry = render_with_macros(
+            MiMachineId::VirtualAnalog,
+            &[(SLOT_WARPS_MIX, 0.0), (SLOT_WARPS_DRIVE, 0.8)],
+        );
+        // Same again with the drive somewhere else entirely: if mix 0 is
+        // really dry, the drive cannot matter.
+        let dry_other = render_with_macros(
+            MiMachineId::VirtualAnalog,
+            &[(SLOT_WARPS_MIX, 0.0), (SLOT_WARPS_DRIVE, 0.2)],
+        );
+        assert_eq!(
+            max_delta(&dry, &dry_other),
+            0.0,
+            "WARP.DRV changed the output at WARP.MIX 0 — the wet path is leaking"
+        );
+
+        let wet = render_with_macros(
+            MiMachineId::VirtualAnalog,
+            &[(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.8)],
+        );
+        assert!(
+            max_delta(&dry, &wet) > 1.0e-3,
+            "WARP.MIX did nothing between 0 and 1"
+        );
+    }
+
+    /// Plaits' aux output as the modulator is a different patch, and must
+    /// sound like one. This is the whole point of `WARP.IN`.
+    #[test]
+    fn warps_modulator_source_changes_the_sound_on_plaits() {
+        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.5)];
+        let mut selfmod = base.to_vec();
+        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0));
+        let mut auxmod = base.to_vec();
+        auxmod.push((SLOT_WARPS_MOD_SRC, 1.0));
+
+        let a = render_with_macros(MiMachineId::VirtualAnalog, &selfmod);
+        let b = render_with_macros(MiMachineId::VirtualAnalog, &auxmod);
+        assert!(
+            max_delta(&a, &b) > 1.0e-3,
+            "WARP.IN is inert — the aux output is not reaching the modulator"
+        );
+    }
+
+    /// A Peaks voice has no aux output, so `WARP.IN` must be a no-op there
+    /// rather than cross-modulating the voice against silence, which would
+    /// mute the track.
+    #[test]
+    fn warps_modulator_source_is_inert_on_peaks() {
+        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.5)];
+        let mut selfmod = base.to_vec();
+        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0));
+        let mut auxmod = base.to_vec();
+        auxmod.push((SLOT_WARPS_MOD_SRC, 1.0));
+
+        let a = render_with_macros(MiMachineId::PeaksBassDrum, &selfmod);
+        let b = render_with_macros(MiMachineId::PeaksBassDrum, &auxmod);
+        assert_eq!(
+            max_delta(&a, &b),
+            0.0,
+            "WARP.IN moved a Peaks track, which has no aux to move to"
+        );
+        let peak = a.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 1.0e-3, "the Peaks track went silent (peak {peak})");
+    }
+
+    /// Warps' aux tap is the saturated input sum, not the cross-modulation, so
+    /// selecting it has to produce a different signal.
+    #[test]
+    fn warps_output_tap_selects_a_different_signal() {
+        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.6)];
+        let mut main = base.to_vec();
+        main.push((SLOT_WARPS_OUT_TAP, 0.0));
+        let mut aux = base.to_vec();
+        aux.push((SLOT_WARPS_OUT_TAP, 1.0));
+
+        let a = render_with_macros(MiMachineId::VirtualAnalog, &main);
+        let b = render_with_macros(MiMachineId::VirtualAnalog, &aux);
+        assert!(
+            max_delta(&a, &b) > 1.0e-3,
+            "WARP.OUT is inert — both taps return the same buffer"
+        );
+    }
+
+    /// `RIP.FM` was a labelled, defaulted macro that nothing read. It is wired
+    /// now, and this is the guard that keeps it wired.
+    #[test]
+    fn ripples_fm_is_live() {
+        // The filter has to be somewhere it can be pushed from, and the strip
+        // has to be audible, or this measures the default rather than the knob.
+        let base = [(SLOT_WARPS_MIX, 0.0), (SLOT_STRIP_CUT, 0.4)];
+        let mut off = base.to_vec();
+        off.push((SLOT_RIPPLES_FM, 0.0));
+        let mut on = base.to_vec();
+        on.push((SLOT_RIPPLES_FM, 0.9));
+
+        let a = render_with_macros(MiMachineId::VirtualAnalog, &off);
+        let b = render_with_macros(MiMachineId::VirtualAnalog, &on);
+        assert!(
+            max_delta(&a, &b) > 1.0e-4,
+            "RIP.FM is dead again (max delta {})",
+            max_delta(&a, &b)
+        );
+        for s in b.iter() {
+            assert!(s.is_finite(), "RIP.FM produced a non-finite sample");
+            assert!(s.abs() <= 1.0 + 4.0 * 1.19e-7, "RIP.FM blew the clipper");
+        }
+    }
+
+    /// `WARP.TIM` has to change the *shape* of the sound, not just its level.
+    ///
+    /// With the same signal in both Warps inputs, `ALGORITHM_XFADE` reduces to
+    /// `x * (fade_in + fade_out)` — a scalar in the timbre parameter and
+    /// nothing else. The knob is then a trim, and the two modulation routes
+    /// that target it (`LFO.WRP`, `AD.WRP`) are tremolo. Feeding the aux
+    /// output into the modulator input is what gives the crossfade two
+    /// different things to fade between.
+    ///
+    /// Measured by normalising both renders to the same RMS first: whatever
+    /// survives that is shape rather than level.
+    #[test]
+    fn warps_timbre_is_a_timbre_control_once_aux_feeds_the_modulator() {
+        let shape_delta = |mod_src: f32| {
+            let render = |tim: f32| {
+                let mut out = render_with_macros(
+                    MiMachineId::VirtualAnalog,
+                    &[
+                        (SLOT_WARPS_MIX, 1.0),
+                        (SLOT_WARPS_DRIVE, 0.3),
+                        (SLOT_WARPS_ALGO, 0.0),
+                        (SLOT_WARPS_MOD_SRC, mod_src),
+                        (SLOT_WARPS_TIMBRE, tim),
+                    ],
+                );
+                // Normalise to unit RMS so a pure gain difference cancels.
+                let mut sum = 0.0f32;
+                for s in out.iter() {
+                    sum += s * s;
+                }
+                let rms = libm::sqrtf(sum / out.len() as f32);
+                if rms > 1.0e-9 {
+                    for s in out.iter_mut() {
+                        *s /= rms;
+                    }
+                }
+                out
+            };
+            let a = render(0.2);
+            let b = render(0.8);
+            let mut sum = 0.0f32;
+            for (x, y) in a.iter().zip(b.iter()) {
+                sum += (x - y) * (x - y);
+            }
+            libm::sqrtf(sum / a.len() as f32)
+        };
+
+        let selfmod = shape_delta(0.0);
+        let auxmod = shape_delta(1.0);
+        assert!(
+            auxmod > selfmod * 2.0,
+            "aux-modulated timbre is not meaningfully more than a gain change: \
+             self {selfmod:.4} vs aux {auxmod:.4}"
+        );
+    }
+
+    /// The interaction that makes `AD.FIL` look broken, pinned so it is a
+    /// documented property rather than a mystery. The AD envelopes are
+    /// unipolar, so the route can only open the filter; with the default
+    /// `RIP.CUT` fully open there is no headroom and the depth is silent.
+    #[test]
+    fn ad_filter_depth_needs_the_filter_closed_first() {
+        let moved = |cut: f32| {
+            let dry = {
+                let mut e = engine_box();
+                for t in e.tracks.iter_mut() {
+                    t.set_macro(SLOT_AD_FILTER_DEPTH, 0.0);
+                    t.set_macro(SLOT_STRIP_CUT, cut);
+                }
+                e.trigger(0, 1.0);
+                let mut l = [0.0f32; BLOCK];
+                let mut r = [0.0f32; BLOCK];
+                let mut peak = 0.0f32;
+                for _ in 0..(0.2 * SAMPLE_RATE / BLOCK as f32) as usize {
+                    e.process(&mut l, &mut r);
+                    for &s in l.iter() {
+                        peak = peak.max(s.abs());
+                    }
+                }
+                peak
+            };
+            let wet = {
+                let mut e = engine_box();
+                for t in e.tracks.iter_mut() {
+                    t.set_macro(SLOT_AD_FILTER_DEPTH, 0.8);
+                    t.set_macro(SLOT_STRIP_CUT, cut);
+                }
+                e.trigger(0, 1.0);
+                let mut l = [0.0f32; BLOCK];
+                let mut r = [0.0f32; BLOCK];
+                let mut peak = 0.0f32;
+                for _ in 0..(0.2 * SAMPLE_RATE / BLOCK as f32) as usize {
+                    e.process(&mut l, &mut r);
+                    for &s in l.iter() {
+                        peak = peak.max(s.abs());
+                    }
+                }
+                peak
+            };
+            (dry - wet).abs()
+        };
+
+        // Filter closed: the route opens it and the level changes.
+        assert!(
+            moved(0.4) > 1.0e-3,
+            "AD.FIL should work once RIP.CUT leaves room to open"
+        );
+        // Filter wide open: no headroom, so the route is legitimately inert.
+        // This is a property of a unipolar envelope, not a broken route.
+        assert_eq!(
+            moved(1.0),
+            0.0,
+            "AD.FIL is bipolar now? If this changed, the doc on \
+             SLOT_AD_FILTER_DEPTH is stale"
+        );
+    }
+
+    /// The filter is neutral by default, so a voice is heard unfiltered. This
+    /// is the regression guard for the 632 Hz default that made every engine
+    /// sound like it was playing through a telephone. Paired with
+    /// `output_never_exceeds_unity_even_with_the_filter_open`, which runs
+    /// every track at full velocity through the now-wide-open strip.
+    #[test]
+    fn the_strip_is_neutral_by_default() {
+        // Asserted against the cutoff the filter actually runs at, not the
+        // one the macro nominally asks for. Those were different numbers
+        // while the macro mapped to 20 kHz: the SVF clamped it to its
+        // stability ceiling and the knob's claim was 1.6 octaves optimistic.
+        for id in MiMachineId::ALL {
+            let m = id.default_macros();
+            let q = 0.5 + 19.5 * m[SLOT_RIPPLES_RESONANCE];
+            let cut = MiSlot::ripples_cutoff_from_macro(m[SLOT_RIPPLES_CUTOFF], q);
+            assert!(
+                cut > 4_000.0,
+                "{id:?} default RIP.CUT resolves to {cut} Hz — the strip is closed again"
+            );
+            // And it is the top of the knob's travel, not a point part-way up
+            // with a dead zone above it.
+            approx::assert_abs_diff_eq!(cut, stability_ceiling_hz(q, SAMPLE_RATE), epsilon = 1.0);
+        }
+    }
+
+    /// `RIP.CUT` explicitly wide open, as a companion to
+    /// `output_never_exceeds_unity` (which resets the strip and so does not
+    /// exercise the mi-drum filter at all). mi-drum sets `strip_bypass`, so
+    /// this is the only place the strip's SVF meets a full-velocity bus.
+    #[test]
+    fn output_never_exceeds_unity_even_with_the_filter_open() {
+        // 1 ulp at 1.0 is 1.19e-7. Allow the documented approximation error.
+        const TOL: f32 = 4.0 * 1.19e-7;
+        let mut e = engine_box();
+        for t in e.tracks.iter_mut() {
+            t.set_macro(SLOT_RIPPLES_CUTOFF, 1.0);
+        }
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for i in 0..200 {
+            for trk in 0..TRACKS {
+                e.trigger(trk, 1.0);
+            }
+            e.process(&mut l, &mut r);
+            for &s in l.iter().chain(r.iter()) {
+                assert!(s.is_finite(), "non-finite sample on block {i}");
+                assert!(
+                    s.abs() <= 1.0 + TOL,
+                    "clipper let {s} through on block {i} — more than the \
+                     approximation's own error, so this is a real overflow"
+                );
+            }
+        }
+    }
+    /// The drive remap, which is the whole reason `WARP.DRV` is not passed
+    /// straight to Warps. Pinned because getting it wrong is silent: a drive
+    /// of 0 mutes the track, and a curve that is still linear at the top wastes
+    /// half the knob.
+    #[test]
+    fn warps_drive_macro_maps_clean_to_destroyed() {
+        // 0.0 is a bypass, and *not* a zero drive — that would be silence.
+        let (bypass, drive) = warps_drive_from_macro(0.0);
+        assert!(bypass, "WARP.DRV 0 must bypass Warps, not mute it");
+        assert_eq!(drive, 0.0);
+
+        // Monotonic and bounded above the floor.
+        let mut prev = -1.0;
+        for i in 1..=100 {
+            let m = i as f32 / 100.0;
+            let (bypass, d) = warps_drive_from_macro(m);
+            assert!(!bypass, "WARP.DRV {m} should not bypass");
+            assert!(d > prev, "drive must increase with the knob: {d} <= {prev}");
+            assert!(
+                (0.50..=1.00).contains(&d),
+                "drive {d} out of range at macro {m}"
+            );
+            prev = d;
+        }
+
+        // The knob floor is the quietest unity point: Warps pre-gain 0.39.
+        let (_, floor) = warps_drive_from_macro(f32::MIN_POSITIVE);
+        assert!(
+            (floor - 0.50).abs() < 1e-3,
+            "the bottom of the knob maps to {floor}, not 0.50"
+        );
+
+        // The top of the knob is Warps at full drive — the destructive end has
+        // to be reachable, not something shy of it.
+        let (_, top) = warps_drive_from_macro(1.0);
+        assert!((top - 1.00).abs() < 1e-6, "top maps to {top}");
+
+        // Out-of-range macro values are clamped, not trusted.
+        assert_eq!(warps_drive_from_macro(-1.0), (true, 0.0));
+        assert_eq!(warps_drive_from_macro(2.0).1, 1.0);
+    }
+
+    /// A bypassed strip must be audibly transparent, and a driven one must not
+    /// be. Without this, "clean" and "silent" are indistinguishable in a render
+    /// and the knob could quietly regress to either.
+    #[test]
+    fn warps_bypass_is_a_real_setting() {
+        let peak_at = |drive: f32| {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+            e.tracks_mut()[0].set_macro(SLOT_WARPS_DRIVE, drive);
+            e.trigger(0, 1.0);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut peak = 0.0f32;
+            for _ in 0..64 {
+                e.process(&mut l, &mut r);
+                for &s in l.iter().chain(r.iter()) {
+                    peak = peak.max(s.abs());
+                }
+            }
+            peak
+        };
+
+        let clean = peak_at(0.0);
+        assert!(
+            clean > 1.0e-3,
+            "WARP.DRV 0 is silent ({clean}) — the bypass is not working, or \
+             Warps is still being handed a zero drive"
+        );
+
+        // The default has to be off the bypass, or the shipped kit never
+        // touches Warps at all.
+        let default_peak = peak_at(MiMachineId::SixOp1.default_macros()[SLOT_WARPS_DRIVE]);
+        assert!(
+            default_peak > clean * 0.5,
+            "the default drive is inaudible: {default_peak} vs clean {clean}"
+        );
+
+        // And the destructive end must actually reach the instrument.
+        let hot = peak_at(1.0);
+        assert!(hot > 1.0e-3, "WARP.DRV 1.0 is silent: {hot}");
+    }
+
     #[test]
     fn extreme_modulation_macros_stay_finite() {
         let slots = [
@@ -1617,6 +2434,258 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ----- the gate -----
+
+    /// Peak of the output over `blocks` blocks, starting `skip_blocks` in.
+    fn peak_from(engine: &mut MiDrumEngine, skip_blocks: usize, blocks: usize) -> f32 {
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for _ in 0..skip_blocks {
+            engine.process(&mut l, &mut r);
+        }
+        let mut peak = 0.0f32;
+        for _ in 0..blocks {
+            engine.process(&mut l, &mut r);
+            for &s in l.iter().chain(r.iter()) {
+                peak = peak.max(s.abs());
+            }
+        }
+        peak
+    }
+
+    /// Below this the output is inaudible: -80 dBFS.
+    const INAUDIBLE: f32 = 1.0e-4;
+
+    fn blocks_for(seconds: f32) -> usize {
+        (seconds * SAMPLE_RATE / BLOCK as f32) as usize
+    }
+
+    /// The headline capability: a voice holds for as long as the gate is open.
+    ///
+    /// Before the gate existed, `MiSlot` set the Plaits trigger high for one
+    /// 24-sample block and low for the rest of the note, so nothing could
+    /// sustain at all. `SixOp1` is the sharpest witness because it reads the
+    /// gate as a *level* and drives its FM operator envelopes from it.
+    #[test]
+    fn a_held_gate_sustains_the_voice() {
+        for &id in &[MiMachineId::SixOp1, MiMachineId::SixOp3] {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.trigger(0, 1.0);
+
+            // Audible at the start...
+            let onset = peak_from(&mut e, 0, blocks_for(0.05));
+            assert!(onset > INAUDIBLE, "{id:?} was silent on note-on: {onset}");
+
+            // ...and still audible four seconds later, with the gate never
+            // closed. A pulsing gate dies here.
+            let held = peak_from(&mut e, 0, blocks_for(4.0));
+            assert!(
+                held > INAUDIBLE,
+                "{id:?} fell silent while the gate was held: {held}"
+            );
+            assert!(e.is_active(), "{id:?} went idle while the gate was held");
+        }
+    }
+
+    /// A note-off starts the engine's release. Asserted as a drop in level
+    /// rather than as silence: the release tail belongs to the engine, and
+    /// `SixOp1` in particular keeps ringing for several seconds at a low
+    /// level. What the gate guarantees is that the note stops being *held*,
+    /// not that it stops instantly.
+    #[test]
+    fn a_release_stops_the_note_being_held() {
+        for &id in &[
+            MiMachineId::SixOp1,
+            MiMachineId::SixOp3,
+            MiMachineId::VirtualAnalog,
+        ] {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.trigger(0, 1.0);
+
+            let held = peak_from(&mut e, 0, blocks_for(1.0));
+            assert!(held > INAUDIBLE, "{id:?} was silent while held: {held}");
+
+            e.release(0);
+
+            // A second of holding, measured long after the release has had
+            // time to act. Without a gate close this would equal `held`.
+            let after = peak_from(&mut e, blocks_for(3.0), blocks_for(1.0));
+            assert!(
+                after < held * 0.1,
+                "{id:?} is still being held after the release: {after} vs {held}"
+            );
+        }
+    }
+
+    /// A drum-grid trigger sends no note-off, and a drum machine must still
+    /// come to rest. The gate is held for the note, so it has to end when the
+    /// voice does rather than waiting for a key that will never come up.
+    #[test]
+    fn a_drum_hit_still_comes_to_rest_without_a_note_off() {
+        for &id in &MiMachineId::PEAKS {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.trigger(0, 1.0);
+            for _ in 0..blocks_for(5.0) {
+                let mut l = [0.0f32; BLOCK];
+                let mut r = [0.0f32; BLOCK];
+                e.process(&mut l, &mut r);
+            }
+            assert!(
+                !e.is_active(),
+                "{id:?} held its gate open with no note-off — a drum trigger never sends one"
+            );
+        }
+    }
+
+    /// The watchdog. A stuck key on a voice that sustains holds the gate high,
+    /// which is what keeps a track at full DSP cost — `is_active` is the
+    /// engine's per-track early-out. Asserted as the held level collapsing,
+    /// since what the watchdog ends is the *hold*; whether the track then goes
+    /// idle is the engine's own tail to decide.
+    #[test]
+    fn watchdog_stops_holding_a_gate_that_is_never_released() {
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+        e.trigger(0, 1.0);
+
+        // Well inside the watchdog, still held.
+        let held = peak_from(&mut e, blocks_for(2.0), blocks_for(1.0));
+        assert!(held > 0.1, "{held} — expected a held note at 2 s");
+
+        // Past it, with no note-off ever sent.
+        let after = peak_from(&mut e, GATED_MAX_HOLD_BLOCKS as usize * 4, blocks_for(1.0));
+        assert!(
+            after < held * 0.1,
+            "the gate watchdog never fired — a stuck key would cost full price forever: \
+             {after} vs {held}"
+        );
+    }
+
+    /// The regression this whole change is for. `SixOp1`/`2`/`3` read the
+    /// Plaits gate as a *level*, not an edge, and feed it straight into FM
+    /// operator envelopes that rest at exactly zero. With the old one-block
+    /// pulse the note was over before the envelope rose, so all three emitted
+    /// digital silence for the whole hit — three of 28 machines missing from
+    /// the rendered baseline.
+    #[test]
+    fn six_op_engines_are_no_longer_silent() {
+        for &id in &[
+            MiMachineId::SixOp1,
+            MiMachineId::SixOp2,
+            MiMachineId::SixOp3,
+        ] {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            let peak = render_peak(&mut e, 0, 32);
+            assert!(
+                peak > 1.0e-3,
+                "{id:?} is silent — the gate is a pulse again (peak {peak})"
+            );
+        }
+    }
+
+    /// Every catalogued engine must make sound. This is the assertion the
+    /// rendered baseline could not make while the gate was pulsing: three of
+    /// the 28 hit windows came back at exactly -inf.
+    #[test]
+    fn every_catalogued_engine_makes_sound() {
+        for &id in &MiMachineId::ALL {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            let peak = render_peak(&mut e, 0, 32);
+            assert!(
+                peak > 1.0e-5,
+                "{id:?} ({}) is silent (peak {peak})",
+                id.name()
+            );
+        }
+    }
+
+    /// Note-offs are not reliably paired. A release for a note that never
+    /// started must make no sound, and repeat releases must leave the decay
+    /// trajectory bit-identical to a run that released exactly once.
+    #[test]
+    fn stray_releases_are_inert() {
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+
+        // Never triggered.
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+        e.release(0);
+        for _ in 0..8 {
+            e.process(&mut l, &mut r);
+        }
+        for &s in l.iter().chain(r.iter()) {
+            assert_eq!(s, 0.0, "a stray release made sound");
+        }
+
+        // One release versus three, on otherwise identical engines. Anything
+        // other than bit-identical output means a repeat release is doing
+        // something.
+        let mut render_with_releases = |n: usize| {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+            e.trigger(0, 1.0);
+            for _ in 0..32 {
+                e.process(&mut l, &mut r);
+            }
+            let mut out = [0.0f32; 8 * BLOCK];
+            for blk in out.chunks_mut(BLOCK) {
+                e.process(&mut l, &mut r);
+                blk.copy_from_slice(&l);
+            }
+            for _ in 0..n {
+                e.release(0);
+            }
+            // Re-render after the releases.
+            for blk in out.chunks_mut(BLOCK) {
+                e.process(&mut l, &mut r);
+                blk.copy_from_slice(&l);
+            }
+            out
+        };
+        let once = render_with_releases(1);
+        let thrice = render_with_releases(3);
+        for (i, (a, b)) in once.iter().zip(thrice.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "a stray release changed the output at {i}: {a} vs {b}"
+            );
+        }
+    }
+
+    /// Releasing one track must not disturb another. A gate is per track, and
+    /// a bug that shared the state would make a note-off on one voice cut
+    /// another.
+    #[test]
+    fn release_is_per_track() {
+        let mut e = engine_box();
+        // Tracks 4 and 5 are the two Plaits voices in the default kit.
+        e.tracks_mut()[4].load_machine(MiMachineId::SixOp1);
+        e.tracks_mut()[5].load_machine(MiMachineId::SixOp3);
+        e.trigger(4, 1.0);
+        e.trigger(5, 1.0);
+        for _ in 0..32 {
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            e.process(&mut l, &mut r);
+        }
+
+        e.release(4);
+        // Four seconds for track 4's release to run out while 5 stays held.
+        let after = peak_from(&mut e, blocks_for(4.0), blocks_for(1.0));
+        assert!(
+            after > INAUDIBLE,
+            "releasing track 4 also silenced track 5: {after}"
+        );
+        assert!(e.tracks()[5].is_active(), "track 5 must still be held");
     }
 
     /// Peaks models take their four parameters from MACH 1..4, and turning
