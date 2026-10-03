@@ -24,7 +24,7 @@ Two cycle-bench binaries live in `firmware/src/bin/`:
 | binary | device | features | how to build |
 |---|---|---|---|
 | `bench` | drum (Rust machines) | `autoboot` | `cd firmware && cargo build --release --bin bench --features autoboot` |
-| `mi-bench` | mi-drum (8 tracks: 4 Peaks + 4 Plaits) | `mi-drum,autoboot` | needs `arm-none-eabi-g++` on PATH |
+| `mi-bench` | mi-drum (6 tracks: 4 Peaks + 2 Plaits) | `mi-drum,autoboot` | needs `arm-none-eabi-g++` on PATH |
 
 Both print the same report format and end with `=== BENCH END ===`, then reboot
 themselves into HalfKay via `bkpt #251` when built with `autoboot`.
@@ -131,9 +131,16 @@ enabled in the current firmware; verify before relying on this.
 
 ### mi-drum memory note
 
-`MiDrumEngine` is ~343 KB and cannot fit in DTCM, so it lives in cached OCRAM.
+`MiDrumEngine` is ~465 KB and cannot fit in DTCM, so it lives in cached OCRAM.
 Warps, Ripples, and Stages objects also live in the engine struct, so OCRAM is
 the binding region for mi-drum, not cycles.
+
+It is also close to the ceiling: 474,864 bytes measured against a 500 KB test
+cap, and 268,560 of that is track-independent overhead — of which `SendFx` is
+262,656 (192,000 stereo delay + 70,656 reverb). The send bus, not the voices, is
+what makes the engine big, which is why Clouds is planned as a firmware
+`.uninit` static outside the engine. `engine_size_fits_ocram_budget` prints the
+current size and fails the build if it crosses 500 KB.
 
 ## Instruction census
 
@@ -164,6 +171,24 @@ This counts static occurrences, not executions. Pair it with `benchloop.py`.
   instances, because it recomputes all 24 mode coefficients on every call.
 - Sustained machines (Dub Siren, Sweep FX) defeat the per-track idle early-out
   for the whole gesture, so a kit with one idles at "N-1 idle + 1 sounding".
+
+### mi-drum per-unit costs
+
+Derived from `mi-baseline.json` and the `mi-stages-chain.json` spike deltas, so
+the next estimate does not have to re-derive them. Peak cycles, block 32:
+
+| unit | cycles | how it was obtained |
+|---|---|---|
+| whole engine, every track silent | ~29,700 | `idle` scenario |
+| one Plaits voice | ~38,900 | (`6 sounding` − `idle`) / 6 |
+| one Stages segment | ~2,100 | (`6 + LPG` − `6 sounding`) / 6 — LPG is a Stages segment |
+| one Overdrive spike stage | ~2,550 | (`6 + DRIVE` − `6 sounding`) / 6 |
+| `Resonator` per track | ~32,000 | (`6 + RESON` − `6 sounding`) / 6 |
+| `Resonator` as a single send | ~19,200 | `6 + RES SND` − `6 sounding` |
+
+Warps, the Ripples SVF, the Peaks voices and Clouds are **not** in this table —
+no bench has measured them yet. Anything quoting a per-unit figure for those is
+an estimate; `PLAN.md` marks which is which.
 
 ## Things that were measured and rejected
 

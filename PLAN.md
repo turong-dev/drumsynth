@@ -3,7 +3,7 @@
 Active plan for the `mi-drum` device. Earlier project history, architecture
 decisions, and benchmark process have moved to `DESIGN.md` and `BENCHMARKS.md`.
 
-*Goal:* replace the current 6-track Plaits-only `mi-drum` with an 8-track
+*Goal:* replace the current Plaits-only `mi-drum` with a 6-track
 Mutable-Instruments drum engine built around a **fixed strip**:
 
 ```text
@@ -13,7 +13,7 @@ Stages A         (modulation)
 (6 × LFO)        (3 × AD envelope)
 ```
 
-- **8 tracks**: 4 Peaks drum models + 4 Plaits macro-oscillators.
+- **6 tracks**: 4 Peaks drum models + 2 Plaits macro-oscillators.
 - **Source stage**: one Peaks drum or one Plaits voice per track, selectable by
 the track's machine/macro slot.
 - **Audio strip**: every track runs through **Warps** then **Ripples**.
@@ -58,7 +58,7 @@ Each track carries exactly one of:
   etc.). These are cheaper than Plaits and give the device a drum-machine core.
 - **Plaits macro-oscillator** — the existing 24-model Plaits catalog.
 
-Track assignment is currently **fixed**: tracks 0–3 are Peaks, tracks 4–7 are
+Track assignment is currently **fixed**: tracks 0–3 are Peaks, tracks 4–5 are
 Plaits. Whether the voice type becomes selectable per track is a follow-up
 product decision; the macro slot for machine selection still exists.
 
@@ -239,36 +239,51 @@ renamed or moved so that `mi_dsp::stages` can refer to the Stages module.
 
 ## Benchmark expectations
 
-The previous 6-track Plaits-only worst case was **262,515 cycles (65.6%)**.
-The redesign adds more tracks and three per-track MI modules, so the budget is
-likely to be challenged.
+The Plaits-only 6-track baseline this plan started from was **262,515 cycles
+(65.6%)** peak — `6 sounding` in `bench-results/mi-baseline.json`, before any
+strip module. The strip adds three MI modules per track, so the budget is worth
+taking seriously even at six tracks.
 
-Rough order-of-magnitude estimate for the full 8-track, all-modulators-active
-worst case:
+Restated for the shipped shape — 4 Peaks + 2 Plaits, 2 LFOs + 2 AD envelopes
+per track, plus Clouds on the send bus. Per-unit figures marked *measured* are
+derived from committed bench JSON, not guessed: a Plaits voice from
+`6 sounding − idle` in `mi-stages-chain.json`, one Stages segment from the
+`6 + LPG` delta (LPG *is* a Stages segment, so it is a direct proxy).
 
-| Component | Count | Per-unit guess | Subtotal |
+| Component | Count | Per-unit | Subtotal |
 |---|---|---|---|
-| Plaits voice | 4 | ~44,000 cy | ~176,000 cy |
-| Peaks drum voice | 4 | ~5,000–15,000 cy | ~20,000–60,000 cy |
-| Warps per track | 8 | ~2,000–5,000 cy | ~16,000–40,000 cy |
-| Ripples SVF (Rust) per track | 8 | ~500–1,500 cy | ~4,000–12,000 cy |
-| Stages (2× per track) | 8 | ~3,000–8,000 cy | ~24,000–64,000 cy |
-| Clouds send FX | 1 | ~20,000–50,000 cy | ~20,000–50,000 cy |
-| **Total** | | | **~260,000–382,000 cy** |
+| Fixed engine + send bus, every track silent | 1 | ~29,700 cy (measured) | ~29,700 cy |
+| Plaits voice (tracks 4–5) | 2 | ~38,900 cy (measured) | ~77,800 cy |
+| Peaks drum voice (tracks 0–3) | 4 | ~5,000–15,000 cy (est.) | ~20,000–60,000 cy |
+| Warps (per track) | 6 | ~2,000–5,000 cy (est.) | ~12,000–30,000 cy |
+| Ripples SVF, Rust (per track) | 6 | ~500–1,500 cy (est.) | ~3,000–9,000 cy |
+| Stages segment, 2 LFO + 2 AD (per track) | 24 | ~2,100 cy (measured) | ~50,400 cy |
+| Clouds send FX | 1 | ~20,000–50,000 cy (est.) | ~20,000–50,000 cy |
+| **Total** | | | **~213,000–307,000 cy** |
 
-Mid-point: **~325,000 cycles = ~81% of budget**. That exceeds the informal
-~70% ceiling before any headroom for parameter smoothing, note parsing, or
-future additions.
+Mid-point: **~260,000 cycles = ~65% of budget**. That sits just under the
+informal ~70% ceiling, with Clouds as the one unmeasured term. The earlier
+8-track version of this table came out at ~325,000 / ~81%, i.e. over the
+ceiling — **the cut to six tracks is what brought it back**, not a change in
+the per-unit costs.
+
+The deferred 6 LFO + 3 AD target is not free in cycles either: 9 segments per
+track is 54 instances, ~113,000 cy, i.e. **+~63,000 over the 2 + 2 that
+shipped**, putting the worst case at ~276,000–370,000 cy (69–93%) — over the
+ceiling. It has to find cycles as well as bytes.
 
 What this means for the phases:
 
 - **14.1 skeleton** must prove the segment restructure is free.
 - **14.2 Warps + Ripples** and **14.3 Stages** must be measured as they land.
-  If the per-track strip alone pushes the worst case over the ceiling, the
-  scope must be reduced (e.g. fewer active modulators, lower Clouds quality,
-  or a hard voice-count limit) before 14.4 adds Peaks.
-- **14.4 Peaks voices** are expected to be cheaper than Plaits, so they may
-  actually help the average case even though the track count rises to 8.
+  The measured `idle` figure above is the floor: it is the cost of the send
+  bus plus the strip with nothing sounding, and nothing can go below it.
+- **14.4 Peaks voices** are estimated at ~5,000–15,000 cy against a measured
+  ~38,900 cy for a Plaits voice. Under the original 8-track shape that made
+  tracks 4–7 cheap and the extra track nearly free; under six tracks it is
+  only two tracks' worth of saving, and the count no longer rises to absorb it.
+  This is an estimate, not a measurement — the first `6 sounding` bench with
+  the Peaks kit loaded is what settles it.
 - **Clouds** is the biggest unknown. It must be measured as a send in 14.5;
   if it dominates, it may need a quality/oversampling trade-off or a separate
   feature gate.
@@ -293,16 +308,132 @@ valid:
 What changes with the redesign:
 
 - The **6-track Plaits baseline** and its pinned digest are invalidated. A new
-  baseline will be pinned once the 8-track engine is stable.
+  baseline will be pinned once the 6-track engine is stable.
 - The **per-stage selector mechanism** (`StageKind` on `SLOT_FILT_0`, the spike
   wrappers) is replaced by the fixed strip.
 - The **future sub-phases** (14.1 env, 14.2 colour, 14.3 drive, 14.4 LFO, 14.5
   source, 14.6 send FX) are replaced by the phases below.
 
-### Known issue carried forward
+### Resolved: the Plaits gate is a real gate now
 
-`SixOp1`/`SixOp2`/`SixOp3` render at ~-84 dBFS — the problem predates mi-drum
-and is independent of the redesign. It remains a separate investigation.
+**Status: fixed.** The gate is held high from note-on to note-off instead of
+being a one-block pulse. All four open sub-decisions below were answered and
+implemented; the reasoning is kept because the shape of the fix is not
+obvious from the code.
+
+**What was wrong.** `MiSlot::render_if_needed` set
+`self.modulations.trigger = if triggered { 1.0 } else { 0.0 }` — high for one
+`VOICE_BLOCK` (24 samples, 0.5 ms), then low for the rest of the note. Plaits
+reads that as the *gate input level* and derives `p.trigger` from it
+(`voice.cc:143`-`:150`).
+
+**Only three engines died, and the reason is a two-contract mismatch.** Eight
+Plaits engines are registered `already_enveloped = true`, which switches off
+Plaits' outer LPG/envelope (`voice.cc:230`) and makes each engine responsible
+for its own amplitude. Six of those read the gate as an *edge*, three read it
+as a *level*:
+
+| engine | reads | 1-block pulse |
+|---|---|---|
+| `bd` `sd` `hh` `string` `modal` | `trigger & TRIGGER_RISING_EDGE` | survives — fires once, runs its own decay |
+| **`SixOp1` `SixOp2` `SixOp3`** | `trigger & TRIGGER_HIGH` | **silence** — the envelope closes 24 samples in |
+
+`SixOpEngine` sets `p->gate = (trigger & TRIGGER_HIGH)` and feeds it straight
+into the FM operator envelopes, which rest at exactly zero
+(`fm/envelope.h:71` parks the envelope in the release stage at level 0.0).
+
+**The fix, and why holding the level is enough.** `voice.cc:97`-`:152` derives
+*both* the level and the edge from the same trigger value, with a 1 ms delay
+and 0.3/0.1 hysteresis. Holding it high therefore needs no edge-detection
+work of our own: `TRIGGER_HIGH` stays set for the note and
+`TRIGGER_RISING_EDGE` still fires exactly once, on the first block where the
+delayed value crosses 0.3. Measured on the same voice, held rather than pulsed:
+
+| engine | before | after |
+|---|---|---|
+| SixOp1 | digital silence | 0.50 sustained at 8 s, gate held |
+| SixOp2 | digital silence | 0.48 at 50 ms, own envelope ends it at ~1 s |
+| SixOp3 | digital silence | 0.40 at 250 ms, 0.17 still at 8 s |
+
+**How the sub-decisions landed.**
+
+- *Where does note-off come from?* Wired end to end: `MidiEvent::NoteOff`
+  (from `0x8n` **and** zero-velocity `0x9n`, which is how most controllers
+  report a release), `EngineEvent::NoteOff` scheduled through the same
+  `TimedQueue` as a note-on, `DeviceEngine::release_channel`, `Track::release`,
+  and `Slot::release` with a no-op default.
+- *Is the gate policy per voice type?* **No — one uniform policy, and the gate
+  also closes when the voice's own envelope runs out.** This turned out to be
+  better than splitting by voice type: a one-shot drum model triggered from a
+  grid that never sends a note-off ends the note when its own envelope does, so
+  the drum behaviour is unchanged with no special-casing, and a sustained engine
+  holds until the key comes up. The per-track `is_active` early-out is what
+  makes this work, and it stays intact.
+- *Does the envelope replace the internal Warps carrier behaviour?* Not
+  addressed here. The strip multiplies nothing; the gate is the voice's own
+  amplitude authority, and Warps' carrier is a separate question that is still
+  open.
+- *Length source.* The watchdog, at 10 s. `MACH 7` is still dead on the eight
+  `already_enveloped` engines (`EngineParameters` has no `decay` field; the
+  only two uses are `voice.cc:156` and `:237`, both inside the `!lpg_bypass`
+  branch), so it was not used for this. Confirmed by measurement: setting
+  `MACH 7` to 0.5 and 0.9 produces byte-identical output on `SixOp1`.
+
+**What is still not fixed, deliberately.** The gate gives the note an *end*,
+not a release *time*. On Plaits, `trigger` pings the outer LPG
+(`voice.cc:241`, `ProcessPing`) and the LPG then decays on `patch.decay`, so
+dropping the gate starts the release without setting its length. Measured: 22
+of 24 Plaits engines fall silent within 3 s of note-off; `chiptune` keeps
+ringing and ignores the gate entirely. A macro-controlled release time is the
+dedicated amplitude envelope below, and it is a separate change.
+
+### Still open: the dedicated amplitude envelope
+
+The gate work above made sustained notes possible. It did not make the
+*release* a controllable parameter, and that is what this decision is for.
+One envelope, in the strip, whose output is the voice's amplitude authority.
+It must do **two** jobs, not one, and the second is the one that is easy to
+miss:
+
+1. **Amplitude.** A sample-wise multiply in the strip, alongside the existing
+   `env1`/`env2` Stages segments. Cheap — they already render per-segment
+   buffers.
+2. **Gate hold.** The envelope's length is also how long the Plaits gate is held
+   high. A strip-only volume envelope does **not** fix SixOp: the internal FM
+   envelope would still be clipped to 24 samples, and the strip would just be
+   shaping a click. Holding the gate for the envelope's length is what makes
+   the engine sound, and the strip multiply is what makes it fade.
+
+Unifying them is the point — one control, one length, one shape, and the edge
+still fires on note-on so the edge-triggered engines keep working unchanged.
+Job 2 is now done by the gate; job 1 is what remains, and `MACH 7` is the
+obvious home for its length on the eight engines where that macro is currently
+a no-op.
+
+Two measurements to keep in mind when sizing it:
+
+- Multiplying in the strip also gates Warps' free-running internal carrier and
+  the reverb send, since those sit downstream of the same buffer. Probably
+  correct, but it is a behaviour change and it will be audible on the carrier
+  pass.
+- It must not double-shape the two drum machines that now have a real release.
+  `Track::release` deliberately does not touch the strip amp envelope for
+  exactly this reason.
+
+**Unrelated but found alongside:** `kMaxEngines` is 24 in the vendored
+`voice.h` while `voice.cc` calls `RegisterInstance` 28 times, so the last four
+are silently dropped and indices 24–27 clamp to 23 (hi-hat) — measured, all
+four return hi-hat. `MiMachineId` maps the four Peaks ids to exactly 24–27, so
+anything that routes a Peaks id into the Plaits path gets a hi-hat with no
+error. Safe today only because the quantiser clamps; `EngineRegistry::Init`
+never nulls `engine_[]`. A SIGSEGV in `Voice::Render` (null `Engine*`, engine
+index 8) was hit once and vanished after an unrelated rebuild, which is the
+signature of the uninitialised-read bug below rather than of this one.
+
+**Also measured, not a gate issue:** `particle`, `additive` and `speech` hold a
+note but are very quiet (1e-5 to 8e-5 at 2 s held). They are not silent; they
+are just low, and that is a level question, not a gate question.
+
 
 ## Phase breakdown
 
@@ -313,11 +444,11 @@ and is independent of the redesign. It remains a separate investigation.
 > send bus alone is 262,656 B (192,000 B stereo delay + 70,656 B reverb), so
 > Clouds cannot be added without removing or externalising both.
 >
-> Every "8 track" / "tracks 4–7" reference below is **stale** and predates that
-> decision. They are left as written rather than silently rewritten, because
-> the cycle and RAM estimates in this document were all taken against 8 tracks
-> and need redoing against 6. The landed `DEFAULT_KIT` is already the 6-track
-> split.
+> The cycle and RAM estimates in this document have since been redone against
+> six tracks, so the "8 track" numbers that remain in prose below are the
+> *phase gates* still written for the 8-track shape and are what the next
+> sub-phase has to correct. The landed `DEFAULT_KIT` is already the 6-track
+> split, and `TRACKS = 6` in `mi-drum-engine`.
 
 ### Phase 14.0 — Vendoring and wrappers
 
@@ -352,7 +483,7 @@ Add the two Stages modulators (6 LFOs + 3 AD envelopes) and the static routing
 to the six targets. Add modulation-depth macros.
 
 *Gate:* each routed target responds to its source; static map is correct;
-bench delta reported for worst case (all 8 tracks, all modulators active).
+bench delta reported for worst case (all 6 tracks, all modulators active).
 
 #### As built (2026-09-26): 2 LFOs + 2 AD envelopes, not 6 + 3
 
@@ -364,10 +495,12 @@ Stages modules per track" is nine `SegmentGenerator` instances per track, not
 two — there is no multi-output class to collapse them into, and a wrapper owning
 six of them costs the same six.
 
-At 4,184 bytes each, 9 × 6 tracks is ~226 KB on top of a 420 KB engine: ~646 KB,
-past both the 500 KB cap and the 512 KB OCRAM limit. 14.3 therefore ships **2
-LFOs + 2 AD envelopes** (4 instances/track, engine 473,520 bytes) and the
-6 + 3 target becomes a follow-up that needs memory back from somewhere.
+At 4,184 bytes each, 9 segments × 6 tracks is ~226 KB. The engine with no
+Stages instances at all measures 374,448 B, so 6 LFO + 3 AD lands at ~600 KB —
+past both the 500 KB cap and the 512 KB OCRAM limit, and 54 segments instead of
+24 is ~+63,000 cycles per block on the cycle side. 14.3 therefore ships **2
+LFOs + 2 AD envelopes** (4 instances/track, 24 total) and the 6 + 3 target
+becomes a follow-up that needs memory *and* cycles back from somewhere.
 
 Two consequences for the macro map, both forced by the 32-slot ceiling:
 
@@ -432,19 +565,19 @@ non-zero into `HIGH`, which left one-shot AD envelopes stuck at their start.
 
 #### Memory headroom after 14.3
 
-`MiDrumEngine` is now **473,520 bytes** against the 500 KB cap — **26,480 bytes
-spare**, about 6 `SegmentGenerator` instances total, i.e. **one more per track**
-if all six go to modulation. The 8th track (14.4) plus Clouds (14.5) do not fit
-in that, so something has to give before 14.4: revisit the cap, move Stages
-state to DTCM, or carry fewer Stages instances per track. Measured, not
-estimated — the number is printed by `engine_size_fits_ocram_budget`.
+`MiDrumEngine` was **473,520 bytes** at 14.3 against the 500 KB cap — **26,480
+bytes spare**, about 6 `SegmentGenerator` instances total, i.e. **one more per
+track** if all six go to modulation. It is **474,864 bytes / 25,136 spare**
+today, the difference being the `PeaksVoice` that 14.4 added to every slot.
+Clouds (14.5) does not fit in that and must live outside the engine. Measured,
+not estimated — the number is printed by `engine_size_fits_ocram_budget`.
 
 ### Phase 14.4 — Peaks drum voices
 
 Add the Peaks drum voice path for tracks 0–3. The track source becomes voice-
 type-aware. Plaits tracks remain unchanged.
 
-*Gate:* all 8 tracks render; Peaks voices trigger and decay; combined bench
+*Gate:* all 6 tracks render; Peaks voices trigger and decay; combined bench
 under the budget ceiling.
 
 #### Vendoring: closed 2026-09-26
@@ -483,29 +616,49 @@ data to the image for nothing.
 #### Memory: the plan is to give Peaks tracks 1 LFO + 1 AD envelope
 
 Per-track Stages instances dominate the budget, and each is 4,184 B. Measured
-component sizes:
+component sizes, all `std::mem::size_of` on the wrappers as they stand:
 
 | | bytes |
 |---|---|
-| one `SegmentGenerator` (Stages) | 4,184 |
-| one Plaits voice | 12,304 |
-| all four Peaks models together | 440 |
+| one Stages segment (`SegmentGenerator`) | 4,184 |
+| one Plaits voice (`PlaitsVoice`) | 12,304 |
+| one Peaks voice (`PeaksVoice`, any of the four models) | 193 |
+| one Warps | 4,112 |
+| one Clouds processor (buffers not included) | 9,096 |
+| one `Track` as landed (2 LFO + 2 AD) | 35,280 |
+| non-track overhead (`Engine` minus the six `Track`s) | 263,184 |
+| **`MiDrumEngine` as landed** | **474,864** |
 
-Peaks voices are ~28× cheaper than Plaits, so trading Plaits voices for Peaks
-voices *frees* the memory the extra tracks need. Modelling the engine at
-473,520 bytes today with 263,184 of that non-track overhead:
+**Correction to an earlier claim in this document:** the Peaks/Plaits split
+does *not* move the memory needle. Every slot carries a `PlaitsVoice` *and* a
+`PeaksVoice` unconditionally — the loaded machine decides which one sounds — so
+a Peaks track costs exactly what a Plaits track costs. Peaks voices are ~64×
+cheaper to store than Plaits voices, and that is a *cycle* win, not a RAM one.
+What the split actually costs in RAM is nothing, and what the earlier version
+of this table got wrong (it credited "4 Plaits + 440" and read the 193-byte
+figure as an aggregate) is that it traded a saving that does not exist.
 
-| 8-track config | Stages | Voices | est. engine | spare |
+Modelling the engine as `tracks × Track + 263,184`, with one Stages segment at
+4,184 B inside each `Track`:
+
+| config | tracks | Stages segments | `MiDrumEngine` | vs 500 KB cap |
 |---|---|---|---|---|
-| 4 Plaits + 4 Peaks, all 2 LFO + 2 AD | 32 | 4 Plaits + 440 | ~493,400 | ~6,600 |
-| **4 Plaits (2+2) + 4 Peaks (1+1)** | **24** | 4 Plaits + 440 | **~458,900** | **~41,000** |
+| **6 tracks (4 Peaks + 2 Plaits), 2 LFO + 2 AD — as landed** | 6 | 24 | **474,864** (measured) | **25,136 spare** |
+| 6 tracks, 1 LFO + 1 AD | 6 | 12 | ~424,656 | ~75,344 spare |
+| 6 tracks, no modulation | 6 | 0 | ~374,448 | ~125,552 spare |
+| 8 tracks, 2 LFO + 2 AD | 8 | 32 | ~545,424 | **45,424 over** |
+| 8 tracks, 1 LFO + 1 AD | 8 | 16 | ~478,480 | ~21,520 spare |
 
-The second row is the plan: it costs **no** extra Stages instances versus today,
-and frees ~41 KB instead of the 26 KB currently spare. It is also musically
-defensible — MI's own Peaks module has no modulation concept at all, just a raw
-parameter array, so one LFO and one envelope on a drum voice is already
-generous. The estimates are built from measured component sizes; the real number
-comes from `engine_size_fits_ocram_budget`, which prints it.
+The first row is measured; the rest are arithmetic on the measured component
+sizes, and `engine_size_fits_ocram_budget` prints the real number.
+
+The second row is the plan, and the reason for it has changed. At six tracks
+2 LFO + 2 AD *already fits*, so 1 + 1 is no longer about feasibility — it buys
+**~50 KB of headroom** for Clouds and for the 6 + 3 modulation follow-up. It is
+also musically defensible: MI's own Peaks module has no modulation concept at
+all, just a raw parameter array, so one LFO and one envelope on a drum voice
+is already generous. Note the last row: 8 tracks is only reachable at 1 + 1, so
+if the track count ever goes back up, that is the configuration it requires.
 
 **Clouds must not live inside the engine.** Its buffers are 118,784 + 65,536 B
 plus a 9,096 B processor — ~193 KB, which no row above absorbs. It is a send-bus
@@ -532,8 +685,23 @@ on tracks 0–3 and Plaits voices on tracks 4–5, and update `mi-bench` scenari
 *Gate:* `mi_drum_baseline_is_unchanged` passes with the new digest; bench
 worst-case under the ~70% ceiling; `MiDrumEngine` size still fits OCRAM.
 
-**Blocked on the uninitialised-read bug above.** Until that is fixed there is no
-digest worth pinning: the gate currently passes or fails by luck. The
+**Blocked twice over.** The uninitialised-read bug means there is no digest
+worth pinning — the gate passes or fails by luck. The Plaits gate bug is now
+fixed, so the "three of 28 machines emit digital silence" reason no longer
+applies, but the digest has moved again (deliberately: the render now includes
+a held-note-and-release pass) and still must not be re-pinned while the
+uninitialised read is open.
+
+The render itself has changed since the constant was last pinned, so
+`BASELINE_DIGEST` is stale for a third, boring reason: the machine sweep and
+the kit pattern both ran on Warps' internal carrier, so five of six tracks and
+all 28 machine hits were an oscillator rather than the voice being tested. The
+carrier is now External for both, with the five internal carriers covered by a
+separate pass at the end of the render. The render has since gained one more
+pass for the same kind of reason: the kit plays one bar with `WARP.DRV` at 0
+before the same bars with the kit's own drives, so the baseline carries an
+audible reference for what the strip is doing. Do not re-pin before the
+uninitialised-read bug is resolved. The
 `DEFAULT_KIT` half of this phase is already done in `100ade8`.
 
 ### Phase 14.7 (future) — Mod matrix
@@ -611,10 +779,137 @@ RUSTFLAGS="-C link-arg=-fsanitize=address" \
 cargo test -p render
 ```
 
+## Measured: Warps is the strip's whole character, and its drive is also its mix
+
+Asked by ear ("the render sounds crusty"), answered by rendering the same kit,
+pattern and seed with progressively less of the Warps stage in the path and
+differencing the results against the Warps-free version:
+
+| variant | residual vs no Warps |
+|---|---|
+| `WARP.DRV` 0 (the bypass detent) | **-93.6 dBFS**, peak 0.0001 |
+| Warps' DSP bypassed, shim's int16 round trip still in | -93.6 dBFS |
+| `WARP.DRV` 0.15 on every track | -24.0 dBFS, peak 1.36 |
+| `WARP.DRV` 0.50-0.80, as the render's kit sets it | **-14.1 dBFS**, peak 1.49 |
+
+Three things follow.
+
+- **The shim's `f32 -> int16 -> f32` round trip is not audible.** It is -93.6
+  dBFS, i.e. ordinary 16-bit quantisation, and it is present even when Warps is
+  bypassed because the conversion happens either side of `Process`. It was the
+  obvious suspect and it is not the cause.
+- **`WARP.DRV = 0` is genuinely transparent**, to that same -93.6 dBFS floor.
+  The detent works.
+- **There is no subtle setting in between, because Warps has no mix control
+  at all.** `Modulator::Process` is 100% wet: `channel_drive[0..1]` go only to
+  `amplifier_[i].Process(...)`, the per-input `SaturatingAmplifier`
+  (`modulator.cc:210`-`:222`), and nothing downstream blends the input back
+  in. A -24 dBFS residual at `WARP.DRV` 0.15 is therefore not a partly-wet
+  signal, it is a fully wet one that happens to be lightly driven. Combined
+  with the measured rolloff (10 kHz is -7 dB at light drive and -17 dB at
+  full, `mi-dsp/src/warps.rs`), an engaged Warps makes every track
+  substantially darker and more saturated, and the only way to dial it back is
+  the bypass detent.
+
+  *(An earlier version of this section claimed drive doubled as a dry/wet mix,
+  citing `wet_dry` at `modulator.cc:175`. That line is inside
+  `ProcessEasterEgg`, the frequency shifter, which this build never enables.
+  The measurements above were unaffected — only the mechanism was misread.)*
+
+If Warps is wanted as a colour rather than a transform, the strip has to
+supply the mix Warps does not have: keep the dry chunk before `warps.process`
+and blend after, leaving `WARP.DRV` to control saturation only. Not done.
+
+### The algorithm knob is not the lever, and two of its positions are dead
+
+Measured the same way — one bar of the kit per algorithm at the shipped
+`WARP.DRV` of 0.2, differenced against the same kit bypassed:
+
+| `WARP.ALG` | mode | residual | level | tilt |
+|---|---|---|---|---|
+| 0.000 | XFADE (the current default) | -23.5 dB | +0.8 dB | -0.1 dB |
+| 0.125 | FOLD | -10.9 dB | +7.0 dB | +4.6 dB |
+| 0.250 | ANALOG RING MOD | -19.2 dB | +2.3 dB | -3.2 dB |
+| 0.375 | DIGITAL RING MOD | -12.1 dB | +3.1 dB | -5.1 dB |
+| 0.500 | XOR | -23.1 dB | -1.4 dB | +1.5 dB |
+| 0.625 | COMPARATOR | -23.3 dB | +0.9 dB | -0.1 dB |
+| 0.750 | NOP | -23.3 dB | +0.9 dB | -0.1 dB |
+
+**The default is already the gentlest**, tied with COMPARATOR and NOP, so there
+is no subtler algorithm to move to. The two to stay away from are FOLD and
+DIGITAL RING MOD. The spread between best and worst is ~13 dB of residual,
+against the ~79 dB that separates bypass from the kit's own drive settings —
+the algorithm is a detail, the drive is the effect.
+
+The reason so many modes collapse onto the same numbers is structural:
+`Warps::process` passes the same buffer as **both** the carrier and the
+modulator (`mi-dsp/src/warps.rs`), so every cross-modulation is a signal
+against itself. A comparator fed two identical inputs has nothing to compare.
+Warps is built for two different signals and is being given one.
+
+Two knobs are flat as a result:
+
+- **`WARP.ALG` above 0.75 does nothing.** `modulation_algorithm` is scaled by 8
+  and clamped to 5.999 (`modulator.cc:250`), so the top quarter of the macro's
+  travel is all the same mode. Same shape of bug as the old `RIP.CUT` top end.
+- **`WARP.TIM` is a gain control at the default algorithm, not a timbre
+  control.** `Xmod<ALGORITHM_XFADE>` returns `x_1 * fade_in + x_2 * fade_out`
+  (`modulator.cc:299`); with `x_1 == x_2` that is `x * (fade_in + fade_out)`, a
+  scalar that runs from unity at either end to +3 dB at centre. So **`LFO.WRP`
+  and `AD.WRP` — two of the four shipped modulation routes — are tremolo**,
+  not timbral modulation, until either the algorithm moves off XFADE or Warps
+  is given a real second input.
+
+The levers that would actually make Warps subtle-but-present, in order of
+effort: blend dry/wet in the strip so `WARP.DRV` controls saturation only; or
+feed the carrier from something other than the voice itself, which
+`WARP.CAR` already does for the five internal oscillators.
+
+**Smaller, real, not the cause:** the shim's input cast is
+`(int16_t)(x * 32767.0f)` -- truncation toward zero, no dither, no clamp. Eight
+samples in the baseline render exceed 1.0, which is UB on that cast. Warps' own
+output is `Clip16`'d, so only the input side is exposed.
+
+## Landed: the Warps stage has inputs, an output tap, and a mix
+
+Three controls added and one dead one wired, in response to the measurements
+above. Slot placement is deliberately expedient — the macro-to-CC map is being
+replaced with NRPN next, so these took the three free slots rather than
+logical ones.
+
+| slot | macro | what |
+|---|---|---|
+| FILT 4 | `RIP.FM` | **was dead**, now audio-rate self-FM of the filter cutoff, +/-2 octaves |
+| FILT 7 | `WARP.MIX` | dry voice vs Warps, default 0.35 |
+| TRACK 6 | `WARP.IN` | Warps' modulator input: voice main output (0) to Plaits aux (1), default 1 |
+| TRACK 7 | `WARP.OUT` | Warps' main output (0) to its aux output (1), default 0 |
+
+`Warps::process_dual` is the new wrapper entry point: separate carrier and
+modulator in, both outputs back. `MiSlot` captures Plaits' aux per sample in
+`tick` rather than reading `block_aux` in the strip, because the engine
+collects source samples interleaved across tracks and `block_pos` has moved on
+by the time the strip runs.
+
+**Not yet benched.** The strip gained a dry copy, a modulator build and two
+blends per sample, plus a second FFI output buffer. `MiDrumEngine` is
+**476,016 bytes** (was 474,864), still inside the 500 KB cap.
+
+### Fixed alongside: `Warps` no longer breaks when moved
+
+`warps::Modulator` holds pointers into its own buffers, so moving the Rust
+wrapper left them stale and the next `Process` read freed stack. The engine
+worked around this with a `warps_initialized` flag and a lazy `init` on the
+first strip call; tests did not, and it faulted twice in one session — once
+from adding a call frame, once from constructing in a test rather than in the
+engine. `Warps` now records the address it was initialised at and re-inits if
+it finds itself somewhere else: one pointer compare per chunk.
+`surviving_a_move_is_the_wrapper_s_job` is the guard.
+
 ## Known gaps in the landed Peaks integration
 
 `100ade8` added the Peaks voices but deliberately stopped short of three things
-the design calls for. All are additive.
+the design calls for. The fourth was found later, while measuring the rendered
+baseline. All are additive.
 
 1. **Peaks pitch is not chromatic.** The wrapper expects parameter 0 to be
    pitch, but `MiSlot::set_macros` currently places `MACH 1` there, so a Peaks
@@ -624,6 +919,12 @@ the design calls for. All are additive.
 2. **"Tracks 0–3 are Peaks" is a default, not a constraint.** The machine
    selector still reaches all 28 machines on any track.
 3. **Peaks tracks still run 2 LFO + 2 AD** rather than the intended 1 + 1.
+4. **`pk-hh` is ~25 dB quieter than its neighbours.** Measured on the rendered
+   baseline, the Peaks high hat peaks at -26.6 dBFS (rms -55.3) where the
+   other three Peaks drums sit between -3.1 and -0.2. Not a bug: the model has
+   no parameters of its own, so it inherits `default_macros`' `MACH 1..4` of
+   0.30 / 0.50 / 0.30 / 0.0, and that block was written for the drum models
+   rather than for a hat. A per-model default is the likely fix.
 
 ## Gates
 
@@ -631,8 +932,11 @@ Bench and RAM are gated **per sub-phase**, because the new architecture adds
 three MI modules to every track:
 
 - Every sub-phase reports a delta against 14.1 (the skeleton).
-- The standing worst case is **8 tracks active, every modulator active, Clouds
-  send fully driven**.
+- The standing worst case is **6 tracks active, every modulator active, Clouds
+  send fully driven**. Restated against six tracks the estimate lands at
+  ~213,000–307,000 cy (~53–77%), mid-point ~65% — under the ceiling, but only
+  because two Plaits voices became four Peaks voices and only because 14.3
+  shipped 4 Stages segments per track instead of 9.
 - The worst case stays under the Phase 13.5 ceiling of ~70% of the 400,000-cycle
   budget at 600 MHz, block 32, or the project explicitly revises that ceiling
   based on measured data.
@@ -640,18 +944,20 @@ three MI modules to every track:
   new modules grow it further. The 500 KB test cap may need revisiting.
 
 The old 6-track Plaits baseline is intentionally broken by design; a new
-8-track digest is pinned in 14.6.
+6-track digest is pinned in 14.6.
 
 ## Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| 8 tracks with three MI modules each exceed cycle budget | Per-sub-phase bench gates; if the worst case exceeds the ceiling, voice count or modulation density is reduced before merging |
+| 6 tracks with three MI modules each exceed cycle budget | Per-sub-phase bench gates; if the worst case exceeds the ceiling, modulation density is reduced before merging — track count is already the floor, since 8 tracks does not fit in RAM at 2 LFO + 2 AD |
 | 32 macro slots cannot cover all new parameters | Prioritise the most useful global and grouped-depth controls in the single MOD bank; NRPN is the intended long-term fix |
 | Vendoring Warps/Ripples/Stages widens the license surface | Same MIT/CC terms as the existing vendored tree; verify per file |
 | Segment restructure changes the sound | 14.1 is a pure-refactor phase with a bit-identity gate before any module is added |
 | Peaks and Plaits have incompatible patch/modulation structs | Track source becomes an enum; keep the strip interface mono-in/mono-out so the voice type is encapsulated |
 | Stages configuration (6 LFOs / 3 envelopes) is not directly supported by the upstream code | Investigate the segment API first; if it cannot be coerced, document and choose a supported configuration |
+| The deferred 6 + 3 modulation target costs both RAM and cycles | 9 segments/track is 54 instances = ~226 KB and ~113,000 cy; needs memory and cycles recovered before it is in scope |
+| The Plaits gate has no note-off, so a held gate may never release on a sustained engine | **Done.** Note-off is routed end to end and the gate is held for the note. All three `SixOp` engines sound again. See "Resolved: the Plaits gate is a real gate now" |
 | Clouds dominates the send FX budget | Measure as a send in 14.5 with quality/density controls exposed; be prepared to gate it behind a lower-quality mode or a per-kit enable |
 
 (End of file)
