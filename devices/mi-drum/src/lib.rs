@@ -123,6 +123,13 @@ pub const GATED_MAX_HOLD_S: f32 = 10.0;
 /// 24-sample `VOICE_BLOCK`, so it has to be counted in blocks. Counting in
 /// samples would make the gate last `VOICE_BLOCK` times too long — ten seconds
 /// of watchdog would be four minutes of held gate.
+/// One-pole release coefficient for the oscillator's gate, ~30 ms at 48 kHz.
+///
+/// Attack is instant; only the release is smoothed. A fast release would
+/// chatter on the voice's own zero crossings and amplitude-modulate the
+/// modulator at the voice's pitch.
+const OSC_ENV_RELEASE: f32 = 1.0 / (0.030 * SAMPLE_RATE);
+
 const GATED_MAX_HOLD_BLOCKS: u32 = (GATED_MAX_HOLD_S * SAMPLE_RATE) as u32 / VOICE_BLOCK as u32;
 
 /// A named Plaits engine model.
@@ -369,6 +376,27 @@ impl MiMachineId {
     }
 
     /// Machine-specific default macro values.
+    /// Whether this machine's aux output carries a *different* signal from
+    /// its main output.
+    ///
+    /// Not the same question as whether it carries signal at all. Measured
+    /// through the strip, 21 of the 24 Plaits engines render an aux that
+    /// differs from their main output; the three `SixOp` engines write the
+    /// same samples to both, so selecting aux on one of them is
+    /// indistinguishable from self-modulation. A Peaks voice has no aux at
+    /// all.
+    ///
+    /// This is what decides a machine's `WARP.IN` default: aux where there is
+    /// a real second signal, the strip's oscillator where there is not.
+    /// `every_machine_has_a_real_modulator_by_default` is the guard, and it
+    /// is what caught this — the first version of that default was a single
+    /// shared value and it left the `SixOp` engines cross-modulating against
+    /// themselves.
+    pub fn has_distinct_aux(self) -> bool {
+        !self.is_peaks() && !matches!(self, Self::SixOp1 | Self::SixOp2 | Self::SixOp3)
+    }
+
+    /// Machine-specific default macro values.
     pub fn default_macros(self) -> [f32; NUM_MACROS] {
         // Default TUNE: drums sit lower, melodic models near middle C.
         let tune = match self {
@@ -422,10 +450,12 @@ impl MiMachineId {
         // Warps as a colour rather than a transform: a third wet by default,
         // its modulator fed from Plaits' aux, taking the main output.
         m[SLOT_WARPS_MIX] = 0.35;
-        // Aux for a Plaits voice; a Peaks voice falls back to self, and
-        // reaches for the oscillator at 1.0 if you want it to have a second
-        // signal at all.
-        m[SLOT_WARPS_MOD_SRC] = 0.5;
+        // Per machine, because a single shared default leaves some voices
+        // cross-modulating against themselves — the degenerate case this
+        // whole arrangement exists to avoid. Aux where the machine has a
+        // distinct one, the strip's oscillator where it does not. See
+        // `has_distinct_aux`.
+        m[SLOT_WARPS_MOD_SRC] = if self.has_distinct_aux() { 0.5 } else { 1.0 };
         m[SLOT_WARPS_OSC_SHAPE] = 0.0; // sine
         m[SLOT_WARPS_OUT_TAP] = 0.0;
 
@@ -758,6 +788,16 @@ pub struct MiSlot {
     /// The strip's modulator oscillator. Not Warps' internal carrier: this
     /// one feeds input 2, so the voice keeps input 1 and stays the subject.
     warps_osc: WarpsOscillator,
+    /// Peak follower on the voice, used to gate the oscillator.
+    ///
+    /// The oscillator free-runs, and the cross-modulation algorithms do not
+    /// all suppress it when the carrier goes quiet: a ring modulator
+    /// multiplies, so a silent voice gives silence, but `ALGORITHM_XFADE`
+    /// — the default — *crossfades*, so it would pass the oscillator through
+    /// an empty track as a continuous tone. Scaling the oscillator by the
+    /// voice's own level is what keeps it a modulator rather than a second
+    /// voice droning under the kit.
+    osc_env: f32,
     ripples: Svf,
     lfo1: ModStages,
     lfo2: ModStages,
@@ -1062,6 +1102,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             warps: Warps::new(SAMPLE_RATE),
             warps_osc_shape: OscShape::Sine,
             warps_osc: WarpsOscillator::new(SAMPLE_RATE),
+            osc_env: 0.0,
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
             lfo1: ModStages::new(),
             lfo2: ModStages::new(),
@@ -1173,6 +1214,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).warps_osc_shape).write(OscShape::Sine);
             core::ptr::addr_of_mut!((*ptr).warps_osc).write(WarpsOscillator::new(SAMPLE_RATE));
+            core::ptr::addr_of_mut!((*ptr).osc_env).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
             core::ptr::addr_of_mut!((*ptr).lfo1).write(ModStages::new());
             core::ptr::addr_of_mut!((*ptr).lfo2).write(ModStages::new());
@@ -1334,6 +1376,7 @@ impl Slot<NUM_MACROS> for MiSlot {
     }
 
     fn reset(&mut self) {
+        self.osc_env = 0.0;
         self.trigger_pending = false;
         self.gate_open = false;
         self.gate_release_pending = false;
@@ -1463,12 +1506,24 @@ impl Slot<NUM_MACROS> for MiSlot {
                         &silence[..len],
                         &mut modulator[..len],
                     );
-                    // The same 0.5 Warps applies to its own internal carrier
-                    // (`kXmodCarrierGain`). The shapes are not level-matched —
-                    // triangle peaks near 2.0 where sine reaches 1.0 — and
-                    // this is the compensation the module itself uses.
-                    for sample in modulator[..len].iter_mut() {
-                        *sample *= 0.5;
+                    // Two gains. The 0.5 is the one Warps applies to its own
+                    // internal carrier (`kXmodCarrierGain`); the shapes are
+                    // not level-matched, triangle peaking near 2.0 where sine
+                    // reaches 1.0, and this is the module's own compensation.
+                    //
+                    // The envelope is ours, and it is what stops the
+                    // oscillator being a drone. Instant attack so a hit is
+                    // modulated from its first sample, slow release so the
+                    // gate does not chatter on a waveform's own zero
+                    // crossings. See `osc_env`.
+                    for i in 0..len {
+                        let level = if dry[i] < 0.0 { -dry[i] } else { dry[i] };
+                        if level > self.osc_env {
+                            self.osc_env = level;
+                        } else {
+                            self.osc_env += (level - self.osc_env) * OSC_ENV_RELEASE;
+                        }
+                        modulator[i] *= 0.5 * self.osc_env;
                     }
                 }
                 // Self, and Aux on a voice that has no aux to offer.
@@ -2392,6 +2447,60 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Every machine must have a real second signal by default.
+    ///
+    /// Warps cross-modulates input 1 against input 2, so handing it the same
+    /// signal twice is the degenerate case: a comparator with nothing to
+    /// compare, and `ALGORITHM_XFADE` reduced to a gain. The point of
+    /// `WARP.IN` is that no track has to sit there — but only if its
+    /// *default* points somewhere real.
+    ///
+    /// That is not automatic, because the honest default differs by voice
+    /// type. A Plaits voice has an aux output. A Peaks voice does not, and
+    /// aux falls back to self, so a single shared default would quietly leave
+    /// four of the six tracks in `DEFAULT_KIT` exactly where they started.
+    ///
+    /// Asserted by forcing `WARP.IN` to self and requiring the default to
+    /// sound different from it.
+    #[test]
+    fn every_machine_has_a_real_modulator_by_default() {
+        // 300 ms, not the 27 ms `render_with_macros` captures. The three
+        // `SixOp` engines are FM voices whose operator envelopes take tens of
+        // milliseconds to open, and a window that catches them before they
+        // sound reads as "no second signal" when the real answer is "no
+        // signal yet".
+        let render = |id: MiMachineId, mod_src: Option<f32>| {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.tracks_mut()[0].set_macro(SLOT_WARPS_MIX, 1.0);
+            e.tracks_mut()[0].set_macro(SLOT_WARPS_ALGO, 0.25);
+            if let Some(v) = mod_src {
+                e.tracks_mut()[0].set_macro(SLOT_WARPS_MOD_SRC, v);
+            }
+            e.trigger_channel(0, 60, 1.0);
+            let mut l = [0.0f32; BLOCK];
+            let mut r = [0.0f32; BLOCK];
+            let mut out = std::vec::Vec::new();
+            for _ in 0..((0.3 * SAMPLE_RATE / BLOCK as f32) as usize) {
+                e.process(&mut l, &mut r);
+                out.extend_from_slice(&l);
+            }
+            out
+        };
+
+        for &id in MiMachineId::ALL.iter() {
+            let defaulted = render(id, None);
+            let selfmod = render(id, Some(0.0));
+            let delta = max_delta(&defaulted, &selfmod);
+            assert!(
+                delta > 1.0e-4,
+                "{id:?} defaults to cross-modulating against itself \
+                 (max delta {delta}) — its WARP.IN default has no second \
+                 signal to reach for"
+            );
         }
     }
 

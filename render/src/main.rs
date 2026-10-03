@@ -2366,7 +2366,7 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0x4346_8715_befe_7c25;
+    const BASELINE_DIGEST: u64 = 0xed53_ae09_78b5_5acd;
 
     /// One test, one render, deliberately.
     ///
