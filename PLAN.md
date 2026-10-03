@@ -695,13 +695,62 @@ carrier is External for both now, with the five internal carriers covered by
 their own pass, and the kit plays one bar at `WARP.DRV` 0 before the same bars
 driven, so the baseline carries its own reference for what the strip does.
 
-`BASELINE_DIGEST` is `0x7b5d_4ef0_174f_d745`, verified identical across 20
+`BASELINE_DIGEST` is `0xed53_ae09_78b5_5acd`, verified identical across 12
 separate processes. The `DEFAULT_KIT` half of this phase was already done in
 `100ade8`.
+
+**The bench half of the gate is still open.** Nothing in this branch has been
+cycle-measured, and the strip has grown real per-sample work since the last
+figure: a dry copy, a modulator build, two blends, and an oscillator plus its
+envelope follower on any track that selects one.
 
 ### Phase 14.7 (future) — Mod matrix
 
 User-configurable modulation patching. Not part of the first deliverable.
+
+## Parked: blocked on the macro map, not on the DSP
+
+All 32 macro slots are allocated. These are designed, measured and
+understood; each one needs an addressable parameter that does not exist yet,
+so they wait for the NRPN work that replaces the macro-to-CC map.
+
+### Plaits' aux output as a selectable *source*
+
+21 of the 24 Plaits engines render an aux output that differs from their main
+one — the three `SixOp` engines write the same samples to both, and a Peaks
+voice has none. Today that aux is reachable only as Warps' modulator input.
+As a *source* it would roughly double the catalogue's timbres without adding
+a single engine.
+
+It is already reachable, awkwardly, which is how its usefulness was
+confirmed. `ALGORITHM_XFADE` crossfades carrier against modulator and
+`WARP.TIM` is the position, so with `WARP.IN` on aux, `WARP.ALG` 0,
+`WARP.MIX` 1 and `WARP.DRV` low, `WARP.TIM` sweeps from the main output to
+the aux. Measured correlation against the dry voice: 0.92 at `WARP.TIM` 0,
+0.04 at 1.0, and the two ends correlate -0.005 with each other.
+
+Four macros deep, routed through Warps' saturator, and it consumes the strip
+— you get the aux timbre *or* Warps as an effect, not both. The clean version
+is one source-side selector on the carrier (main / aux / blend), mirroring
+what `WARP.IN` does for the modulator. Peaks machines simply would not offer
+the aux position, exactly as they do not on `WARP.IN`.
+
+### Why these are parked rather than squeezed in
+
+The macro map is four banks of eight per track, flat index `bank * 8 + index`,
+MIDI CC `20 + flat`. Every slot is spoken for:
+
+| bank | slots |
+|---|---|
+| MACH | TUNE, HARM, TIMBRE, MORPH, FM.AMT, TM.MOD, MM.MOD, DECAY |
+| FILT | WARP.ALG, WARP.TIM, RIP.CUT, RIP.RES, RIP.FM, WARP.DRV, WARP.OSC, WARP.MIX |
+| TRACK | MACH, OUT, PAN, LEVEL, SEND.DLY, SEND.RVB, WARP.IN, WARP.OUT |
+| MOD | LFO.RATE, LFO.DEP, AD.ATK, AD.DEC, LFO.FIL, LFO.WRP, AD.FIL, AD.WRP |
+
+Two of those are also in the wrong bank: `WARP.IN` and `WARP.OUT` are strip
+parameters living in the track-routing bank, because those were the only free
+slots when they landed. Worth straightening out as part of the same work
+rather than renumbering CCs twice.
 
 ## Resolved: mi-drum rendered differently in every process
 
@@ -933,12 +982,27 @@ baseline. All are additive.
 2. **"Tracks 0–3 are Peaks" is a default, not a constraint.** The machine
    selector still reaches all 28 machines on any track.
 3. **Peaks tracks still run 2 LFO + 2 AD** rather than the intended 1 + 1.
-4. **`pk-hh` is ~25 dB quieter than its neighbours.** Measured on the rendered
-   baseline, the Peaks high hat peaks at -26.6 dBFS (rms -55.3) where the
-   other three Peaks drums sit between -3.1 and -0.2. Not a bug: the model has
-   no parameters of its own, so it inherits `default_macros`' `MACH 1..4` of
-   0.30 / 0.50 / 0.30 / 0.0, and that block was written for the drum models
-   rather than for a hat. A per-model default is the likely fix.
+4. **`pk-hh` is a few dB quieter than its neighbours.** Mostly closed, and
+   the history is worth keeping because it shows what the uninitialised read
+   was costing. The original figure here was -26.6 dBFS peak against -3.1 to
+   -0.2 for the other three Peaks drums, i.e. ~25 dB down. That was measured
+   before `HighHat::Init` was fixed: the model's six oscillator phases were
+   uninitialised, so they started at arbitrary offsets and partially
+   cancelled. Zeroed, they start aligned.
+
+   Re-measured after the fix, one hit per model at default macros over 1 s:
+
+   | model | peak | rms |
+   |---|---|---|
+   | `pk-bd` | -8.5 dBFS | -30.8 |
+   | `pk-sd` | -10.3 dBFS | -35.3 |
+   | `pk-hh` | -13.7 dBFS | -41.7 |
+   | `pk-fm` | -6.1 dBFS | -19.9 |
+
+   So 3-8 dB below its neighbours rather than 25. (Different conditions from
+   the original figure, which was taken from the rendered baseline with the
+   kit's macros, so the two are not directly comparable — but the spread is.)
+   A per-model default would still even it out; it is a trim now, not a bug.
 
 ## Gates
 
