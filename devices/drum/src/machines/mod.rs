@@ -863,6 +863,21 @@ impl MachineSlot {
         }
     }
 
+    /// Close the gate on a sounding voice — the note-off path.
+    ///
+    /// Only the two sustained machines act on it. Every other machine is a
+    /// one-shot whose `trigger` started a fixed decay, and a note-off arriving
+    /// after the attack has passed must not shorten the hit, so their
+    /// `release` is deliberately inert. That distinction is the whole reason
+    /// this is a per-machine method rather than a `reset`.
+    pub fn release(&mut self) {
+        match self {
+            Self::DubSiren(m) => m.release(),
+            Self::SweepFx(m) => m.release(),
+            _ => {}
+        }
+    }
+
     /// Transpose by `semis` semitones relative to the machine's macro pitch.
     ///
     /// Scales every oscillator the machine owns so the whole voice — sweep,

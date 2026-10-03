@@ -18,7 +18,7 @@ pub mod noise;
 pub mod osc;
 pub mod svf;
 
-pub use ahd::AhdEnv;
+pub use ahd::{AhdEnv, HoldMode};
 pub use bt::BridgedT;
 pub use env::DecayEnv;
 pub use filter::{OnePoleHp, OnePoleLp};

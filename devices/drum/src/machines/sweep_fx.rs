@@ -1,18 +1,23 @@
-//! Sweep FX: white noise through a swept SVF, gated by a long
-//! self-timed AHD envelope.
+//! Sweep FX: white noise through a swept SVF, held by a gate.
 //!
 //! The "filter sweep" riser — the most-used gesture in electronic FX.
 //! White noise drives a state-variable filter whose cutoff is
-//! modulated by an internal LFO; an [`AhdEnv`] owns the gesture
-//! length. Distinct from every other machine in the catalogue, which
-//! are one-shot percussive hits — see [`DubSiren`](super::dub_siren::DubSiren)
-//! for the sustained-gesture rationale.
+//! modulated by an internal LFO; an [`AhdEnv`] owns the amplitude and now
+//! holds it open until the gate closes. Distinct from every other machine in
+//! the catalogue, which are one-shot percussive hits.
+//!
+//! Like [`DubSiren`](super::dub_siren::DubSiren) this was originally
+//! self-timed — one trigger, one fixed-length gesture — purely because the
+//! engine had no note-off path. It is now gated: the riser builds for as long
+//! as the key is down and releases when it comes up. The watchdog below
+//! replaces the old fixed length as the bound on a note-off that never
+//! arrives.
 //!
 //! # Topology
 //!
 //! ```text
 //!   internal LFO (triangle) ──► cutoff (octaves, exp2)
-//!   AhdEnv (gesture)         ──► amp
+//!   AhdEnv (gated gesture)    ──► amp
 //!   Noise ──► Svf (LP/BP/HP) ──► out
 //! ```
 //!
@@ -47,20 +52,36 @@
 //! | 9   | 29  | RESO    | 0.5..12 Q      | SVF resonance (FILTER bank resonance slot) |
 //! | 16  | 36  | LEVEL   | 0..1           | per-machine output level |
 //! | 17  | 37  | PAN     | 0..1           | (track-routed; ignored here) |
-//! | 18  | 38  | DEC     | 0.5..6 s       | AHD gesture length (5% atk / 85% hold / 10% dec) |
+//! | 18  | 38  | DEC     | 0.05..0.6 s    | release decay, 5% of the old gesture length |
 //! | 20  | 40  | MODE    | 0..1           | LP/BP/HP, quantised (default BP — the classic riser shape) |
 //! | 22  | 42  | SEND.DLY| 0..1           | delay send (track-routed) |
 //! | 23  | 43  | SEND.RVB| 0..1           | reverb send (track-routed) |
 //! | 26  | 46  | OUT     | 0..1           | track routing (Master/Aux1/2/3) |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
+//!
+//! # DEC changed meaning
+//!
+//! `DEC` was the length of the whole self-timed gesture (0.5..6 s). Now that
+//! the gate holds the riser, it is the **release** — the decay after note-off
+//! — and its range is 0.05..0.6 s. A riser that takes 6 s to stop is not a
+//! riser you can drop out of.
 
-use crate::dsp::{fast, AhdEnv, Noise, Svf, SvfMode};
+use crate::dsp::{fast, AhdEnv, HoldMode, Noise, Svf, SvfMode};
 use crate::machines::{
     NUM_MACROS, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5,
     SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
+
+/// Watchdog on the gated hold, in seconds. See
+/// [`DubSiren`](super::dub_siren::DubSiren) for why a lost note-off has to be
+/// bounded rather than trusted.
+const GATED_MAX_HOLD_S: f32 = 10.0;
+
+/// Attack time, in seconds. A riser should not fade in over a noticeable
+/// ramp — it should start and build.
+const ATTACK_S: f32 = 0.02;
 
 /// SVF mode selected by the MODE macro.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,7 +167,8 @@ impl SweepFx {
         let depth_oct = 4.0 * macros[SLOT_MACH_1]; // DEPTH 0..4 oct
         let start_hz = 80.0 + 7920.0 * macros[SLOT_MACH_2]; // START 80..8000 Hz
         let q = 0.5 + 11.5 * macros[SLOT_FILT_1]; // RESO 0.5..12 Q (FILTER resonance slot)
-        let total_s = 0.5 + 5.5 * macros[SLOT_MACH_5]; // DEC 0.5..6 s
+        let total_s = 0.05 + 0.55 * macros[SLOT_MACH_5]; // DEC 0.05..0.6 s
+        let release_s = total_s;
         let mode = SweepMode::from_macro(macros[SLOT_MACH_7]); // MODE LP/BP/HP
         let level = macros[SLOT_LEVEL]; // LEVEL 0..1
 
@@ -178,13 +200,12 @@ impl SweepFx {
         self.filter.set_mode(mode.to_svf_mode());
         self.filter.recalc(start_hz, q, SAMPLE_RATE);
 
-        // AHD proportions: 5% attack, 85% hold, 10% decay. Same
-        // disposition as DubSiren — the hold is the sustained body
-        // of the sweep, the decay lets it close cleanly.
-        let atk = 0.05 * total_s;
-        let hold = 0.85 * total_s;
-        let dec = 0.10 * total_s;
-        self.env.set_params(atk, hold, dec);
+        // Gated: the riser builds for as long as the key is down and
+        // `release` ends it. `hold_s` is 0 so the timed hold cannot
+        // pre-empt the gate, and the watchdog bounds a lost note-off.
+        self.env.set_hold_mode(HoldMode::Gated);
+        self.env.set_max_hold_s(GATED_MAX_HOLD_S);
+        self.env.set_params(ATTACK_S, 0.0, release_s);
     }
 
     /// Transpose by `semis` semitones relative to the macro pitch.
@@ -196,12 +217,21 @@ impl SweepFx {
     /// the track happens to hold a noise machine.
     pub fn retune(&mut self, _semis: f32) {}
 
-    /// Begin a gesture at `velocity` (0.0..=1.0). The AHD peak scales
-    /// with velocity; the gesture length is fixed by [`set_macros`].
+    /// Begin a gesture at `velocity` (0.0..=1.0). Opens the gate: the riser
+    /// builds until [`release`](Self::release). The AHD peak scales with
+    /// velocity, so a softer hit is a quieter riser, not a shorter one.
     pub fn trigger(&mut self, velocity: f32) {
         self.env.trigger(velocity);
         self.filter.reset();
         self.lfo_phase = 0.0;
+    }
+
+    /// Close the gate — the note-off path. Drops into the release decay.
+    ///
+    /// A riser that stopped dead would click, so this is a fade rather than a
+    /// cut. A no-op when already silent or already releasing.
+    pub fn release(&mut self) {
+        self.env.release();
     }
 
     /// Silence.
@@ -212,6 +242,9 @@ impl SweepFx {
     }
 
     /// Still sounding?
+    ///
+    /// True while the gate is open or the release is running — the per-track
+    /// early-out hook.
     pub fn is_active(&self) -> bool {
         self.env.is_active()
     }
@@ -306,23 +339,22 @@ mod tests {
     }
 
     #[test]
-    fn decays_to_silence() {
+    fn decays_to_silence_after_release() {
         let id = MachineId::SweepFx;
         let macros = id.default_macros();
         let mut s = SweepFx::new(&macros);
         s.trigger(1.0);
+        s.release();
         for _ in 0..(7.0 * SAMPLE_RATE) as usize {
             s.tick();
         }
         assert!(!s.is_active(), "sweep did not stop");
     }
 
+    /// The gesture contract, restated for a gate: a riser is *sustained*, not
+    /// a hit, and with the key down the key decides when it ends.
     #[test]
     fn sustained_gesture_stays_active_past_one_second() {
-        // The gesture contract: a sweep is *sustained*, not a hit. At
-        // default DEC (~1.9 s) the machine must still be active past
-        // 1 s. This is the test that pins the budget argument — see
-        // DESIGN.md records the sustained-gesture contract this pins.
         let id = MachineId::SweepFx;
         let macros = id.default_macros();
         let mut s = SweepFx::new(&macros);
@@ -331,19 +363,81 @@ mod tests {
             s.tick();
         }
         assert!(s.is_active(), "sweep cut short of 1 s");
-        for _ in 0..(6.0 * SAMPLE_RATE) as usize {
+        for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();
         }
-        assert!(!s.is_active(), "sweep ran past 7 s");
+        assert!(s.is_active(), "sweep ended without a note-off");
+    }
+
+    /// Hold the key, it builds; let go, it stops.
+    #[test]
+    fn note_off_ends_the_note_early() {
+        let id = MachineId::SweepFx;
+        let macros = id.default_macros();
+        let mut s = SweepFx::new(&macros);
+
+        s.trigger(1.0);
+        for _ in 0..(2.0 * SAMPLE_RATE) as usize {
+            s.tick();
+        }
+        assert!(s.is_active(), "should still be held at 2 s");
+
+        s.release();
+        assert!(s.is_active(), "release should fade, not cut");
+        for _ in 0..(2.0 * SAMPLE_RATE) as usize {
+            s.tick();
+        }
+        assert!(!s.is_active(), "release did not end the note");
+    }
+
+    /// A stuck key must not pin the track out of the engine's `is_active`
+    /// cost gate for the life of the device.
+    #[test]
+    fn watchdog_ends_a_note_that_is_never_released() {
+        let id = MachineId::SweepFx;
+        let macros = id.default_macros();
+        let mut s = SweepFx::new(&macros);
+        s.trigger(1.0);
+        for _ in 0..((GATED_MAX_HOLD_S + 2.0) * SAMPLE_RATE) as usize {
+            s.tick();
+        }
+        assert!(!s.is_active(), "the watchdog never fired");
+    }
+
+    #[test]
+    fn stray_releases_are_inert() {
+        let id = MachineId::SweepFx;
+        let macros = id.default_macros();
+        let mut s = SweepFx::new(&macros);
+
+        s.release();
+        assert!(!s.is_active());
+        assert_eq!(s.tick(), 0.0);
+
+        s.trigger(1.0);
+        for _ in 0..1000 {
+            s.tick();
+        }
+        s.release();
+        let a = s.tick();
+        s.release();
+        s.release();
+        let b = s.tick();
+        assert!(b < a, "repeat release disturbed the decay: {a} -> {b}");
     }
 
     #[test]
     fn rate_macro_changes_cutoff_speed() {
-        // A fast RATE LFO produces a sweep that crosses the
-        // measurement window's centre frequency more often. We
-        // measure the variance of the output peak over short
-        // windows: a faster sweep has window-to-window peak
-        // variation; a near-static sweep has near-constant peaks.
+        // RATE sets the sweep LFO speed, so it shows up as how fast the
+        // *brightness* of the noise output moves. The per-window zero-crossing
+        // rate is a good proxy for that: a bandpass whose centre is moving
+        // changes the output's local pitch, and a fast LFO changes it more
+        // between adjacent windows than a slow one.
+        //
+        // This used to measure window-to-window *peak* variation, which
+        // mostly tracked the amplitude envelope's decay rather than the
+        // sweep — and stopped discriminating once the machine became gated
+        // and the amplitude sat flat at peak.
         let id = MachineId::SweepFx;
         let mut slow = id.default_macros();
         slow[SLOT_MACH_0] = 0.0; // RATE 0.1 Hz
@@ -352,30 +446,42 @@ mod tests {
         fast_macros[SLOT_MACH_0] = 1.0; // RATE 5 Hz
         fast_macros[SLOT_MACH_1] = 0.5;
 
-        let window_peak = |macros: &[f32; NUM_MACROS]| {
+        let win = 2400; // 50 ms
+        let crossings_per_window = |macros: &[f32; NUM_MACROS]| -> [u32; 8] {
             let mut s = SweepFx::new(macros);
             s.trigger(1.0);
-            let win = 2400; // 50 ms windows
-            let mut peaks = [0.0f32; 8];
-            for p in &mut peaks {
-                *p = peak_over(&mut s, win);
+            let mut out = [0u32; 8];
+            for slot in out.iter_mut() {
+                let mut prev = s.tick();
+                let mut c = 0;
+                for _ in 1..win {
+                    let v = s.tick();
+                    if (prev < 0.0) != (v < 0.0) {
+                        c += 1;
+                    }
+                    prev = v;
+                }
+                *slot = c;
             }
-            // Variation = max - min across windows. A fast sweep
-            // wanders more in 50 ms than a near-static one.
-            let mut lo = f32::INFINITY;
-            let mut hi = -f32::INFINITY;
-            for &p in &peaks {
-                lo = lo.min(p);
-                hi = hi.max(p);
+            out
+        };
+
+        // Spread of the per-window rate: max - min.
+        let spread = |xs: [u32; 8]| {
+            let mut lo = u32::MAX;
+            let mut hi = 0u32;
+            for x in xs {
+                lo = lo.min(x);
+                hi = hi.max(x);
             }
             hi - lo
         };
 
-        let slow_var = window_peak(&slow);
-        let fast_var = window_peak(&fast_macros);
+        let slow_spread = spread(crossings_per_window(&slow));
+        let fast_spread = spread(crossings_per_window(&fast_macros));
         assert!(
-            fast_var > slow_var,
-            "RATE macro should change sweep speed: slow={slow_var}, fast={fast_var}"
+            fast_spread > slow_spread,
+            "RATE macro should change sweep speed: slow={slow_spread}, fast={fast_spread}"
         );
     }
 

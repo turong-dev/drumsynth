@@ -102,6 +102,20 @@ pub enum EngineEvent {
         /// Normalised velocity, `0.0..=1.0`.
         velocity: f32,
     },
+    /// Close the gate on a track.
+    ///
+    /// The counterpart to [`NoteOn`](Self::NoteOn), and what makes a sustained
+    /// voice possible. A one-shot voice ignores it and runs its own envelope
+    /// out; a gated voice drops into its release.
+    NoteOff {
+        /// MIDI channel, `0..=7` — selects the track in the device engine.
+        channel: u8,
+        /// MIDI note number. Carried for symmetry with
+        /// [`NoteOn`](Self::NoteOn) and for devices that later want
+        /// per-note voice allocation; the channel is what routes today,
+        /// because a track holds exactly one voice.
+        note: u8,
+    },
     /// Silence the whole engine.
     Panic,
 }

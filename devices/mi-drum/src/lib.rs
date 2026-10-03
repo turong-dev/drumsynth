@@ -1121,6 +1121,18 @@ impl DeviceEngine<NUM_MACROS> for MiDrumEngine {
         self.inner.trigger(track, velocity)
     }
 
+    fn release(&mut self, track: usize) {
+        self.inner.release(track)
+    }
+
+    fn release_note(&mut self, note: u8) -> Option<usize> {
+        self.inner.release_note(note)
+    }
+
+    fn release_channel(&mut self, channel: u8, note: u8) -> Option<usize> {
+        self.inner.release_channel(channel, note)
+    }
+
     fn trigger_note(&mut self, note: u8, velocity: f32) -> Option<usize> {
         self.inner.trigger_note(note, velocity)
     }

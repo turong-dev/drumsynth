@@ -38,6 +38,18 @@ pub trait DeviceEngine<const N: usize> {
     /// Chromatic trigger for the one-channel-per-track path.
     fn trigger_channel(&mut self, channel: u8, note: u8, velocity: f32) -> Option<usize>;
 
+    /// Close the gate on a track by index. The note-off counterpart to
+    /// [`Self::trigger`].
+    fn release(&mut self, track: usize);
+
+    /// Release a track resolved through the note map.
+    fn release_note(&mut self, note: u8) -> Option<usize>;
+
+    /// Close the gate on a track selected by MIDI channel — the note-off
+    /// counterpart to [`Self::trigger_channel`], with the same
+    /// channel-to-track mapping.
+    fn release_channel(&mut self, channel: u8, note: u8) -> Option<usize>;
+
     /// Map a MIDI note to a track, or unmap it.
     fn set_note(&mut self, note: u8, track: Option<u8>);
 
@@ -221,6 +233,41 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
         self.note_map[note as usize] = track;
     }
 
+    /// Close the gate on a single track by index.
+    ///
+    /// Unlike [`Self::trigger`], this does not consult `layer_mask` or
+    /// `choke_mask`. Those describe what a *hit* does to other tracks; a
+    /// release is about this one voice, and firing a choke on note-off would
+    /// cut an unrelated track that happened to be sounding.
+    pub fn release(&mut self, track: usize) {
+        if track < T {
+            self.tracks[track].release();
+        }
+    }
+
+    /// Release the track `note` is mapped to, if any.
+    pub fn release_note(&mut self, note: u8) -> Option<usize> {
+        let track = self.note_map[note as usize]?;
+        self.release(track as usize);
+        Some(track as usize)
+    }
+
+    /// Close the gate on a track selected by MIDI channel, the note-off
+    /// counterpart to [`Self::trigger_channel`].
+    ///
+    /// Returns `Some(track)` when the channel has one, `None` when it does
+    /// not. The note number is accepted for symmetry with
+    /// [`Self::trigger_channel`] and is not consulted: a track holds exactly
+    /// one voice, so the channel alone identifies what to release.
+    pub fn release_channel(&mut self, channel: u8, _note: u8) -> Option<usize> {
+        let track = channel as usize;
+        if track >= T {
+            return None;
+        }
+        self.release(track);
+        Some(track)
+    }
+
     /// Silence every track immediately.
     pub fn panic(&mut self) {
         for t in self.tracks.iter_mut() {
@@ -381,6 +428,9 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
                     } => {
                         self.trigger_channel(channel, note, velocity);
                     }
+                    EngineEvent::NoteOff { channel, note } => {
+                        self.release_channel(channel, note);
+                    }
                     EngineEvent::Panic => self.panic(),
                 }
                 k += 1;
@@ -476,6 +526,18 @@ impl<S: Slot<N>, const N: usize, const T: usize> DeviceEngine<N> for Engine<S, N
 
     fn trigger_channel(&mut self, channel: u8, note: u8, velocity: f32) -> Option<usize> {
         Engine::trigger_channel(self, channel, note, velocity)
+    }
+
+    fn release(&mut self, track: usize) {
+        Engine::release(self, track)
+    }
+
+    fn release_note(&mut self, note: u8) -> Option<usize> {
+        Engine::release_note(self, note)
+    }
+
+    fn release_channel(&mut self, channel: u8, note: u8) -> Option<usize> {
+        Engine::release_channel(self, channel, note)
     }
 
     fn set_note(&mut self, note: u8, track: Option<u8>) {
@@ -620,6 +682,71 @@ mod tests {
         }
     }
 
+    /// A slot that sustains until released, so the note-off path has something
+    /// to actually close. `DummySlot` is a one-shot, which would let a broken
+    /// `release` pass every "did the engine stop" test.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct GateId(usize);
+
+    impl SlotId<NUM_MACROS> for GateId {
+        fn index(self) -> usize {
+            self.0
+        }
+        fn from_index(i: usize) -> Option<Self> {
+            if i < 2 {
+                Some(GateId(i))
+            } else {
+                None
+            }
+        }
+        fn count() -> usize {
+            2
+        }
+        fn default_macros(self) -> [f32; NUM_MACROS] {
+            [0.0; NUM_MACROS]
+        }
+    }
+
+    struct GatedSlot {
+        gate: bool,
+        released: u32,
+    }
+
+    impl Slot<NUM_MACROS> for GatedSlot {
+        type Id = GateId;
+        fn new(_id: Self::Id, _macros: &[f32; NUM_MACROS]) -> Self {
+            Self {
+                gate: false,
+                released: 0,
+            }
+        }
+        fn id(&self) -> Self::Id {
+            GateId(0)
+        }
+        fn set_macros(&mut self, _macros: &[f32; NUM_MACROS]) {}
+        fn trigger(&mut self, _velocity: f32) {
+            self.gate = true;
+        }
+        fn release(&mut self) {
+            self.released += 1;
+            self.gate = false;
+        }
+        fn retune(&mut self, _semis: f32) {}
+        fn reset(&mut self) {
+            self.gate = false;
+        }
+        fn is_active(&self) -> bool {
+            self.gate
+        }
+        fn tick(&mut self) -> f32 {
+            if self.gate {
+                0.5
+            } else {
+                0.0
+            }
+        }
+    }
+
     #[test]
     fn generic_engine_processes_without_nan() {
         let mut engine =
@@ -633,5 +760,178 @@ mod tests {
         for &s in l.iter().chain(r.iter()) {
             assert!(s.is_finite());
         }
+    }
+
+    // ----- note-off / gate close -----
+
+    /// A one-shot slot ignores `release`: the default no-op is the correct
+    /// behaviour for a drum voice, and pinning it here is what stops a later
+    /// "make release universal" change from silently shortening every hit.
+    #[test]
+    fn one_shot_slot_ignores_release() {
+        let mut engine =
+            Engine::<DummySlot, NUM_MACROS, 2>::new_with_kit(&[DummyId(0), DummyId(1)]);
+        engine.trigger(0, 1.0);
+        assert!(engine.tracks[0].is_active());
+        engine.release(0);
+        assert!(
+            engine.tracks[0].is_active(),
+            "a one-shot hit must survive a note-off"
+        );
+    }
+
+    #[test]
+    fn release_closes_a_gated_voice() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        engine.trigger(0, 1.0);
+        engine.trigger(1, 1.0);
+        assert!(engine.is_active());
+
+        engine.release(1);
+        assert!(!engine.tracks[1].is_active(), "gate should be closed");
+        assert!(
+            engine.tracks[0].is_active(),
+            "releasing one track must not touch another"
+        );
+    }
+
+    #[test]
+    fn release_out_of_range_is_a_noop() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        engine.trigger(0, 1.0);
+        // Would panic on an unchecked index.
+        engine.release(7);
+        assert!(engine.tracks[0].is_active());
+    }
+
+    #[test]
+    fn release_channel_maps_channel_to_track() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        assert_eq!(engine.release_channel(1, 60), Some(1));
+        assert_eq!(
+            engine.release_channel(9, 60),
+            None,
+            "no track for channel 9"
+        );
+    }
+
+    #[test]
+    fn release_channel_routes_the_midi_stream() {
+        // The end-to-end shape: bytes in, gate closes on the right track.
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut parser = crate::midi::MidiParser::new();
+        for b in [0x91, 60, 127] {
+            if let Some(ev) = parser.push(b) {
+                crate::midi::handle_midi(&mut engine, ev);
+            }
+        }
+        assert!(engine.tracks[1].is_active(), "note-on should sound track 1");
+
+        for b in [0x81, 60, 0] {
+            if let Some(ev) = parser.push(b) {
+                crate::midi::handle_midi(&mut engine, ev);
+            }
+        }
+        assert!(!engine.tracks[1].is_active(), "note-off should close it");
+    }
+
+    #[test]
+    fn release_through_the_note_map() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        engine.set_note(36, Some(1));
+        engine.trigger(1, 1.0);
+        assert_eq!(engine.release_note(36), Some(1));
+        assert!(!engine.tracks[1].is_active());
+        assert_eq!(engine.release_note(72), None, "unmapped note");
+    }
+
+    /// A held note has to last. This is the regression the whole note-off path
+    /// exists for: a gate that closes on its own is indistinguishable from no
+    /// gate at all.
+    #[test]
+    fn a_gated_voice_sustains_until_released() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        engine.trigger(0, 1.0);
+
+        // Five seconds of held note, well past any one-shot envelope.
+        let held = (5.0 * crate::SAMPLE_RATE / BLOCK as f32) as usize;
+        for _ in 0..held {
+            engine.process(&mut l, &mut r);
+            assert!(
+                l.iter().any(|&s| s != 0.0),
+                "the voice stopped sounding while the key was still down"
+            );
+        }
+        assert!(engine.tracks[0].is_active());
+
+        engine.release(0);
+        for _ in 0..4 {
+            engine.process(&mut l, &mut r);
+        }
+        assert!(
+            l.iter().chain(r.iter()).all(|&s| s == 0.0),
+            "the voice kept sounding after the gate closed"
+        );
+    }
+
+    /// A release scheduled at an offset must land at that sample, exactly like
+    /// a note-on does. The `timed_note_fires_at_its_offset` test in the drum
+    /// crate pins the note-on half; this is the other half.
+    #[test]
+    fn timed_note_off_fires_at_its_offset() {
+        let mut e = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        e.trigger(0, 1.0);
+        e.schedule_timed(
+            10,
+            crate::EngineEvent::NoteOff {
+                channel: 0,
+                note: 60,
+            },
+        );
+
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        e.process(&mut l, &mut r);
+
+        assert!(
+            l[..10].iter().any(|&s| s != 0.0),
+            "should still be sounding before the release"
+        );
+        for i in 10..BLOCK {
+            assert_eq!(l[i], 0.0, "gate stayed open past its offset ({i})");
+            assert_eq!(r[i], 0.0, "gate stayed open past its offset ({i})");
+        }
+        assert!(e.timed.is_empty(), "process() must drain the queue");
+    }
+
+    /// The de-click crossfade must not survive a release. If it did, a
+    /// sustained note would crossfade into its own pre-release level on every
+    /// note-off and re-audibilise the level it was releasing from.
+    #[test]
+    fn release_does_not_arm_the_declick_crossfade() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        engine.trigger(0, 1.0);
+        for _ in 0..4 {
+            engine.process(&mut l, &mut r);
+        }
+        engine.release(0);
+        for _ in 0..8 {
+            engine.process(&mut l, &mut r);
+            for &s in l.iter().chain(r.iter()) {
+                assert_eq!(s, 0.0, "release left a crossfade running");
+            }
+        }
+    }
+
+    #[test]
+    fn panic_still_cuts_a_gated_voice() {
+        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        engine.trigger(0, 1.0);
+        engine.panic();
+        assert!(!engine.is_active(), "panic must still be instant silence");
     }
 }

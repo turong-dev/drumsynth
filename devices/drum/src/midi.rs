@@ -29,8 +29,18 @@
 //!   the machine's macro pitch; each semitone away transposes the voice by
 //!   that many (track retune relative, so the macro pitch still maps the
 //!   same). Velocity 1..127 scales the voice output.
-//! * A `NoteOn` with zero velocity (or a `NoteOff`) is a no-op: drum voices
-//!   are one-shots, so there is nothing to release.
+//! * A `NoteOff` (or a `NoteOn` with zero velocity, which is the same thing on
+//!   the wire) closes the gate on track `N-1`. **Most machines ignore it**:
+//!   the drum voices are one-shots, and a note-off arriving after the attack
+//!   has passed must not shorten the hit. The two sustained machines —
+//!   [`DubSiren`](crate::machines::DubSiren) and
+//!   [`SweepFx`](crate::machines::SweepFx) — act on it and start their
+//!   release decay, which is what makes them playable as held gestures rather
+//!   than fixed-length ones.
+//!
+//! Zero-velocity note-on is a note-off, not silence. Controllers that cannot
+//! send a `0x8n` status byte report releases that way, and treating it as a
+//! no-op leaves the note hanging.
 //!
 //! # Control Changes
 //!
@@ -58,11 +68,13 @@
 //! # Sample-accurate notes
 //!
 //! [`schedule_midi`] is the main-loop variant of [`handle_midi`]. `NoteOn`
-//! events are queued into the engine's [`TimedQueue`](crate::TimedQueue)
-//! with a sample offset (where in the *next* audio block they should fire),
-//! so the firmware can land notes where the groove box placed them instead
-//! of at the next block boundary. `ControlChange` and `Panic` still apply
-//! immediately — CCs are control-rate, and a panic must cut instantly.
+//! and `NoteOff` events are queued into the engine's
+//! [`TimedQueue`](crate::TimedQueue) with a sample offset (where in the
+//! *next* audio block they should fire), so the firmware can land notes where
+//! the groove box placed them instead of at the next block boundary, and a
+//! held note's length is honoured to the sample rather than quantised in one
+//! direction only. `ControlChange` and `Panic` still apply immediately — CCs
+//! are control-rate, and a panic must cut instantly.
 //!
 //! # CC smoothing
 //!
@@ -311,6 +323,109 @@ mod tests {
         e.process(&mut l, &mut r);
         assert!(e.tracks[0].is_active(), "drained note should fire");
         assert!(e.timed.is_empty(), "process() must drain the queue");
+    }
+
+    /// Bytes in, gate closed. The end-to-end path a keyboard exercises: parse,
+    /// route by channel, release the track that channel owns.
+    #[test]
+    fn note_off_bytes_release_the_channel_s_track() {
+        use crate::{DrumEngine, MachineId, BLOCK};
+
+        let mut e = DrumEngine::new();
+        e.tracks[0].load_machine(MachineId::SweepFx);
+
+        let mut p = MidiParser::new();
+        for b in [0x90u8, 60, 127] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut e, ev);
+            }
+        }
+        assert!(e.tracks[0].is_active(), "note-on should sound track 0");
+
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for _ in 0..16 {
+            e.process(&mut l, &mut r);
+        }
+
+        // Note-off on the same channel.
+        for b in [0x80u8, 60, 0] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut e, ev);
+            }
+        }
+        // A gated machine fades rather than cutting, so the track stays active
+        // briefly and then rests.
+        for _ in 0..(3.0 * crate::SAMPLE_RATE / BLOCK as f32) as usize {
+            e.process(&mut l, &mut r);
+        }
+        assert!(
+            !e.is_active(),
+            "note-off should have ended the sustained gesture"
+        );
+    }
+
+    /// A zero-velocity note-on is the same message on the wire, and the gate
+    /// has to close either way. A controller that only reports releases this
+    /// way would otherwise hang every note.
+    #[test]
+    fn zero_velocity_note_on_also_closes_the_gate() {
+        use crate::{DrumEngine, MachineId, BLOCK};
+
+        let mut e = DrumEngine::new();
+        e.tracks[0].load_machine(MachineId::DubSiren);
+
+        let mut p = MidiParser::new();
+        for b in [0x90u8, 60, 127] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut e, ev);
+            }
+        }
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for _ in 0..16 {
+            e.process(&mut l, &mut r);
+        }
+        assert!(e.tracks[0].is_active());
+
+        for b in [0x90u8, 60, 0] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut e, ev);
+            }
+        }
+        for _ in 0..(3.0 * crate::SAMPLE_RATE / BLOCK as f32) as usize {
+            e.process(&mut l, &mut r);
+        }
+        assert!(!e.is_active(), "velocity-0 note-on should close the gate");
+    }
+
+    /// A one-shot drum machine must ignore the note-off. If it did not, every
+    /// hit from a controller that sends note-offs would be cut short — which is
+    /// the pre-existing behaviour of the whole catalogue and must stay that
+    /// way.
+    #[test]
+    fn one_shot_machines_ignore_the_note_off() {
+        use crate::{DrumEngine, MachineId, BLOCK};
+
+        let mut e = DrumEngine::new();
+        // Track 0 is the kick in the default kit.
+        assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
+
+        e.trigger(0, 1.0);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        for _ in 0..4 {
+            e.process(&mut l, &mut r);
+        }
+
+        e.release(0);
+        for _ in 0..16 {
+            e.process(&mut l, &mut r);
+        }
+        assert!(
+            e.tracks[0].is_active(),
+            "a note-off must not shorten a one-shot drum hit"
+        );
     }
 
     #[test]

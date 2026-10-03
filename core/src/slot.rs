@@ -93,6 +93,21 @@ pub trait Slot<const N: usize>: Sized {
     /// Begin a hit at `velocity` (0..=1.0).
     fn trigger(&mut self, velocity: f32);
 
+    /// Close the gate on a sounding voice. The counterpart to
+    /// [`trigger`](Self::trigger).
+    ///
+    /// The default is a no-op, which is the correct behaviour for a one-shot
+    /// voice: a drum hit is not a gate, and a note-off arriving after the
+    /// attack has already passed should not shorten the hit. Voices that
+    /// sustain — an envelope that holds at peak, an engine whose gate input is
+    /// read as a *level* rather than an edge — override this to end the note
+    /// the way the key did.
+    ///
+    /// A release for a note that already finished, or a second release for the
+    /// same note, must be inert. Implementations should not panic and need not
+    /// check whether they are sounding.
+    fn release(&mut self) {}
+
     /// Transpose the voice by `semis` semitones relative to its macro pitch.
     ///
     /// Devices without a pitch concept may no-op. Absolute, not incremental.

@@ -126,6 +126,9 @@ impl Slot<NUM_MACROS> for DrumSlot {
     fn trigger(&mut self, velocity: f32) {
         self.inner.trigger(velocity)
     }
+    fn release(&mut self) {
+        self.inner.release()
+    }
     fn retune(&mut self, semis: f32) {
         self.inner.retune(semis)
     }
@@ -188,6 +191,18 @@ impl DeviceEngine<NUM_MACROS> for DrumEngine {
 
     fn trigger(&mut self, track: usize, velocity: f32) {
         self.inner.trigger(track, velocity)
+    }
+
+    fn release(&mut self, track: usize) {
+        self.inner.release(track)
+    }
+
+    fn release_note(&mut self, note: u8) -> Option<usize> {
+        self.inner.release_note(note)
+    }
+
+    fn release_channel(&mut self, channel: u8, note: u8) -> Option<usize> {
+        self.inner.release_channel(channel, note)
     }
 
     fn trigger_note(&mut self, note: u8, velocity: f32) -> Option<usize> {

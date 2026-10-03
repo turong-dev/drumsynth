@@ -676,6 +676,25 @@ where
         self.choke_fade_left = 0;
     }
 
+    /// Close the gate on this track — the note-off path.
+    ///
+    /// Forwards to [`Slot::release`], which is a no-op for one-shot voices and
+    /// ends the note for gated ones. Deliberately does *not* touch the strip's
+    /// amp envelope, `choke_fade_left`, or the de-click window: the strip
+    /// amp is a fixed A-H-D gesture that the voice sits inside, not a second
+    /// gate, and layering a release on top of it would double-shape every
+    /// note. Releasing also does not touch `declick_left`, because a release
+    /// is not a retrigger — there is no new attack to crossfade into, and
+    /// crossfading would re-introduce the very level the voice is releasing
+    /// from.
+    ///
+    /// A no-op when the track is already silent.
+    pub fn release(&mut self) {
+        if self.is_active() {
+            self.slot.release();
+        }
+    }
+
     /// Choke this voice: fade its output to zero over [`CHOKE_SAMPLES`]
     /// rather than cutting it. The slot keeps ringing under the fade and is
     /// hard-reset once the fade completes. A no-op when already silent or

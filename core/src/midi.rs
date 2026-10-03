@@ -27,9 +27,11 @@ pub const CC_MASTER_GAIN: u8 = 7;
 /// Apply a MIDI event to a device engine.
 ///
 /// `NoteOn` routes through [`DeviceEngine::trigger_channel`]: the channel
-/// picks the track, the note picks the pitch. `ControlChange` reaches that
-/// channel's track-macro block or the master gain. `Panic` silences
-/// everything.
+/// picks the track, the note picks the pitch. `NoteOff` routes through
+/// [`DeviceEngine::release_channel`], the same channel-to-track mapping, so a
+/// voice that sustains ends when the key comes up.
+/// `ControlChange` reaches that channel's track-macro block or the master
+/// gain. `Panic` silences everything.
 pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: MidiEvent) {
     match event {
         MidiEvent::NoteOn {
@@ -38,6 +40,9 @@ pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: Mi
             velocity,
         } => {
             engine.trigger_channel(channel, note, velocity);
+        }
+        MidiEvent::NoteOff { channel, note } => {
+            engine.release_channel(channel, note);
         }
         MidiEvent::ControlChange {
             channel,
@@ -80,8 +85,10 @@ pub fn apply_cc<E: DeviceEngine<N>, const N: usize>(
 
 /// Route a MIDI event to the engine, sample-accurately.
 ///
-/// `NoteOn` events are queued as [`EngineEvent`](crate::EngineEvent)s to fire
-/// `offset` samples into the next process block. `ControlChange` and `Panic`
+/// `NoteOn` and `NoteOff` events are queued as
+/// [`EngineEvent`](crate::EngineEvent)s to fire `offset` samples into the next
+/// process block, so a held note's length is honoured to the sample and a
+/// gate close lands where the sequencer put it. `ControlChange` and `Panic`
 /// are applied immediately via [`handle_midi`].
 ///
 /// Returns `true` when the event was queued/applied, `false` when the timed
@@ -104,6 +111,13 @@ pub fn schedule_midi<E: DeviceEngine<N>, const N: usize>(
                 velocity,
             },
         ),
+        // Queued for the same reason as NoteOn: a release applied between
+        // blocks rather than at its offset would make the note's length
+        // quantise to the block grid in one direction only, and the tail
+        // would not line up with the host's playback.
+        MidiEvent::NoteOff { channel, note } => {
+            engine.schedule_timed(offset, crate::EngineEvent::NoteOff { channel, note })
+        }
         _ => {
             handle_midi(engine, event);
             true
@@ -122,6 +136,18 @@ pub enum MidiEvent {
         note: u8,
         /// Normalised velocity.
         velocity: f32,
+    },
+    /// Note off — the gate closed.
+    ///
+    /// Emitted for status `0x8n` and, per the convention every sequencer and
+    /// keyboard follows, for a `0x9n` note-on with velocity 0. A voice that
+    /// sustains treats this as the end of the note; a one-shot drum machine
+    /// ignores it and lets the hit run its own envelope out.
+    NoteOff {
+        /// MIDI channel, `0..=15`.
+        channel: u8,
+        /// MIDI note number.
+        note: u8,
     },
     /// Continuous controller.
     ControlChange {
@@ -218,13 +244,20 @@ impl MidiParser {
 
         let channel = self.status & 0x0F;
         match self.status & 0xF0 {
-            // Note Off and zero-velocity Note On are ignored: the engine is
-            // one-shot only and has no release path.
-            0x80 => None,
+            0x80 => Some(MidiEvent::NoteOff {
+                channel,
+                note: self.data[0],
+            }),
             0x90 => {
                 let velocity = self.data[1];
                 if velocity == 0 {
-                    None
+                    // Note-on with zero velocity is a note-off. Synths that
+                    // only listened for 0x8n silently hang on any controller
+                    // that reports releases this way, which is most of them.
+                    Some(MidiEvent::NoteOff {
+                        channel,
+                        note: self.data[0],
+                    })
                 } else {
                     Some(MidiEvent::NoteOn {
                         channel,
@@ -345,10 +378,72 @@ mod tests {
     }
 
     #[test]
-    fn zero_velocity_note_on_is_ignored() {
+    fn parses_a_note_off() {
+        let mut p = MidiParser::new();
+        let events = feed(&mut p, &[0x89, 36, 64]); // ch9, note 36
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events.get(0),
+            MidiEvent::NoteOff {
+                channel: 9,
+                note: 36
+            }
+        );
+    }
+
+    /// Note-on velocity is a 7-bit *level* on the wire, so a controller that
+    /// cannot send a 0x8n status byte reports a release as note-on 0. Every
+    /// sequencer and DAW does this at some point; treating it as silence
+    /// leaves the note hanging forever.
+    #[test]
+    fn zero_velocity_note_on_is_a_note_off() {
         let mut p = MidiParser::new();
         let events = feed(&mut p, &[0x99, 36, 0]);
-        assert_eq!(events.len(), 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events.get(0),
+            MidiEvent::NoteOff {
+                channel: 9,
+                note: 36
+            }
+        );
+    }
+
+    #[test]
+    fn note_on_then_note_off_pairs_up() {
+        let mut p = MidiParser::new();
+        // Running status across both statuses is not legal — a new status
+        // byte interrupts — so send them as two complete messages.
+        let events = feed(&mut p, &[0x90, 60, 100, 0x80, 60, 0]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events.get(0), MidiEvent::NoteOn { note: 60, .. }));
+        assert_eq!(
+            events.get(1),
+            MidiEvent::NoteOff {
+                channel: 0,
+                note: 60
+            }
+        );
+    }
+
+    #[test]
+    fn running_status_keeps_note_offs() {
+        // A held chord: one status byte, note-on pairs, then a bare status
+        // change to note-off and its pairs. A parser that reset running
+        // status on the 0x80 byte would still pass the test above, so the
+        // three note-offs here are what pins it.
+        let mut p = MidiParser::new();
+        let events = feed(
+            &mut p,
+            &[0x90, 60, 100, 64, 100, 67, 100, 0x80, 60, 0, 64, 0],
+        );
+        assert_eq!(events.len(), 5, "note-offs dropped under running status");
+        for i in 3..5 {
+            assert!(
+                matches!(events.get(i), MidiEvent::NoteOff { .. }),
+                "expected a note-off at {i}"
+            );
+        }
     }
 
     #[test]
