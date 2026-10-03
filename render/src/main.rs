@@ -1163,17 +1163,17 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
 ///
 /// `(warps timbre, ripples cutoff, ripples resonance, warps drive, lfo rate,
 ///  lfo depth, lfo->filter, lfo->warps, ad attack, ad decay, ad->filter,
-///  ad->warps, warps carrier)`
+///  ad->warps, warps oscillator shape)`
 ///
 /// Depths stay moderate: the full-scale end of the filter depth is three
 /// octaves, and six tracks all modulating at once drives the master sum into
 /// the clipper, which would make the baseline a test of the limiter rather
 /// than of the modulation map.
 ///
-/// Every track stays on the External carrier so the kit is audible as a kit.
-/// Selecting an internal carrier replaces the voice with Warps' oscillator and
-/// gates it on the voice's level, so the drum becomes a full-level drone for
-/// the length of its own decay. The carriers get a dedicated pass instead.
+/// The last field is the shape of the strip's modulator oscillator, which
+/// only sounds when a track's `WARP.IN` selects it. The kit leaves `WARP.IN`
+/// at its default, so these are inert here; the oscillator gets a dedicated
+/// pass instead.
 ///
 /// Shared by the baseline's bypassed and engaged passes, which have to drive
 /// the *same* kit or the A/B is not a comparison.
@@ -1255,7 +1255,8 @@ fn apply_mi_kit_strips(
     use mi_drum_engine::{
         DeviceEngine, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH,
         SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE,
-        SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO, SLOT_WARPS_CARRIER,
+        SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
+        SLOT_WARPS_OSC_SHAPE,
     };
 
     for (idx, &spec) in MI_KIT_STRIPS.iter().enumerate() {
@@ -1273,7 +1274,7 @@ fn apply_mi_kit_strips(
         track.set_macro(SLOT_AD_DECAY, spec.9);
         track.set_macro(SLOT_AD_FILTER_DEPTH, spec.10);
         track.set_macro(SLOT_AD_WARPS_DEPTH, spec.11);
-        track.set_macro(SLOT_WARPS_CARRIER, spec.12);
+        track.set_macro(SLOT_WARPS_OSC_SHAPE, spec.12);
     }
 }
 
@@ -1328,7 +1329,7 @@ fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static 
         DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
         SLOT_AD_WARPS_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
         SLOT_LFO_RATE, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
-        SLOT_WARPS_CARRIER,
+        SLOT_WARPS_MOD_SRC, SLOT_WARPS_OSC_SHAPE,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -1368,13 +1369,6 @@ fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static 
         engine.tracks_mut()[0].set_macro(SLOT_LFO_WARPS_DEPTH, 0.20);
         engine.tracks_mut()[0].set_macro(SLOT_AD_FILTER_DEPTH, 0.25);
         engine.tracks_mut()[0].set_macro(SLOT_AD_WARPS_DEPTH, 0.20);
-        // This pass exists to audition the *voices*, so the carrier stays
-        // External. With an internal carrier selected the machine is only the
-        // FM index for Warps' oscillator, so the catalogue sounds like one
-        // sawtooth repeated 28 times instead of 28 machines. The five internal
-        // carriers get their own pass at the end, where they cannot hide the
-        // machines.
-        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
         engine.trigger(0, 1.0);
         // Release at two-thirds so a sustained engine's release is in the
         // hash and the window still ends in silence. A one-shot model ignores
@@ -1430,7 +1424,6 @@ fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static 
         mi_drum_engine::MiMachineId::SixOp3,
     ] {
         engine.tracks_mut()[0].load_machine(id);
-        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
         engine.trigger(0, 1.0);
 
         // Two seconds held, then two seconds of tail after the release.
@@ -1448,19 +1441,24 @@ fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static 
         }
     }
 
-    mark!("Warps internal carriers — five tones on the kick track");
-    // Half four: Warps' five internal carriers, one hit each, on the kick
-    // track. Kept separate from the two halves above because an internal
-    // carrier replaces the voice with a free-running Warps oscillator, so
-    // folding it into either of them hides the thing that pass exists to
-    // show. This is the coverage the old `ALL.len() % 6` line was reaching
-    // for, and it is audible as five distinct tones rather than one saw.
-    for step in 0..6 {
-        engine.tracks_mut()[0].load_machine(mi_drum_engine::MiMachineId::PeaksBassDrum);
-        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, step as f32 / 6.0);
+    mark!("Warps modulator oscillator — five shapes against the kick");
+    // Half four: the strip's own oscillator on Warps' modulator input, one
+    // shape per hit, on the kick.
+    //
+    // This pass used to sweep `WARP.CAR`, which put the same five shapes on
+    // Warps' *carrier* input — where they replaced the voice rather than
+    // modulating it, so the kick became a drone for the length of its own
+    // decay and the machine was only an FM index. On the modulator side the
+    // kick stays the kick and the oscillator ring-modulates it, which is the
+    // thing worth auditioning. A ring-mod algorithm, because that is where a
+    // modulator is most plainly audible.
+    engine.tracks_mut()[0].load_machine(mi_drum_engine::MiMachineId::PeaksBassDrum);
+    engine.tracks_mut()[0].set_macro(SLOT_WARPS_MOD_SRC, 1.0); // oscillator
+    engine.tracks_mut()[0].set_macro(SLOT_FILT_0, 0.25); // analog ring mod
+    engine.tracks_mut()[0].set_macro(SLOT_STRIP_HOLD, 0.4);
+    for step in 0..5 {
+        engine.tracks_mut()[0].set_macro(SLOT_WARPS_OSC_SHAPE, step as f32 / 5.0 + 0.05);
         engine.trigger(0, 1.0);
-        // Released partway through so the window ends in silence rather than
-        // leaving an internal carrier running to the end of the file.
         for b in 0..blocks_per_hit {
             if b == blocks_per_hit * 2 / 3 {
                 engine.release(0);
@@ -1472,7 +1470,7 @@ fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static 
             }
         }
     }
-    engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
+    engine.tracks_mut()[0].set_macro(SLOT_WARPS_OSC_SHAPE, 0.0);
 
     (out, marks)
 }
@@ -2368,7 +2366,7 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0x7b5d_4ef0_174f_d745;
+    const BASELINE_DIGEST: u64 = 0x4346_8715_befe_7c25;
 
     /// One test, one render, deliberately.
     ///

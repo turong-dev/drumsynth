@@ -7,6 +7,7 @@
 #include <new>
 
 #include "warps/dsp/modulator.h"
+#include "warps/dsp/oscillator.h"
 
 static_assert(sizeof(warps::Modulator) <= MI_WARPS_STORAGE_SIZE,
               "MI_WARPS_STORAGE_SIZE too small");
@@ -80,6 +81,35 @@ void mi_warps_set_parameters(
   // shape is `OscillatorShape(carrier_shape - 1)` and `note` is a MIDI pitch.
   p->carrier_shape = carrier_shape;
   p->note = note;
+}
+
+static_assert(sizeof(warps::Oscillator) <= MI_WARPS_OSC_STORAGE_SIZE,
+              "MI_WARPS_OSC_STORAGE_SIZE too small");
+static_assert(alignof(warps::Oscillator) <= MI_WARPS_OSC_STORAGE_ALIGN,
+              "MI_WARPS_OSC_STORAGE_ALIGN too small for warps::Oscillator");
+
+void mi_warps_osc_init(void* storage, float sample_rate) {
+  warps::Oscillator* o = new (storage) warps::Oscillator();
+  o->Init(sample_rate);
+}
+
+void mi_warps_osc_render(
+    void* storage,
+    int32_t shape,
+    float note,
+    const float* modulation,
+    float* out,
+    size_t size) {
+  warps::Oscillator* o = reinterpret_cast<warps::Oscillator*>(storage);
+  // `Render` takes a mutable pointer but only reads it: the polyblep and sine
+  // paths read it per sample, and the noise path hands it to `Duck` as a
+  // const `external`.
+  o->Render(
+      static_cast<warps::OscillatorShape>(shape),
+      note,
+      const_cast<float*>(modulation),
+      out,
+      size);
 }
 
 void mi_warps_set_bypass(void* storage, int32_t bypass) {

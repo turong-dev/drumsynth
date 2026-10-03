@@ -56,7 +56,19 @@ use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::stages::{
     Stages as ModStages, GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING, SEGMENT_ALT,
 };
-use mi_dsp::warps::{Carrier, Warps, MAX_BLOCK as WARPS_MAX_BLOCK};
+use mi_dsp::warps::{Carrier, OscShape, Warps, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
+
+/// What feeds Warps' modulator input. See [`SLOT_WARPS_MOD_SRC`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ModSource {
+    /// The voice's own output, in both of Warps' inputs.
+    #[default]
+    Self_,
+    /// Plaits' aux output. Falls back to `Self_` on a Peaks voice.
+    Aux,
+    /// The strip's own oscillator, shape from `WARP.OSC`.
+    Oscillator,
+}
 
 /// Seed the noise generator shared by every Plaits engine on this device.
 ///
@@ -403,14 +415,18 @@ impl MiMachineId {
         m[SLOT_WARPS_ALGO] = 0.0;
         m[SLOT_WARPS_TIMBRE] = 0.5;
         m[SLOT_WARPS_DRIVE] = 0.2; // light colour; 0.0 is a true bypass
-        m[SLOT_WARPS_CARRIER] = 0.0; // external cross-modulation
+
         m[SLOT_RIPPLES_CUTOFF] = 1.0; // fully open — see RIPPLES_CUTOFF_INFO
         m[SLOT_RIPPLES_RESONANCE] = 0.01; // gentle Q
         m[SLOT_RIPPLES_FM] = 0.0;
         // Warps as a colour rather than a transform: a third wet by default,
         // its modulator fed from Plaits' aux, taking the main output.
         m[SLOT_WARPS_MIX] = 0.35;
-        m[SLOT_WARPS_MOD_SRC] = 1.0;
+        // Aux for a Plaits voice; a Peaks voice falls back to self, and
+        // reaches for the oscillator at 1.0 if you want it to have a second
+        // signal at all.
+        m[SLOT_WARPS_MOD_SRC] = 0.5;
+        m[SLOT_WARPS_OSC_SHAPE] = 0.0; // sine
         m[SLOT_WARPS_OUT_TAP] = 0.0;
 
         // Modulation defaults. The per-target depths are 0 so the sound is
@@ -472,10 +488,17 @@ impl DeviceModel<NUM_MACROS> for MiMachineId {
 // Macro slot aliases for the Phase 14 fixed strip.
 const SLOT_WARPS_ALGO: usize = SLOT_FILT_0;
 const SLOT_WARPS_TIMBRE: usize = SLOT_FILT_1;
-/// FILT 6: Warps carrier source. 0 = the input cross-modulates itself (the
-/// pre-14.4 behaviour); the rest select Warps' internal sine/triangle/saw/
-/// pulse/noise oscillators, pitched from the voice's own note.
-pub const SLOT_WARPS_CARRIER: usize = macro_index(BANK_FILT, 6);
+/// FILT 6: shape of the strip's own oscillator, when `WARP.IN` selects it as
+/// Warps' modulator. Sine / triangle / saw / pulse / noise, pitched from the
+/// voice's note.
+///
+/// This slot used to be `WARP.CAR`, which put the same oscillator on Warps'
+/// *carrier* input. That was the wrong side: with an internal carrier the
+/// voice is demoted to a modulation index, which is why all 28 machines
+/// sounded like one sawtooth through it. On the modulator side the voice
+/// stays the carrier and keeps its identity, and the strip no longer needs
+/// Warps' `carrier_shape` at all — `Carrier::External` is now permanent.
+pub const SLOT_WARPS_OSC_SHAPE: usize = macro_index(BANK_FILT, 6);
 const SLOT_WARPS_DRIVE: usize = SLOT_STRIP_HOLD;
 const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
@@ -490,20 +513,23 @@ const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
 /// hard the inputs are driven.
 pub const SLOT_WARPS_MIX: usize = macro_index(BANK_FILT, 7);
 
-/// TRACK 6: what feeds Warps' modulator input (input 2).
+/// TRACK 6: what feeds Warps' modulator input (input 2). Three positions.
 ///
-/// 0 is the voice's own main output, which is what the strip did before: the
-/// same signal in both inputs, so every algorithm is the signal against
-/// itself. 1 is Plaits' **aux** output, which the slot renders on every block
-/// and used to discard. That is the patch Warps is designed for — two
-/// different but related signals — and it costs nothing, because the aux
-/// buffer was already being filled.
+/// - **0 — self.** The voice's own output in both inputs. Degenerate, and
+///   kept only because it is what the strip did before: a comparator fed two
+///   identical signals has nothing to compare, and `ALGORITHM_XFADE` reduces
+///   to a gain, which makes `WARP.TIM` a trim rather than a timbre control.
+/// - **1 — aux.** Plaits' second output, which the slot renders every block
+///   and used to discard. Free, and the patch Warps is designed for. A Peaks
+///   voice has no aux, so a Peaks track falls back to self.
+/// - **2 — oscillator.** The strip's own [`WarpsOscillator`], shape from
+///   `WARP.OSC`, pitched from the voice's note. The only source available to
+///   every voice type, which matters because four of the six default tracks
+///   are Peaks and would otherwise be stuck on self.
 ///
-/// Continuous rather than a switch: the two sources are both audio, so
-/// crossfading between them is meaningful and free.
-///
-/// A Peaks voice has no aux output, so a Peaks track stays self-modulated
-/// whatever this says.
+/// Stepped rather than a crossfade. The three are different *kinds* of
+/// signal, not points on an axis, and blending a pitched oscillator into an
+/// aux output is not a position anybody reaches for.
 pub const SLOT_WARPS_MOD_SRC: usize = macro_index(BANK_TRACK, 6);
 
 /// TRACK 7: which Warps output the strip takes.
@@ -542,7 +568,7 @@ pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
 
 const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
 const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
-const WARPS_CARRIER_INFO: MacroInfo = mi("WARP.CAR", "WCA", 0.0);
+const WARPS_OSC_SHAPE_INFO: MacroInfo = mi("WARP.OSC", "WOS", 0.0);
 /// Warps input drive, and the clean end of the strip.
 ///
 /// The macro is **not** Warps' `drive` directly. Warps'
@@ -619,7 +645,7 @@ const RIPPLES_RESONANCE_INFO: MacroInfo = mi("RIP.RES", "RRS", 0.5);
 /// Full scale is +/-2 octaves of cutoff swing per unit of input.
 const RIPPLES_FM_INFO: MacroInfo = mi("RIP.FM", "RFM", 0.0);
 const WARPS_MIX_INFO: MacroInfo = mi("WARP.MIX", "WMX", 0.35);
-const WARPS_MOD_SRC_INFO: MacroInfo = mi("WARP.IN", "WIN", 1.0);
+const WARPS_MOD_SRC_INFO: MacroInfo = mi("WARP.IN", "WIN", 0.5);
 const WARPS_OUT_TAP_INFO: MacroInfo = mi("WARP.OUT", "WOU", 0.0);
 const LFO_RATE_INFO: MacroInfo = mi("LFO.RATE", "LRT", 0.5);
 const LFO_DEPTH_INFO: MacroInfo = mi("LFO.DEPTH", "LDPT", 1.0);
@@ -646,7 +672,7 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     RIPPLES_RESONANCE_INFO,   // FILT 3 — Ripples resonance
     RIPPLES_FM_INFO,          // FILT 4 — Ripples FM amount
     WARPS_DRIVE_INFO,         // FILT 5 — Warps input drive / VCA
-    WARPS_CARRIER_INFO,       // FILT 6 — Warps carrier source
+    WARPS_OSC_SHAPE_INFO,     // FILT 6 — strip oscillator shape
     WARPS_MIX_INFO,           // FILT 7 — Warps dry/wet
     MACH_INFO,                // TRACK 0
     OUT_INFO,                 // TRACK 1
@@ -685,9 +711,13 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
 ///   Plaits voice is already constructed that way.
 ///
 /// The cost is the unused partner voice: a Peaks track carries a dormant
-/// 12,304 B PlaitsVoice it never sounds, and a Plaits track a 193 B PeaksVoice.
-/// That is the price of not touching `core`, and it is small — 193 B per track
+/// 12,304 B PlaitsVoice it never sounds, and a Plaits track a 196 B PeaksVoice.
+/// That is the price of not touching `core`, and it is small — 196 B per track
 /// over the 12,304 B we already spend.
+///
+/// (196, not the 193 this used to say: `PeaksVoice`'s FFI storage was
+/// alignment-1, which is what made it HardFault on the M7. See the note on
+/// `Storage` in `mi-dsp/src/peaks.rs`.)
 pub struct MiSlot {
     /// Sounded only on a Plaits track.
     plaits: PlaitsVoice,
@@ -723,7 +753,11 @@ pub struct MiSlot {
     retune_semitones: f32,
     // Phase 14 fixed-strip modules.
     warps: Warps,
-    warps_carrier: Carrier,
+    /// Shape of the strip's own oscillator, from `WARP.OSC`.
+    warps_osc_shape: OscShape,
+    /// The strip's modulator oscillator. Not Warps' internal carrier: this
+    /// one feeds input 2, so the voice keeps input 1 and stays the subject.
+    warps_osc: WarpsOscillator,
     ripples: Svf,
     lfo1: ModStages,
     lfo2: ModStages,
@@ -749,9 +783,8 @@ pub struct MiSlot {
     ripples_fm: f32,
     /// `WARP.MIX`: 0 = dry voice, 1 = Warps alone.
     warps_mix: f32,
-    /// `WARP.IN`: crossfade between the voice's main output (0) and its aux
-    /// output (1) as Warps' modulator input.
-    warps_mod_src: f32,
+    /// `WARP.IN`: which signal feeds Warps' modulator input.
+    warps_mod_src: ModSource,
     /// `WARP.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
     warps_out_tap: f32,
     /// Plaits' aux output for the current segment, captured by `tick` in the
@@ -808,14 +841,24 @@ impl MiSlot {
     /// untouched macro keeps the cross-modulator behaviour the strip had before
     /// this control existed. The remaining five select Warps' internal
     /// oscillators, which turn the same block into a small FM voice.
-    fn carrier_from_macro(v: f32) -> Carrier {
-        match (v * 6.0) as u32 {
-            0 => Carrier::External,
-            1 => Carrier::Sine,
-            2 => Carrier::Triangle,
-            3 => Carrier::Saw,
-            4 => Carrier::Pulse,
-            _ => Carrier::NoiseLp,
+    /// `WARP.OSC` to a shape for the strip's modulator oscillator.
+    fn osc_shape_from_macro(v: f32) -> OscShape {
+        match (v * 5.0) as u32 {
+            0 => OscShape::Sine,
+            1 => OscShape::Triangle,
+            2 => OscShape::Saw,
+            3 => OscShape::Pulse,
+            _ => OscShape::NoiseLp,
+        }
+    }
+
+    /// `WARP.IN` to one of three modulator sources. See
+    /// [`SLOT_WARPS_MOD_SRC`].
+    fn mod_src_from_macro(v: f32) -> ModSource {
+        match (v * 3.0) as u32 {
+            0 => ModSource::Self_,
+            1 => ModSource::Aux,
+            _ => ModSource::Oscillator,
         }
     }
 
@@ -1017,7 +1060,8 @@ impl Slot<NUM_MACROS> for MiSlot {
             tune_macro: 0.45,
             retune_semitones: 0.0,
             warps: Warps::new(SAMPLE_RATE),
-            warps_carrier: Carrier::External,
+            warps_osc_shape: OscShape::Sine,
+            warps_osc: WarpsOscillator::new(SAMPLE_RATE),
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
             lfo1: ModStages::new(),
             lfo2: ModStages::new(),
@@ -1036,7 +1080,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             ripples_reso_q: 0.707,
             ripples_fm: 0.0,
             warps_mix: 1.0,
-            warps_mod_src: 0.0,
+            warps_mod_src: ModSource::Self_,
             warps_out_tap: 0.0,
             aux_segment: [0.0f32; BLOCK],
             aux_filled: 0,
@@ -1127,7 +1171,8 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
-            core::ptr::addr_of_mut!((*ptr).warps_carrier).write(Carrier::External);
+            core::ptr::addr_of_mut!((*ptr).warps_osc_shape).write(OscShape::Sine);
+            core::ptr::addr_of_mut!((*ptr).warps_osc).write(WarpsOscillator::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
             core::ptr::addr_of_mut!((*ptr).lfo1).write(ModStages::new());
             core::ptr::addr_of_mut!((*ptr).lfo2).write(ModStages::new());
@@ -1146,7 +1191,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).ripples_reso_q).write(0.707);
             core::ptr::addr_of_mut!((*ptr).ripples_fm).write(0.0);
             core::ptr::addr_of_mut!((*ptr).warps_mix).write(1.0);
-            core::ptr::addr_of_mut!((*ptr).warps_mod_src).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).warps_mod_src).write(ModSource::Self_);
             core::ptr::addr_of_mut!((*ptr).warps_out_tap).write(0.0);
             core::ptr::addr_of_mut!((*ptr).aux_segment).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).aux_filled).write(0);
@@ -1210,7 +1255,7 @@ impl Slot<NUM_MACROS> for MiSlot {
         let (bypass, drive) = warps_drive_from_macro(macros[SLOT_WARPS_DRIVE]);
         self.warps_bypassed = bypass;
         self.warps_drive = drive;
-        self.warps_carrier = Self::carrier_from_macro(macros[SLOT_WARPS_CARRIER]);
+        self.warps_osc_shape = Self::osc_shape_from_macro(macros[SLOT_WARPS_OSC_SHAPE]);
         // Resonance first: it sets the filter's stability ceiling, and the
         // cutoff macro is mapped onto that ceiling rather than onto a fixed
         // 20 kHz. See `ripples_cutoff_from_macro`.
@@ -1221,7 +1266,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             .recalc(self.ripples_cutoff_hz, self.ripples_reso_q, SAMPLE_RATE);
         self.ripples_fm = macros[SLOT_RIPPLES_FM];
         self.warps_mix = macros[SLOT_WARPS_MIX].clamp(0.0, 1.0);
-        self.warps_mod_src = macros[SLOT_WARPS_MOD_SRC].clamp(0.0, 1.0);
+        self.warps_mod_src = Self::mod_src_from_macro(macros[SLOT_WARPS_MOD_SRC]);
         self.warps_out_tap = macros[SLOT_WARPS_OUT_TAP].clamp(0.0, 1.0);
 
         self.lfo_rate = macros[SLOT_LFO_RATE];
@@ -1377,11 +1422,15 @@ impl Slot<NUM_MACROS> for MiSlot {
             // why the knob is remapped rather than passed straight through.
             // Both flags were resolved at control rate in `set_macros`.
             self.warps.set_bypass(self.warps_bypassed);
+            // `Carrier::External` always: the strip supplies its own
+            // oscillator on the modulator side, so Warps' internal-carrier
+            // path — which replaces the voice rather than modulating it — is
+            // never used, and `note` goes unread as a result.
             self.warps.set_parameters(
                 self.warps_algorithm,
                 modulated_timbre,
                 self.warps_drive,
-                self.warps_carrier,
+                Carrier::External,
                 self.patch.note,
             );
 
@@ -1391,20 +1440,39 @@ impl Slot<NUM_MACROS> for MiSlot {
             let mut dry = [0.0f32; WARPS_MAX_BLOCK];
             dry[..len].copy_from_slice(chunk);
 
-            // Warps' modulator input. `WARP.IN` crossfades between the voice's
-            // own main output — the degenerate self-modulation the strip used
-            // to do — and its aux output, which is a different but related
-            // signal and is what makes the cross-modulation mean anything.
+            // Warps' modulator input. Feeding it the same signal as the
+            // carrier is the degenerate case the strip used to be stuck in —
+            // a comparator with nothing to compare — so this is where the
+            // second signal comes from.
             let mut modulator = [0.0f32; WARPS_MAX_BLOCK];
             let aux_available = !self.is_peaks && self.aux_filled >= chunk_start + len;
-            let mod_src = if aux_available {
-                self.warps_mod_src
-            } else {
-                0.0
-            };
-            for i in 0..len {
-                let aux = self.aux_segment[chunk_start + i];
-                modulator[i] = dry[i] + mod_src * (aux - dry[i]);
+            match self.warps_mod_src {
+                ModSource::Aux if aux_available => {
+                    modulator[..len]
+                        .copy_from_slice(&self.aux_segment[chunk_start..chunk_start + len]);
+                }
+                ModSource::Oscillator => {
+                    // Silent modulation input: as a modulator the oscillator
+                    // wants to be a defined tone rather than something the
+                    // voice smears. `Duck` passes the noise shape through
+                    // untouched when its external input is silent.
+                    let silence = [0.0f32; WARPS_MAX_BLOCK];
+                    self.warps_osc.render(
+                        self.warps_osc_shape,
+                        self.patch.note,
+                        &silence[..len],
+                        &mut modulator[..len],
+                    );
+                    // The same 0.5 Warps applies to its own internal carrier
+                    // (`kXmodCarrierGain`). The shapes are not level-matched —
+                    // triangle peaks near 2.0 where sine reaches 1.0 — and
+                    // this is the compensation the module itself uses.
+                    for sample in modulator[..len].iter_mut() {
+                        *sample *= 0.5;
+                    }
+                }
+                // Self, and Aux on a voice that has no aux to offer.
+                _ => modulator[..len].copy_from_slice(&dry[..len]),
             }
 
             let mut warps_aux = [0.0f32; WARPS_MAX_BLOCK];
@@ -1983,9 +2051,9 @@ mod tests {
     fn warps_modulator_source_changes_the_sound_on_plaits() {
         let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.5)];
         let mut selfmod = base.to_vec();
-        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0));
+        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0)); // self
         let mut auxmod = base.to_vec();
-        auxmod.push((SLOT_WARPS_MOD_SRC, 1.0));
+        auxmod.push((SLOT_WARPS_MOD_SRC, 0.5)); // aux
 
         let a = render_with_macros(MiMachineId::VirtualAnalog, &selfmod);
         let b = render_with_macros(MiMachineId::VirtualAnalog, &auxmod);
@@ -1993,28 +2061,6 @@ mod tests {
             max_delta(&a, &b) > 1.0e-3,
             "WARP.IN is inert — the aux output is not reaching the modulator"
         );
-    }
-
-    /// A Peaks voice has no aux output, so `WARP.IN` must be a no-op there
-    /// rather than cross-modulating the voice against silence, which would
-    /// mute the track.
-    #[test]
-    fn warps_modulator_source_is_inert_on_peaks() {
-        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.5)];
-        let mut selfmod = base.to_vec();
-        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0));
-        let mut auxmod = base.to_vec();
-        auxmod.push((SLOT_WARPS_MOD_SRC, 1.0));
-
-        let a = render_with_macros(MiMachineId::PeaksBassDrum, &selfmod);
-        let b = render_with_macros(MiMachineId::PeaksBassDrum, &auxmod);
-        assert_eq!(
-            max_delta(&a, &b),
-            0.0,
-            "WARP.IN moved a Peaks track, which has no aux to move to"
-        );
-        let peak = a.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        assert!(peak > 1.0e-3, "the Peaks track went silent (peak {peak})");
     }
 
     /// Warps' aux tap is the saturated input sum, not the cross-modulation, so
@@ -2349,38 +2395,93 @@ mod tests {
         }
     }
 
-    /// Every Warps carrier source must be reachable and audible through the
-    /// strip. `WARP.CAR` at 0 keeps the cross-modulator; the rest select Warps'
-    /// internal oscillators, which the strip now pitches from the voice's note.
+    /// Every oscillator shape must be reachable and must change the sound,
+    /// with `WARP.IN` on the oscillator.
+    ///
+    /// Replaces `every_warps_carrier_is_live`. The same five shapes used to
+    /// sit on Warps' *carrier* input, where they replaced the voice; they are
+    /// on the modulator input now, where they cross-modulate it.
     #[test]
-    fn every_warps_carrier_is_live() {
-        let external = render_depth(SLOT_WARPS_CARRIER, 0.0);
-        let mut prev_peak = 0.0f32;
-        for (i, v) in [0.2f32, 0.4, 0.6, 0.8, 1.0].iter().enumerate() {
-            let out = render_depth(SLOT_WARPS_CARRIER, *v);
+    fn every_warps_oscillator_shape_is_live() {
+        let base = [
+            (SLOT_WARPS_MIX, 1.0f32),
+            (SLOT_WARPS_DRIVE, 0.5),
+            (SLOT_WARPS_ALGO, 0.25), // ring mod, so the modulator is audible
+            (SLOT_WARPS_MOD_SRC, 1.0), // oscillator
+        ];
+        let render_shape = |shape: f32| {
+            let mut m = base.to_vec();
+            m.push((SLOT_WARPS_OSC_SHAPE, shape));
+            render_with_macros(MiMachineId::VirtualAnalog, &m)
+        };
+
+        let mut rendered = std::vec::Vec::new();
+        for (i, v) in [0.0f32, 0.25, 0.45, 0.65, 0.95].iter().enumerate() {
+            let out = render_shape(*v);
             let peak = out.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
             assert!(
                 peak > 0.01,
-                "carrier step {i} (macro {v}) was silent (peak {peak})"
+                "shape {i} (macro {v}) was silent (peak {peak})"
             );
-            for &s in &out {
-                assert!(s.is_finite(), "carrier step {i} produced {s}");
+            for &s in out.iter() {
+                assert!(s.is_finite(), "shape {i} produced {s}");
             }
-            let delta = external
+            rendered.push(out);
+        }
+        for i in 1..rendered.len() {
+            let delta = rendered[0]
                 .iter()
-                .zip(out.iter())
+                .zip(rendered[i].iter())
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0f32, f32::max);
             assert!(
                 delta > 1.0e-4,
-                "carrier step {i} (macro {v}) is dead (max delta {delta})"
+                "shape {i} is indistinguishable from the sine (max delta {delta})"
             );
-            assert!(
-                (peak - prev_peak).abs() > 1.0e-4,
-                "carrier step {i} (macro {v}) is inaudible in level (peak {peak})"
-            );
-            prev_peak = peak;
         }
+    }
+
+    /// The oscillator is the only modulator source a Peaks voice can use, and
+    /// that is most of why it exists: four of the six default tracks are
+    /// Peaks, they have no aux output, and without this they are stuck
+    /// cross-modulating against themselves.
+    #[test]
+    fn a_peaks_track_can_reach_a_real_modulator() {
+        let base = [
+            (SLOT_WARPS_MIX, 1.0f32),
+            (SLOT_WARPS_DRIVE, 0.5),
+            (SLOT_WARPS_ALGO, 0.25),
+        ];
+        let with_src = |src: f32| {
+            let mut m = base.to_vec();
+            m.push((SLOT_WARPS_MOD_SRC, src));
+            render_with_macros(MiMachineId::PeaksBassDrum, &m)
+        };
+
+        let selfmod = with_src(0.0);
+        let aux = with_src(0.5);
+        let osc = with_src(1.0);
+
+        let delta = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+
+        // Peaks has no aux, so that position has to fall back to self rather
+        // than cross-modulate the voice against silence and mute the track.
+        assert_eq!(
+            delta(&selfmod, &aux),
+            0.0,
+            "WARP.IN aux moved a Peaks track, which has no aux to move to"
+        );
+        assert!(
+            delta(&selfmod, &osc) > 1.0e-3,
+            "the oscillator is not reaching a Peaks track's modulator input"
+        );
+        let peak = osc.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        assert!(peak > 1.0e-3, "the Peaks track went silent (peak {peak})");
     }
 
     /// Every Peaks model must be selectable, sound, and come to rest. Peaks

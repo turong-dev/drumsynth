@@ -42,6 +42,14 @@ void FmDrum::Init() {
   fm_envelope_phase_ = 0xffffffff;
   am_envelope_phase_ = 0xffffffff;
   previous_sample_ = 0;
+  // LOCAL FIX (not upstream): two more pieces of state that `Process` reads
+  // before it ever writes them (`fm_drum.cc:137`-`:138`). The other two
+  // envelope phases are initialised just above; this one was missed, and
+  // `phase_increment_` is only recomputed every fourth sample, so an
+  // uninitialised value is a pitch burst at the start of the first hit.
+  // 0xffffffff is "envelope finished", matching the two above.
+  aux_envelope_phase_ = 0xffffffff;
+  phase_increment_ = 0;
 }
 
 static const uint16_t kHighestNote = 128 * 128;

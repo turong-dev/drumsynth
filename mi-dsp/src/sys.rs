@@ -14,6 +14,10 @@ pub const PLAITS_VOICE_BUFFER_SIZE: usize = 16384;
 pub const MI_WARPS_STORAGE_SIZE: usize = 4112;
 /// Required alignment for the C++ `warps::Modulator` object.
 pub const MI_WARPS_STORAGE_ALIGN: usize = 16;
+/// Storage for one `warps::Oscillator`.
+pub const MI_WARPS_OSC_STORAGE_SIZE: usize = 96;
+/// Alignment for one `warps::Oscillator`.
+pub const MI_WARPS_OSC_STORAGE_ALIGN: usize = 8;
 
 /// Bytes required for the largest C++ Peaks drum model (SnareDrum, 188 B).
 pub const MI_PEAKS_STORAGE_SIZE: usize = 192;
@@ -183,6 +187,17 @@ extern "C" {
         drive: f32,
         carrier_shape: i32,
         note: f32,
+    );
+    /// Construct Warps' bare oscillator in `storage`.
+    pub fn mi_warps_osc_init(storage: *mut c_void, sample_rate: f32);
+    /// Render `size` samples of Warps' oscillator at `shape` and `note`.
+    pub fn mi_warps_osc_render(
+        storage: *mut c_void,
+        shape: c_int,
+        note: f32,
+        modulation: *const f32,
+        out: *mut f32,
+        size: usize,
     );
     /// Route Warps' input to its output unchanged.
     ///

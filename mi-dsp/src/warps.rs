@@ -251,6 +251,108 @@ impl Warps {
     }
 }
 
+/// Shape for [`WarpsOscillator`], matching Warps' `OscillatorShape`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum OscShape {
+    /// Sine. Its modulation input is phase modulation.
+    #[default]
+    Sine,
+    /// Triangle. Modulation input is frequency modulation.
+    Triangle,
+    /// Sawtooth. Modulation input is frequency modulation.
+    Saw,
+    /// Pulse. Modulation input is frequency modulation.
+    Pulse,
+    /// Band-limited noise. Modulation input ducks it.
+    NoiseLp,
+}
+
+impl OscShape {
+    const fn wire(self) -> i32 {
+        match self {
+            Self::Sine => 0,
+            Self::Triangle => 1,
+            Self::Saw => 2,
+            Self::Pulse => 3,
+            Self::NoiseLp => 4,
+        }
+    }
+
+    /// All five, in macro order.
+    pub const ALL: [OscShape; 5] = [
+        Self::Sine,
+        Self::Triangle,
+        Self::Saw,
+        Self::Pulse,
+        Self::NoiseLp,
+    ];
+}
+
+#[repr(align(8))]
+struct OscStorage(MaybeUninit<[u8; sys::MI_WARPS_OSC_STORAGE_SIZE]>);
+
+impl OscStorage {
+    const fn new() -> Self {
+        Self(MaybeUninit::uninit())
+    }
+
+    fn as_ptr(&mut self) -> *mut c_void {
+        self.0.as_mut_ptr().cast()
+    }
+}
+
+/// Warps' oscillator on its own, outside the `Modulator`.
+///
+/// `Modulator` can generate one of these internally and use it as the
+/// **carrier**, which demotes the voice to a modulation index — the reason a
+/// catalogue of 28 machines all sound like one sawtooth through an internal
+/// carrier. Pulled out, the same oscillator can feed Warps' **modulator**
+/// input instead, so the voice stays the carrier and the cross-modulator has
+/// two genuinely different signals to work with.
+///
+/// Unlike [`Warps`] this is safe to move: `warps::Oscillator` is scalars and
+/// an `stmlib::Svf`, with no pointers into its own storage, and `Init` assigns
+/// every field.
+pub struct WarpsOscillator {
+    storage: OscStorage,
+}
+
+impl WarpsOscillator {
+    /// Create and initialise an oscillator at the given sample rate.
+    pub fn new(sample_rate: f32) -> Self {
+        let mut osc = Self {
+            storage: OscStorage::new(),
+        };
+        #[allow(unsafe_code)]
+        unsafe {
+            sys::mi_warps_osc_init(osc.storage.as_ptr(), sample_rate);
+        }
+        osc
+    }
+
+    /// Render `out.len()` samples at `shape` and MIDI `note`.
+    ///
+    /// `modulation` is the oscillator's own modulation input and must be at
+    /// least as long as `out`. It is phase modulation for the sine, frequency
+    /// modulation for the polyblep shapes, and a ducking signal for the noise.
+    /// Zeros give a clean tone on every shape — `Duck` passes the internal
+    /// signal through untouched when the external one is silent.
+    pub fn render(&mut self, shape: OscShape, note: f32, modulation: &[f32], out: &mut [f32]) {
+        let n = out.len().min(modulation.len());
+        #[allow(unsafe_code)]
+        unsafe {
+            sys::mi_warps_osc_render(
+                self.storage.as_ptr(),
+                shape.wire(),
+                note,
+                modulation.as_ptr(),
+                out.as_mut_ptr(),
+                n,
+            );
+        }
+    }
+}
+
 impl Default for Warps {
     fn default() -> Self {
         Self::new(48000.0)
@@ -583,6 +685,98 @@ mod tests {
         );
         let peak = after.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
         assert!(peak > 1.0e-4, "silent after a move (peak {peak})");
+    }
+
+    /// Every shape must produce a clean, audible tone from a silent
+    /// modulation input, and the shapes must differ from each other.
+    ///
+    /// The silent-input case is what the strip relies on: as a modulator
+    /// source the oscillator wants to be a defined tone, not something the
+    /// voice is smearing. `Duck` makes that true for the noise shape too —
+    /// given a silent external input it passes the internal signal through
+    /// rather than gating it.
+    ///
+    /// Measured over a long window. A single 64-sample block at these
+    /// frequencies is a fraction of one cycle, so a pulse caught in its low
+    /// state reads as silence.
+    ///
+    /// The shapes are **not** level-matched: measured peaks are sine 1.00,
+    /// triangle 1.97, saw 0.99, pulse 0.89, noise 0.21. That is Warps' own
+    /// characteristic — `Modulator` compensates with a 0.5 gain on the
+    /// internal-carrier path, which the strip mirrors.
+    #[test]
+    fn standalone_oscillator_runs_clean_on_every_shape() {
+        let silence = [0.0f32; 64];
+        let mut rendered: Vec<Vec<f32>> = Vec::new();
+        for shape in OscShape::ALL {
+            let mut osc = WarpsOscillator::new(48000.0);
+            let mut out = [0.0f32; 64];
+            let mut captured: Vec<f32> = Vec::new();
+            let mut peak = 0.0f32;
+            for block in 0..200 {
+                osc.render(shape, 48.0, &silence, &mut out);
+                assert!(
+                    out.iter().all(|s| s.is_finite()),
+                    "{shape:?} produced a non-finite sample"
+                );
+                if block >= 4 {
+                    peak = out.iter().fold(peak, |a, &s| a.max(s.abs()));
+                    captured.extend_from_slice(&out);
+                }
+            }
+            assert!(peak > 0.05, "{shape:?} was silent (peak {peak})");
+            rendered.push(captured);
+        }
+        for i in 1..rendered.len() {
+            let delta = rendered[0]
+                .iter()
+                .zip(rendered[i].iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                delta > 1.0e-3,
+                "{:?} is indistinguishable from Sine",
+                OscShape::ALL[i]
+            );
+        }
+    }
+
+    /// The oscillator is pitched by `note`, which is what lets the strip
+    /// track the voice.
+    ///
+    /// The ratio is asserted rather than the absolute pitch, because Warps'
+    /// `midi_to_increment` is not MIDI: measured, `note` 48 renders ~64 Hz
+    /// and `note` 60 ~129 Hz, so the scale sits an octave below MIDI. The
+    /// strip passes the voice's note through unchanged, which keeps the
+    /// modulator an octave under the voice — the same offset the internal
+    /// carrier has always had.
+    #[test]
+    fn standalone_oscillator_follows_its_note() {
+        let silence = [0.0f32; 64];
+        let crossings = |note: f32| {
+            let mut osc = WarpsOscillator::new(48000.0);
+            let mut out = [0.0f32; 64];
+            let mut total = 0u32;
+            let mut last = 0.0f32;
+            for _ in 0..200 {
+                osc.render(OscShape::Sine, note, &silence, &mut out);
+                for &s in out.iter() {
+                    if (last < 0.0) != (s < 0.0) {
+                        total += 1;
+                    }
+                    last = s;
+                }
+            }
+            total
+        };
+        let low = crossings(48.0);
+        let high = crossings(60.0);
+        assert!(low > 20, "no tone at note 48 ({low} crossings)");
+        let ratio = high as f32 / low as f32;
+        assert!(
+            (1.8..2.2).contains(&ratio),
+            "an octave should double the rate: {low} -> {high} (x{ratio:.2})"
+        );
     }
 
     /// A tone near the top of the band must not reappear somewhere it should not.

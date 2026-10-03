@@ -144,6 +144,11 @@ void mi_peaks_process(
 #define MI_WARPS_STORAGE_SIZE 4112
 #define MI_WARPS_STORAGE_ALIGN 16
 
+// Warps' bare oscillator, used on its own as a modulator source rather than
+// through `Modulator`'s internal-carrier path. Scalars and one Svf.
+#define MI_WARPS_OSC_STORAGE_SIZE 96
+#define MI_WARPS_OSC_STORAGE_ALIGN 8
+
 // `algorithm` is 0..1 mapped to the 9 Warps algorithms; `parameter` is the
 // algorithm timbre; `drive` is the per-channel drive.
 void mi_warps_init(void* storage, float sample_rate);
@@ -164,6 +169,26 @@ void mi_warps_set_parameters(
     float drive,
     int32_t carrier_shape,
     float note);
+
+// Warps' oscillator, standalone.
+//
+// `Modulator` can generate one internally and use it as the *carrier*, which
+// demotes the voice to an FM index. Exposing it separately lets the strip feed
+// it to the *modulator* input instead, so the voice stays the carrier and
+// Warps has two genuinely different signals to cross-modulate.
+void mi_warps_osc_init(void* storage, float sample_rate);
+
+// `shape` is 0..=4: sine, triangle, saw, pulse, band-limited noise. `note` is
+// a MIDI pitch. `modulation` is the oscillator's own modulation input, which
+// is phase modulation for the sine, frequency modulation for the polyblep
+// shapes, and a ducking signal for the noise; pass zeros for a clean tone.
+void mi_warps_osc_render(
+    void* storage,
+    int32_t shape,
+    float note,
+    const float* modulation,
+    float* out,
+    size_t size);
 
 // Route the input straight to the output, bit-transparently.
 //

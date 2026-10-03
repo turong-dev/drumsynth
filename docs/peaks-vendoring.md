@@ -209,7 +209,30 @@ LFOs + 2 AD envelopes and the Peaks tracks get 1 + 1, which costs no extra
 Stages instances and frees ~41 KB.
 
 
-## Local modification: `HighHat::Init` does not initialise its phases
+## Local modification: two models do not finish initialising
+
+Audited all four. `BassDrum` and `SnareDrum` set every field. The other two
+did not, in the same way and for the same reason.
+
+### `FmDrum::Init`
+
+Sets four of its fourteen members. Most of the rest are parameters that
+`Configure` writes, which is fine because the shim always configures before
+processing — but two are state that `Process` reads before it ever writes:
+
+- `aux_envelope_phase_` (`fm_drum.cc:137`). The other two envelope phases are
+  initialised to `0xffffffff` right there in `Init`; this one was missed.
+- `phase_increment_` (`fm_drum.cc:138`). Only recomputed every fourth sample,
+  and `phase += phase_increment` runs every sample, so an uninitialised value
+  is a pitch burst at the start of the first hit.
+
+Worth knowing how this one surfaced: it was invisible until an unrelated
+change added two fields to `MiSlot`, which moved the Peaks storage to a
+different offset and so changed which leftovers it read. `slot_reuse` caught
+it immediately at the new layout. That is the hazard in a nutshell — these
+bugs hide behind whatever happens to be adjacent.
+
+### `HighHat::Init` does not initialise its phases
 
 `peaks::HighHat` holds `uint32_t phase_[6]`, one per square oscillator, and
 upstream's `Init()` never writes them. On the hardware that is harmless:
@@ -225,8 +248,8 @@ every process, which is what made the committed baseline digest meaningless
 for most of Phase 14.
 
 The fix is four lines in `Init` zeroing `phase_[]`, marked `LOCAL FIX` in
-`vendor/peaks/drums/high_hat.cc`. Re-apply it if the vendored tree is ever
-refreshed from upstream.
+`vendor/peaks/drums/high_hat.cc`. Both fixes are marked that way; re-apply
+them if the vendored tree is ever refreshed from upstream.
 
 `devices/mi-drum/tests/slot_reuse.rs` is the regression guard: it renders each
 machine on a clean slot and on a slot that has held something else, and
