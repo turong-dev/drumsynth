@@ -10,8 +10,32 @@ use core::mem::MaybeUninit;
 
 use crate::sys;
 
-#[repr(C)]
+/// Opaque storage for the C++ Peaks model, aligned to what that object needs.
+///
+/// `MaybeUninit<[u8; N]>` has alignment **1**. Without the `align` here the
+/// storage -- and so the `peaks::BassDrum` / `SnareDrum` / `HighHat` /
+/// `FmDrum` that `mi_peaks_init` placement-news into it -- lands at whatever
+/// byte offset Rust picks for it inside the enclosing struct. `PeaksVoice`
+/// came out 193 bytes rather than 196 for exactly that reason.
+///
+/// On a host that is invisible: x86-64 and arm64 take misaligned word loads
+/// without complaint. On the Cortex-M7 it is fatal. `LDRD`, `STRD`, `LDM`,
+/// `STM` and the VFP load/store pairs all require word alignment whatever the
+/// memory type says, and GCC at `-O3` emits them freely for adjacent 32-bit
+/// members -- so a misaligned Peaks object HardFaults on the first one, with
+/// no panic handler and nothing on the wire.
+///
+/// 4 rather than 8 because that is what the C++ side asks for; the shim's own
+/// `static_assert(alignof(...) <= MI_PEAKS_STORAGE_ALIGN)` is what keeps that
+/// honest on both toolchains, and `LDRD`/`STM` on ARMv7-M need word alignment
+/// and no more.
+#[repr(C, align(4))]
 struct Storage(MaybeUninit<[u8; sys::MI_PEAKS_STORAGE_SIZE]>);
+
+const _: () = assert!(
+    sys::MI_PEAKS_STORAGE_ALIGN == 4,
+    "MI_PEAKS_STORAGE_ALIGN changed; update the `align` on `Storage` to match"
+);
 
 impl Storage {
     const fn new() -> Self {
