@@ -37,8 +37,29 @@
 //! Phase 13.5's gate ("bench under ~70%") was never runnable, because no
 //! mi-drum scenario existed. This is that gate. It is also the reference the
 //! Phase 14 stage-substitution work measures its per-sub-phase deltas
-//! against, so treat a change in these numbers as a result, not noise — the
-//! harness's run-to-run variance is about 4 cycles in 350,000.
+//! against.
+//!
+//! # How much of a delta is a result
+//!
+//! This used to say the run-to-run variance was "about 4 cycles in 350,000",
+//! and treat anything above that as a result. That was true when it was
+//! written and is not true now. Two back-to-back runs of the same binary
+//! (`bench-results/mi-phase14.json` and `mi-phase14-recheck.json`) differ by
+//! up to **3.7%**:
+//!
+//! ```text
+//!   idle            31,119 ->    31,119   0.00%
+//!   6 sounding   1,170,735 -> 1,160,063   0.91%
+//!   6 + MOD off  1,133,801 -> 1,165,719   2.82%
+//!   6 + LPG        728,638 ->   755,451   3.68%
+//! ```
+//!
+//! `idle` is still bit-exact, so the harness itself has not become sloppy.
+//! What changed is the engine: at 476 KB it sits in OCRAM at 94% occupancy
+//! against a 32 KB L1 D-cache, so the hit rate now depends on where in the
+//! engine each scenario's working set happens to land. Below about 4%, a
+//! difference in a sounding scenario is cache luck and not a result. Measure
+//! twice before believing one.
 //!
 //! # A caveat specific to this device
 //!
@@ -113,25 +134,21 @@ fn main() -> ! {
     let mut poller = imxrt_log::log::usbd(usb, imxrt_log::Interrupts::Disabled)
         .expect("failed to bring up USB logging");
 
-    // Enumerate before anything expensive runs.
+    // Caches and the cycle counter before the first `poller.poll()`, which is
+    // the order `bench.rs` runs in and the only order this device has ever
+    // been known to work in.
     //
-    // `Interrupts::Disabled` means the USB device only makes progress inside
-    // `poller.poll()`, so until the first poll the board is absent from the
-    // bus -- not silent on it, absent. Anything that faults between here and
-    // that first poll therefore looks, from the host, like a board that
-    // flashed, said `Booting`, and then never appeared: no port to open, no
-    // output to read, and nothing to say which of the 343 KB of engine
-    // construction below went wrong. `benchloop.py` reports it as "no
-    // /dev/cu.usbmodem* appeared", which is true and useless.
+    // `enable_dcache` invalidates the whole D-cache and then starts holding
+    // CPU writes in it, and the USB controller is a DMA master reading its
+    // descriptors out of memory. On this linker script that is probably
+    // harmless -- `imxrt_log`'s `ENDPOINT_MEMORY`, `ENDPOINT_STATE`, `BUFFER`
+    // and `BACKEND` all land in `.bss`, which `build.rs` puts in DTCM, and TCM
+    // is never cached -- but "probably harmless" is not a reason to enable a
+    // cache underneath a live DMA master when the alternative is free.
     //
-    // Polling first costs the 3 s the host needed anyway to attach a terminal
-    // (it used to be spent after init, at the bottom of this block) and turns
-    // that failure into a port that opens and then goes quiet, which is a
-    // symptom with a name.
-    delay_blocking(&mut poller, &mut pit, 3_000);
-    log::info!("usb up; constructing the engine");
-    delay_blocking(&mut poller, &mut pit, 50);
-
+    // It also makes the enumeration below a clean probe: if the board never
+    // appears on USB at all, the fault is in these two steps rather than in
+    // anything after them.
     enable_cycle_counter();
 
     // FPSCR.FZ — flush denormals to zero, matching `main.rs` and `bench.rs`.
@@ -147,6 +164,25 @@ fn main() -> ! {
         core::arch::asm!("vmsr fpscr, {}", in(reg) fpscr);
     }
 
+    // Enumerate before anything expensive runs.
+    //
+    // `Interrupts::Disabled` means the USB device only makes progress inside
+    // `poller.poll()`, so until the first poll the board is absent from the
+    // bus -- not silent on it, absent. Anything that faults between here and
+    // that first poll therefore looks, from the host, like a board that
+    // flashed, said `Booting`, and then never appeared: no port to open, no
+    // output to read, and nothing to say which of the 476 KB of engine
+    // construction below went wrong. `benchloop.py` reports it as "no
+    // /dev/cu.usbmodem* appeared", which is true and useless.
+    //
+    // Polling first costs the 3 s the host needed anyway to attach a terminal
+    // (it used to be spent after init, at the bottom of this block) and turns
+    // that failure into a port that opens and then goes quiet, which is a
+    // symptom with a name.
+    delay_blocking(&mut poller, &mut pit, 3_000);
+    log::info!("usb up, caches on; constructing the engine");
+    delay_blocking(&mut poller, &mut pit, 50);
+
     // SAFETY: `ENGINE_BUF` is `.uninit` OCRAM, written exactly once, here,
     // before interrupts are enabled — single-threaded init, the same
     // requirement `new_in_place` documents. Constructed through a raw pointer
@@ -160,6 +196,9 @@ fn main() -> ! {
         let p: *mut MiDrumEngine = core::ptr::addr_of_mut!(ENGINE_BUF).cast();
         MiDrumEngine::new_in_place(p)
     };
+
+    log::info!("engine constructed");
+    delay_blocking(&mut poller, &mut pit, 50);
 
     let mut left = [0.0f32; BLOCK];
     let mut right = [0.0f32; BLOCK];

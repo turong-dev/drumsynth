@@ -1,0 +1,136 @@
+{
+  "budget": 400000,
+  "label": "mi-phase14-recheck",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "6 FX idle",
+    "6 + FX",
+    "6 + LPG",
+    "6 + DRIVE",
+    "6 + RESON",
+    "6 + WARP+DR",
+    "6 + RES SND",
+    "6 + MOD off",
+    "6 + MOD on"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "3 sounding": {
+      "avg": 349216,
+      "cy_per_frame": 14917,
+      "pct": 119.3,
+      "peak": 477371
+    },
+    "6 + DRIVE": {
+      "avg": 574593,
+      "cy_per_frame": 21646,
+      "pct": 173.2,
+      "peak": 692675
+    },
+    "6 + FX": {
+      "avg": 940136,
+      "cy_per_frame": 36293,
+      "pct": 290.3,
+      "peak": 1161389
+    },
+    "6 + LPG": {
+      "avg": 628845,
+      "cy_per_frame": 23607,
+      "pct": 188.9,
+      "peak": 755451
+    },
+    "6 + MOD off": {
+      "avg": 928090,
+      "cy_per_frame": 36428,
+      "pct": 291.4,
+      "peak": 1165719
+    },
+    "6 + MOD on": {
+      "avg": 1257602,
+      "cy_per_frame": 49155,
+      "pct": 393.2,
+      "peak": 1572976
+    },
+    "6 + RES SND": {
+      "avg": 955061,
+      "cy_per_frame": 36503,
+      "pct": 292.0,
+      "peak": 1168105
+    },
+    "6 + RESON": {
+      "avg": 575303,
+      "cy_per_frame": 21589,
+      "pct": 172.7,
+      "peak": 690858
+    },
+    "6 + WARP+DR": {
+      "avg": 572920,
+      "cy_per_frame": 20942,
+      "pct": 167.5,
+      "peak": 670169
+    },
+    "6 FX idle": {
+      "avg": 937801,
+      "cy_per_frame": 35775,
+      "pct": 286.2,
+      "peak": 1144825
+    },
+    "6 sounding": {
+      "avg": 939279,
+      "cy_per_frame": 36251,
+      "pct": 290.0,
+      "peak": 1160063
+    },
+    "idle": {
+      "avg": 30783,
+      "cy_per_frame": 972,
+      "pct": 7.8,
+      "peak": 31119
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165344
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 188500
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 227316
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 492128
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2752,
+      ".debug_abbrev": 89768,
+      ".debug_aranges": 5216,
+      ".debug_frame": 17984,
+      ".debug_info": 1430251,
+      ".debug_line": 427202,
+      ".debug_loc": 185378,
+      ".debug_loclists": 381851,
+      ".debug_ranges": 90744,
+      ".debug_rnglists": 84309,
+      ".debug_str": 532967,
+      ".heap": 16384,
+      ".rodata": 180308,
+      ".stack": 16384,
+      ".text": 227316,
+      ".uninit": 475744,
+      ".vector_table": 696
+    }
+  }
+}
