@@ -65,14 +65,23 @@ fn main() {
     build.flag_if_supported("-fno-rtti");
     build.flag_if_supported("-ffp-contract=off");
     build.flag_if_supported("-Wno-unused-parameter");
-    // clang spells this singular, GCC plural. `flag_if_supported` probes each,
-    // so passing both silences the vendored `STATIC_ASSERT` macro on either
-    // compiler instead of only on clang.
-    build.flag_if_supported("-Wno-unused-local-typedef");
-    build.flag_if_supported("-Wno-unused-local-typedefs");
-    // Stages uses a variable-length array in ProcessOscillator; it is bounded by
-    // the caller's block size. Silence the Clang extension warning.
-    build.flag_if_supported("-Wno-vla-cxx-extension");
+    // clang spells this singular, GCC plural, and `-Wno-vla-cxx-extension` is
+    // clang-only. `flag_if_supported` does not discriminate: GCC accepts any
+    // unknown `-Wno-*` silently at the command line and only mentions it if
+    // some *other* diagnostic fires, so the probe passes and every warning in
+    // the build then drags along a pair of
+    //
+    //     cc1plus: note: unrecognized command-line option '-Wno-...'
+    //
+    // notes. Pick the spelling the compiler actually knows instead.
+    if build.get_compiler().is_like_clang() {
+        build.flag_if_supported("-Wno-unused-local-typedef");
+        // Stages uses a variable-length array in ProcessOscillator; it is
+        // bounded by the caller's block size.
+        build.flag_if_supported("-Wno-vla-cxx-extension");
+    } else {
+        build.flag_if_supported("-Wno-unused-local-typedefs");
+    }
     build.flag_if_supported("-Wno-vla");
     build.opt_level(3);
 

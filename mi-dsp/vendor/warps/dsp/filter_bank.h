@@ -44,7 +44,14 @@ const int32_t kLowFactor = 4;
 const int32_t kMidFactor = 3;
 const int32_t kDelayLineSize = 1;  // Reduced from 6144; vocoder consumes too much memory.
 const int32_t kMaxFilterBankBlockSize = 1;  // Reduced from 96; vocoder consumes too much memory.
-const int32_t kSampleMemorySize = kMaxFilterBankBlockSize * kNumBands / 2;
+// LOCAL FIX (not upstream): with the reductions above this evaluates to 0,
+// and a zero-length `samples_` makes GCC warn that `&samples_[0]` in
+// `FilterBank::Init` is out of bounds. Nothing instantiates a FilterBank --
+// `Modulator::vocoder_` is commented out and no FilterBank symbol survives
+// the link -- so the array only has to be legal, not useful. Restore the
+// upstream expression if the vocoder ever comes back, and restore
+// kNumBands/kDelayLineSize/kMaxFilterBankBlockSize with it.
+const int32_t kSampleMemorySize = kMaxFilterBankBlockSize * kNumBands / 2 + 1;
 
 class PooledDelayLine {
  public:

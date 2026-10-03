@@ -110,7 +110,11 @@ void mi_peaks_process(
     float* out,
     size_t size) {
   int16_t raw[96];
-  peaks::GateFlags flags[96];
+  // Zero-initialised for the same reason as `mi_stages_shim.cc`'s
+  // `flags_buf`: the conversion loop is bounded by `size`, so GCC warns
+  // `-Wmaybe-uninitialized` on each `Process` call below. Elements past
+  // `size` are never read.
+  peaks::GateFlags flags[96] = {};
   for (size_t i = 0; i < size; ++i) {
     flags[i] = ToPeaksGate(gate_flags[i]);
   }

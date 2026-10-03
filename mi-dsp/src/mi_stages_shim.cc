@@ -76,8 +76,14 @@ void mi_stages_process(
   // switches to its internal oscillator clock instead of the gate-clocked
   // ramp extractor, which is what an LFO segment needs. Anything else is
   // converted sample-by-sample.
+  //
+  // Zero-initialised rather than left to the conversion loop below: the loop
+  // is bounded by `size`, so GCC cannot prove every element is written and
+  // warns `-Wmaybe-uninitialized` on the call. The tail elements are never
+  // read -- `Process` reads `size` of them -- so this is 96 bytes of stores
+  // to buy a clean build, not a correctness fix.
   const stmlib::GateFlags* flags = nullptr;
-  stmlib::GateFlags flags_buf[96];
+  stmlib::GateFlags flags_buf[96] = {};
   if (gate_flags) {
     for (size_t i = 0; i < size; ++i) {
       switch (gate_flags[i]) {
