@@ -89,6 +89,34 @@ enum Command {
         #[arg(long, default_value = "none")]
         stage: String,
     },
+    /// Render a gate open/close demo: every engine that sustains, one at a
+    /// time, each with an explicit note-on, hold, note-off and release.
+    ///
+    /// This is the listenable version of the note-off work. `mi-drum` buries
+    /// its sustain pass between the machine sweep and the carrier pass, two
+    /// engines deep; this puts every gated engine in sequence with silence
+    /// around it, so a gate that never closes is obvious by ear.
+    ///
+    /// The one-shot drum machines are in the list on purpose, as a control: a
+    /// note-off must not shorten them.
+    Gate {
+        /// Output path.
+        #[arg(short, long, default_value = "gate-demo.wav")]
+        output: String,
+    },
+    /// Render the Warps drive sweep: one held note per drive setting, from the
+    /// clean bypass to full destruction.
+    ///
+    /// This is the listenable version of `WARPS_DRIVE_INFO`. Warps' own drive
+    /// knob is `0.5·drive` blended towards `24·drive⁵`, so its top half covers
+    /// 48× of gain and `drive = 0` is silence rather than clean — neither is
+    /// visible in a number, and both are the difference between a kit that
+    /// sounds like itself and one that does not.
+    Warps {
+        /// Output path.
+        #[arg(short, long, default_value = "warps-drive.wav")]
+        output: String,
+    },
     /// Render a retrigger/choke stress test to a WAV file.
     ///
     /// Dense sample-accurate rolls on the kick, snare, and closed hat, plus
@@ -426,10 +454,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into())
                 }
             };
-            let samples = render_mi_drum(warps_algorithm);
+            let (samples, marks) = render_mi_drum_marked(warps_algorithm);
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
+            for (at, what) in &marks {
+                println!("  {:>6.2}s  {what}", at);
+            }
+        }
+
+        Command::Gate { output } => {
+            let (mi_samples, mi_timeline) = render_gate_demo_mi();
+            write_wav(&output, &mi_samples)?;
+            print_gate_timeline(&output, mi_samples.len(), &mi_timeline);
+
+            // The drum device's two newly-gated machines, in their own file so
+            // the two engines do not share a limiter or a bus.
+            let drum_path = output.replacen(".wav", "-drum.wav", 1);
+            let (drum_samples, drum_timeline) = render_gate_demo_drum();
+            write_wav(&drum_path, &drum_samples)?;
+            print_gate_timeline(&drum_path, drum_samples.len(), &drum_timeline);
+        }
+
+        Command::Warps { output } => {
+            let (samples, timeline) = render_warps_drive_demo();
+            write_wav(&output, &samples)?;
+            print_gate_timeline(&output, samples.len(), &timeline);
+
+            // The practical version of the same question: Warps' `drive` is
+            // *also* its wet/dry mix (`wet_dry = 1 - channel_drive[1]`, and the
+            // shim sets both channels to the same value), so there is no way to
+            // have heavy colour while keeping most of the dry signal. The
+            // default of 0.2 is 60% cross-modulated. This file is the same kit
+            // with the four drum tracks fully bypassed, which is the setting a
+            // drum machine wants and a melodic voice does not.
+            let kit_path = output.replacen(".wav", "-kit.wav", 1);
+            let (kit_samples, kit_notes) = render_warps_kit_comparison();
+            write_wav(&kit_path, &kit_samples)?;
+            println!(
+                "\nwrote {kit_path} ({:.2}s)",
+                kit_samples.len() as f32 / 2.0 / SAMPLE_RATE
+            );
+            println!("  A = default kit as shipped (all six tracks 60% warped)");
+            println!("  B = same kit, four drum tracks fully bypassed");
+            for (t, what) in &kit_notes {
+                println!("  {t:>5.1}s  {what}");
+            }
         }
 
         Command::Stress { output, seconds } => {
@@ -1062,6 +1132,11 @@ footer p { font-size: 0.8rem; }
 "#;
 
 /// Render a single hit with a tail, for auditioning one track.
+///
+/// A sustained machine (Dub Siren, Sweep FX) is released partway through the
+/// window rather than left to ring out the gate watchdog, so the audition
+/// shows the release and the file still terminates when it says it will. A
+/// one-shot machine ignores the release, so this changes nothing for it.
 fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f32> {
     engine.trigger(track, 1.0);
 
@@ -1070,28 +1145,190 @@ fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f32) -> Vec<f
     let mut l = [0.0f32; BLOCK];
     let mut r = [0.0f32; BLOCK];
 
-    for _ in 0..total_blocks {
+    for b in 0..total_blocks {
+        if b == total_blocks / 2 {
+            engine.release(track);
+        }
         engine.process(&mut l, &mut r);
         for i in 0..BLOCK {
             out.push(l[i]);
             out.push(r[i]);
         }
     }
+
     out
 }
 
-/// Render the mi-drum baseline: every catalogued machine, then the default
-/// kit with the fixed Warps -> Ripples strip exercised.
+/// Per-track strip settings for the mi-drum kit pattern.
 ///
-/// Deterministic and argument-free by design. Phase 14.2's gate is that this
-/// render comes back byte-for-byte identical — which only means anything if
-/// the render covers the new strip chain.
-fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
+/// `(warps timbre, ripples cutoff, ripples resonance, warps drive, lfo rate,
+///  lfo depth, lfo->filter, lfo->warps, ad attack, ad decay, ad->filter,
+///  ad->warps, warps carrier)`
+///
+/// Depths stay moderate: the full-scale end of the filter depth is three
+/// octaves, and six tracks all modulating at once drives the master sum into
+/// the clipper, which would make the baseline a test of the limiter rather
+/// than of the modulation map.
+///
+/// Every track stays on the External carrier so the kit is audible as a kit.
+/// Selecting an internal carrier replaces the voice with Warps' oscillator and
+/// gates it on the voice's level, so the drum becomes a full-level drone for
+/// the length of its own decay. The carriers get a dedicated pass instead.
+///
+/// Shared by the baseline's bypassed and engaged passes, which have to drive
+/// the *same* kit or the A/B is not a comparison.
+type MiStripSpec = (
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+);
+const MI_KIT_STRIPS: [MiStripSpec; mi_drum_engine::TRACKS] = [
+    (
+        0.40, 0.55, 0.20, 0.60, 0.45, 0.80, 0.30, 0.20, 0.05, 0.35, 0.25, 0.20, 0.0,
+    ),
+    (
+        0.55, 0.35, 0.40, 0.75, 0.55, 0.60, 0.20, 0.15, 0.10, 0.50, 0.20, 0.15, 0.0,
+    ),
+    (
+        0.30, 0.80, 0.10, 0.50, 0.35, 0.90, 0.35, 0.10, 0.02, 0.25, 0.15, 0.10, 0.0,
+    ),
+    (
+        0.65, 0.45, 0.55, 0.80, 0.60, 0.70, 0.15, 0.30, 0.15, 0.60, 0.30, 0.20, 0.0,
+    ),
+    (
+        0.25, 0.70, 0.30, 0.65, 0.40, 0.75, 0.25, 0.25, 0.08, 0.40, 0.20, 0.25, 0.0,
+    ),
+    (
+        0.50, 0.60, 0.15, 0.55, 0.50, 0.65, 0.20, 0.15, 0.12, 0.30, 0.25, 0.15, 0.0,
+    ),
+];
+
+/// A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
+/// modal / noise / string against the default kit.
+const MI_KIT_PATTERN: [[bool; 16]; mi_drum_engine::TRACKS] = [
+    [
+        true, false, false, false, true, false, false, false, true, false, false, true, true,
+        false, false, false,
+    ],
+    [
+        false, false, false, false, true, false, false, false, false, false, false, false, true,
+        false, true, false,
+    ],
+    [
+        true, false, true, false, true, false, true, false, true, false, true, false, true, false,
+        true, true,
+    ],
+    [
+        false, false, true, false, false, false, false, true, false, false, true, false, false,
+        false, false, false,
+    ],
+    [
+        false, false, false, true, false, false, false, false, false, true, false, false, false,
+        false, true, false,
+    ],
+    [
+        true, false, false, false, false, false, true, false, false, false, false, false, true,
+        false, false, false,
+    ],
+];
+
+/// Apply [`MI_KIT_STRIPS`] to the engine's tracks.
+///
+/// `drive_override` replaces every track's `WARP.DRV`. `Some(0.0)` is the
+/// detent that takes Warps out of the path via `Modulator::set_bypass`, which
+/// is what the baseline's reference bar uses.
+fn apply_mi_kit_strips(
+    engine: &mut MiDrumEngine,
+    warps_algorithm: f32,
+    drive_override: Option<f32>,
+) {
+    use mi_drum_engine::{
+        DeviceEngine, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH,
+        SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE,
+        SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO, SLOT_WARPS_CARRIER,
+    };
+
+    for (idx, &spec) in MI_KIT_STRIPS.iter().enumerate() {
+        let track = &mut engine.tracks_mut()[idx];
+        track.set_macro(SLOT_FILT_0, warps_algorithm);
+        track.set_macro(SLOT_FILT_1, spec.0);
+        track.set_macro(SLOT_STRIP_CUT, spec.1);
+        track.set_macro(SLOT_STRIP_RESO, spec.2);
+        track.set_macro(SLOT_STRIP_HOLD, drive_override.unwrap_or(spec.3));
+        track.set_macro(SLOT_LFO_RATE, spec.4);
+        track.set_macro(SLOT_LFO_DEPTH, spec.5);
+        track.set_macro(SLOT_LFO_FILTER_DEPTH, spec.6);
+        track.set_macro(SLOT_LFO_WARPS_DEPTH, spec.7);
+        track.set_macro(SLOT_AD_ATTACK, spec.8);
+        track.set_macro(SLOT_AD_DECAY, spec.9);
+        track.set_macro(SLOT_AD_FILTER_DEPTH, spec.10);
+        track.set_macro(SLOT_AD_WARPS_DEPTH, spec.11);
+        track.set_macro(SLOT_WARPS_CARRIER, spec.12);
+    }
+}
+
+/// Play [`MI_KIT_PATTERN`] once through, appending to `out`.
+///
+/// `bars` of 16 steps at 130 BPM, then `tail_s` seconds for the last hit and
+/// the send-FX decay.
+fn play_mi_kit_pattern(engine: &mut MiDrumEngine, out: &mut Vec<f32>, bars: usize, tail_s: f32) {
+    use mi_drum_engine::DeviceEngine;
+
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+
+    let bpm = 130.0f32;
+    let samples_per_step = (SAMPLE_RATE * 60.0 / bpm / 4.0) as usize;
+    let total_steps = bars * 16;
+    let total_blocks = (total_steps * samples_per_step + (tail_s * SAMPLE_RATE) as usize) / BLOCK;
+
+    let mut next_step = 0usize;
+    let mut next_step_at = 0usize;
+    for block in 0..total_blocks {
+        let block_start = block * BLOCK;
+        while next_step_at < block_start + BLOCK && next_step < total_steps {
+            let s = next_step % 16;
+            for (track, row) in MI_KIT_PATTERN.iter().enumerate() {
+                if row[s] {
+                    // Velocity varies with the step so the velocity-mod path
+                    // is not stuck at full scale for the whole render.
+                    let vel = if s.is_multiple_of(4) { 1.0 } else { 0.7 };
+                    engine.trigger(track, vel);
+                }
+            }
+            next_step += 1;
+            next_step_at += samples_per_step;
+        }
+
+        engine.process(&mut l, &mut r);
+        for i in 0..BLOCK {
+            out.push(l[i]);
+            out.push(r[i]);
+        }
+    }
+}
+
+/// The mi-drum baseline render, with the offset of each section in seconds.
+///
+/// The marks exist so the Warps A/B inside the render is findable: it sits
+/// 21 seconds in, behind the machine sweep, and a reference you have to hunt
+/// for is a reference nobody uses.
+fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static str)>) {
     use mi_drum_engine::{
         DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
         SLOT_AD_WARPS_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
         SLOT_LFO_RATE, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
-        SLOT_WARPS_CARRIER, TRACKS as MI_TRACKS,
+        SLOT_WARPS_CARRIER,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -1102,9 +1339,16 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
 
     let mut engine = mi_drum_in_place();
     let mut out: Vec<f32> = Vec::new();
+    let mut marks: Vec<(f32, &'static str)> = Vec::new();
     let mut l = [0.0f32; BLOCK];
     let mut r = [0.0f32; BLOCK];
+    macro_rules! mark {
+        ($what:expr) => {
+            marks.push((out.len() as f32 / 2.0 / SAMPLE_RATE, $what));
+        };
+    }
 
+    mark!("machine sweep — one hit per catalogued machine");
     // Half one: one hit per machine on track 0, 0.75 s apart, so every engine
     // in the catalogue contributes to the hash.
     let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
@@ -1124,13 +1368,22 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
         engine.tracks_mut()[0].set_macro(SLOT_LFO_WARPS_DEPTH, 0.20);
         engine.tracks_mut()[0].set_macro(SLOT_AD_FILTER_DEPTH, 0.25);
         engine.tracks_mut()[0].set_macro(SLOT_AD_WARPS_DEPTH, 0.20);
-        // Walk the carrier through all six sources across the machine sweep, so
-        // the baseline covers Warps' internal oscillators as well as the
-        // cross-modulator.
-        let carrier = (MiMachineId::ALL.len() % 6) as f32 / 6.0;
-        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, carrier);
+        // This pass exists to audition the *voices*, so the carrier stays
+        // External. With an internal carrier selected the machine is only the
+        // FM index for Warps' oscillator, so the catalogue sounds like one
+        // sawtooth repeated 28 times instead of 28 machines. The five internal
+        // carriers get their own pass at the end, where they cannot hide the
+        // machines.
+        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
         engine.trigger(0, 1.0);
-        for _ in 0..blocks_per_hit {
+        // Release at two-thirds so a sustained engine's release is in the
+        // hash and the window still ends in silence. A one-shot model ignores
+        // the release, so this only affects the engines that hold.
+        let release_at = blocks_per_hit * 2 / 3;
+        for b in 0..blocks_per_hit {
+            if b == release_at {
+                engine.release(0);
+            }
             engine.process(&mut l, &mut r);
             for i in 0..BLOCK {
                 out.push(l[i]);
@@ -1143,130 +1396,85 @@ fn render_mi_drum(warps_algorithm: f32) -> Vec<f32> {
     // so the strip is actually exercised.
     engine.load_kit(&mi_drum_engine::DEFAULT_KIT);
 
-    // (warps timbre, ripples cutoff, ripples resonance, warps drive,
-    //  lfo rate, lfo depth, lfo->filter, lfo->warps, ad attack, ad decay,
-    //  ad->filter, ad->warps, warps carrier)
+    // Half two-a: the kit with Warps bypassed, so the baseline carries its own
+    // reference for what the strip is doing. The settings themselves are
+    // documented on `MI_KIT_STRIPS`.
     //
-    // Depths stay moderate: the full-scale end of the filter depth is three
-    // octaves, and six tracks all modulating at once drives the master sum
-    // into the clipper, which would make the baseline a test of the limiter
-    // rather than of the modulation map.
-    type StripSpec = (
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-        f32,
-    );
-    let strips: [StripSpec; MI_TRACKS] = [
-        (
-            0.40, 0.55, 0.20, 0.60, 0.45, 0.80, 0.30, 0.20, 0.05, 0.35, 0.25, 0.20, 0.0,
-        ),
-        (
-            0.55, 0.35, 0.40, 0.75, 0.55, 0.60, 0.20, 0.15, 0.10, 0.50, 0.20, 0.15, 0.2,
-        ),
-        (
-            0.30, 0.80, 0.10, 0.50, 0.35, 0.90, 0.35, 0.10, 0.02, 0.25, 0.15, 0.10, 0.4,
-        ),
-        (
-            0.65, 0.45, 0.55, 0.80, 0.60, 0.70, 0.15, 0.30, 0.15, 0.60, 0.30, 0.20, 0.6,
-        ),
-        (
-            0.25, 0.70, 0.30, 0.65, 0.40, 0.75, 0.25, 0.25, 0.08, 0.40, 0.20, 0.25, 0.8,
-        ),
-        (
-            0.50, 0.60, 0.15, 0.55, 0.50, 0.65, 0.20, 0.15, 0.12, 0.30, 0.25, 0.15, 1.0,
-        ),
-    ];
+    // `WARP.DRV = 0` is a detent onto `Modulator::set_bypass`, not a quiet
+    // drive setting. It is not the only uncoloured setting any more —
+    // `WARP.MIX = 0` is too — but it is the one that takes the whole stage out
+    // rather than mixing it away, which is what makes it the right reference.
+    // One bar bypassed and then the same bar as the kit is actually set makes
+    // the difference audible instead of a claim in a comment, and if the two
+    // bars ever sound the same the strip has stopped working.
+    mark!("kit, WARPS BYPASSED (WARP.DRV 0) — the reference");
+    apply_mi_kit_strips(&mut engine, warps_algorithm, Some(0.0));
+    play_mi_kit_pattern(&mut engine, &mut out, 1, 0.75);
 
-    for (idx, &s) in strips.iter().enumerate() {
-        let (timbre, cutoff, resonance, drive) = (s.0, s.1, s.2, s.3);
-        let track = &mut engine.tracks_mut()[idx];
-        track.set_macro(SLOT_FILT_0, warps_algorithm);
-        track.set_macro(SLOT_FILT_1, timbre);
-        track.set_macro(SLOT_STRIP_CUT, cutoff);
-        track.set_macro(SLOT_STRIP_RESO, resonance);
-        track.set_macro(SLOT_STRIP_HOLD, drive);
-        track.set_macro(SLOT_LFO_RATE, s.4);
-        track.set_macro(SLOT_LFO_DEPTH, s.5);
-        track.set_macro(SLOT_LFO_FILTER_DEPTH, s.6);
-        track.set_macro(SLOT_LFO_WARPS_DEPTH, s.7);
-        track.set_macro(SLOT_AD_ATTACK, s.8);
-        track.set_macro(SLOT_AD_DECAY, s.9);
-        track.set_macro(SLOT_AD_FILTER_DEPTH, s.10);
-        track.set_macro(SLOT_AD_WARPS_DEPTH, s.11);
-        track.set_macro(SLOT_WARPS_CARRIER, s.12);
-    }
+    // Half two-b: the same bars with each track's own `WARP.DRV`, which the
+    // kit sets between 0.50 and 0.80 — Warps drive 0.75 to 0.90, three to ten
+    // times overdriven.
+    mark!("kit, WARPS ENGAGED (WARP.DRV 0.50-0.80) — same bars");
+    apply_mi_kit_strips(&mut engine, warps_algorithm, None);
+    play_mi_kit_pattern(&mut engine, &mut out, 2, 2.0);
 
-    // A 16-step pattern, two bars at 130 BPM. Rows are kick / snare / hat /
-    // modal / noise / string against the default kit.
-    const PATTERN: [[bool; 16]; MI_TRACKS] = [
-        [
-            true, false, false, false, true, false, false, false, true, false, false, true, true,
-            false, false, false,
-        ],
-        [
-            false, false, false, false, true, false, false, false, false, false, false, false,
-            true, false, true, false,
-        ],
-        [
-            true, false, true, false, true, false, true, false, true, false, true, false, true,
-            false, true, true,
-        ],
-        [
-            false, false, true, false, false, false, false, true, false, false, true, false, false,
-            false, false, false,
-        ],
-        [
-            false, false, false, true, false, false, false, false, false, true, false, false,
-            false, false, true, false,
-        ],
-        [
-            true, false, false, false, false, false, true, false, false, false, false, false, true,
-            false, false, false,
-        ],
-    ];
+    mark!("gate — held notes and their releases");
+    // Half three: the gate itself. A held note and its release, on the two
+    // engines that read the Plaits gate as a level rather than an edge. This
+    // is the capability the whole note-off path exists for, so it belongs in
+    // the baseline rather than only in a unit test: before the gate was real,
+    // `SixOp1`/`2`/`3` emitted digital silence for an entire hit and three of
+    // the 28 machine windows in half one were exactly -inf.
+    for &id in &[
+        mi_drum_engine::MiMachineId::SixOp1,
+        mi_drum_engine::MiMachineId::SixOp3,
+    ] {
+        engine.tracks_mut()[0].load_machine(id);
+        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
+        engine.trigger(0, 1.0);
 
-    let bpm = 130.0f32;
-    let samples_per_step = (SAMPLE_RATE * 60.0 / bpm / 4.0) as usize;
-    let total_steps = 2 * 16;
-    // Two seconds of tail so the last hit and the send-FX decay are captured.
-    let total_blocks = (total_steps * samples_per_step + (2.0 * SAMPLE_RATE) as usize) / BLOCK;
-
-    let mut next_step = 0usize;
-    let mut next_step_at = 0usize;
-    for block in 0..total_blocks {
-        let block_start = block * BLOCK;
-        while next_step_at < block_start + BLOCK && next_step < total_steps {
-            let s = next_step % 16;
-            for (track, row) in PATTERN.iter().enumerate() {
-                if row[s] {
-                    // Velocity varies with the step so the velocity-mod path
-                    // is not stuck at full scale for the whole render.
-                    let vel = if s.is_multiple_of(4) { 1.0 } else { 0.7 };
-                    engine.trigger(track, vel);
+        // Two seconds held, then two seconds of tail after the release.
+        for &do_release in &[false, true] {
+            if do_release {
+                engine.release(0);
+            }
+            for _ in 0..(2.0 * SAMPLE_RATE / BLOCK as f32) as usize {
+                engine.process(&mut l, &mut r);
+                for j in 0..BLOCK {
+                    out.push(l[j]);
+                    out.push(r[j]);
                 }
             }
-            next_step += 1;
-            next_step_at += samples_per_step;
-        }
-
-        engine.process(&mut l, &mut r);
-        for i in 0..BLOCK {
-            out.push(l[i]);
-            out.push(r[i]);
         }
     }
 
-    out
+    mark!("Warps internal carriers — five tones on the kick track");
+    // Half four: Warps' five internal carriers, one hit each, on the kick
+    // track. Kept separate from the two halves above because an internal
+    // carrier replaces the voice with a free-running Warps oscillator, so
+    // folding it into either of them hides the thing that pass exists to
+    // show. This is the coverage the old `ALL.len() % 6` line was reaching
+    // for, and it is audible as five distinct tones rather than one saw.
+    for step in 0..6 {
+        engine.tracks_mut()[0].load_machine(mi_drum_engine::MiMachineId::PeaksBassDrum);
+        engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, step as f32 / 6.0);
+        engine.trigger(0, 1.0);
+        // Released partway through so the window ends in silence rather than
+        // leaving an internal carrier running to the end of the file.
+        for b in 0..blocks_per_hit {
+            if b == blocks_per_hit * 2 / 3 {
+                engine.release(0);
+            }
+            engine.process(&mut l, &mut r);
+            for i in 0..BLOCK {
+                out.push(l[i]);
+                out.push(r[i]);
+            }
+        }
+    }
+    engine.tracks_mut()[0].set_macro(SLOT_WARPS_CARRIER, 0.0);
+
+    (out, marks)
 }
 
 /// A stable 64-bit digest of a rendered buffer.
@@ -1622,6 +1830,405 @@ fn default_velocity_for_track(track: usize, step: usize) -> f32 {
 }
 
 /// Write interleaved stereo f32 to a 24-bit WAV.
+/// A one-entry manifest of the gate demo, printed alongside the WAV so the
+/// file is navigable without scrubbing.
+type GateTimeline = Vec<(f32, String, &'static str)>;
+
+/// Render the gate open/close demo for mi-drum.
+///
+/// Each engine gets: a short silence, a note-on, a two-second hold, a note-off,
+/// then two seconds for the release to run out. The hold is what the gate fix
+/// makes possible — before it, the Plaits trigger was a one-block pulse and
+/// these voices died 0.5 ms in.
+///
+/// The three `SixOp` engines lead, because they were the ones emitting digital
+/// silence. `chiptune` is last and labelled, because measurement says it is
+/// the one Plaits engine that ignores a falling gate entirely, and a demo that
+/// hid that would be dishonest about the state of the work.
+fn render_gate_demo_mi() -> (Vec<f32>, GateTimeline) {
+    use mi_drum_engine::{DeviceEngine, MiMachineId, BLOCK};
+
+    // Every Plaits engine draws from one process-global LCG, so the render is
+    // only reproducible from a known seed.
+    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+    let hold_s = 2.0f32;
+    let release_s = 2.0f32;
+    let gap_s = 0.35f32;
+    let per_engine = hold_s + release_s + gap_s;
+
+    // (machine, why it is in the list)
+    let entries: &[(MiMachineId, &str)] = &[
+        (
+            MiMachineId::SixOp1,
+            "was DIGITAL SILENCE before the gate was real",
+        ),
+        (
+            MiMachineId::SixOp2,
+            "was DIGITAL SILENCE before the gate was real",
+        ),
+        (
+            MiMachineId::SixOp3,
+            "was DIGITAL SILENCE before the gate was real",
+        ),
+        (
+            MiMachineId::String,
+            "sustained engine; the gate hold is the note",
+        ),
+        (
+            MiMachineId::Modal,
+            "sustained engine; the gate hold is the note",
+        ),
+        (
+            MiMachineId::VirtualAnalog,
+            "outer LPG; release follows MACH 7 decay",
+        ),
+        (
+            MiMachineId::PeaksBassDrum,
+            "PEAKS drum: gate is per-sample flags",
+        ),
+        (
+            MiMachineId::PeaksSnareDrum,
+            "PEAKS drum: gate is per-sample flags",
+        ),
+        (
+            MiMachineId::BassDrum,
+            "one-shot: the note-off must NOT cut it",
+        ),
+        (MiMachineId::HiHat, "one-shot: the note-off must NOT cut it"),
+        (
+            MiMachineId::Chiptune,
+            "ignores a falling gate - rings on past it",
+        ),
+    ];
+
+    let mut engine = mi_drum_engine::MiDrumEngine::new();
+    // Headroom. At the default master gain every voice in this list hits the
+    // output clipper, which flattens exactly the envelope shape the demo
+    // exists to show. Backing the master off keeps the hold and the release
+    // both audible as level rather than as time spent against a limiter.
+    engine.set_master_gain(0.35);
+    let mut out: Vec<f32> =
+        Vec::with_capacity((entries.len() as f32 * per_engine * SAMPLE_RATE * 2.0) as usize);
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+    let mut timeline = GateTimeline::new();
+
+    let blocks = |s: f32| (s * SAMPLE_RATE / BLOCK as f32) as usize;
+
+    for (i, (id, why)) in entries.iter().enumerate() {
+        // Start each engine on a fresh voice so the previous release cannot
+        // bleed into the silence that frames this one.
+        engine.tracks_mut()[0].load_machine(*id);
+        timeline.push((i as f32 * per_engine, id.name().to_string(), why));
+
+        // Leading silence, so the note-on is an attack you can hear start.
+        for _ in 0..blocks(gap_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+
+        // Note-on, then hold.
+        engine.trigger(0, 1.0);
+        for _ in 0..blocks(hold_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+
+        // Note-off, then let the release run.
+        engine.release(0);
+        for _ in 0..blocks(release_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+    }
+
+    (out, timeline)
+}
+
+/// Render the gate open/close demo for the drum device.
+///
+/// [`DubSiren`](drum_engine::machines::DubSiren) and
+/// [`SweepFx`](drum_engine::machines::SweepFx) were the two self-timed gesture
+/// machines and are now gated, so they belong in the same demo as the mi-drum
+/// voices. The rest of the catalogue is here as a control: a note-off must not
+/// shorten a one-shot drum hit.
+fn render_gate_demo_drum() -> (Vec<f32>, GateTimeline) {
+    use drum_engine::{DeviceEngine, MachineId};
+
+    let hold_s = 2.0f32;
+    let release_s = 2.0f32;
+    let gap_s = 0.35f32;
+    let per_engine = hold_s + release_s + gap_s;
+
+    let entries: &[(MachineId, &str)] = &[
+        (
+            MachineId::DubSiren,
+            "was self-timed; now holds until note-off",
+        ),
+        (
+            MachineId::SweepFx,
+            "was self-timed; now holds until note-off",
+        ),
+        (
+            MachineId::BdClassic,
+            "one-shot kick: the note-off must NOT cut it",
+        ),
+        (
+            MachineId::SdNatural,
+            "one-shot snare: the note-off must NOT cut it",
+        ),
+        (
+            MachineId::CyMetallic,
+            "one-shot cymbal: the note-off must NOT cut it",
+        ),
+    ];
+
+    let mut engine = DrumEngine::new();
+    // Headroom, for the same reason as the mi-drum demo.
+    engine.set_master_gain(0.7);
+    let mut out: Vec<f32> =
+        Vec::with_capacity((entries.len() as f32 * per_engine * SAMPLE_RATE * 2.0) as usize);
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+    let mut timeline = GateTimeline::new();
+
+    let blocks = |s: f32| (s * SAMPLE_RATE / BLOCK as f32) as usize;
+
+    for (i, (id, why)) in entries.iter().enumerate() {
+        engine.tracks[0].load_machine(*id);
+        timeline.push((i as f32 * per_engine, id.name().to_string(), why));
+
+        for _ in 0..blocks(gap_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+        engine.trigger(0, 1.0);
+        for _ in 0..blocks(hold_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+        engine.release(0);
+        for _ in 0..blocks(release_s) {
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+    }
+
+    (out, timeline)
+}
+
+/// Render the default kit twice: as shipped, then with Warps bypassed on the
+/// four drum tracks.
+///
+/// This is the decision the drive sweep sets up but cannot answer on its own.
+/// Warps' `drive` doubles as the wet/dry mix, so "a lot of Warps" and "almost no
+/// dry signal" are the same setting — there is no in-between where a track is
+/// coloured but still mostly itself. On a simple kick that reads as character;
+/// on a six-operator FM voice, cross-modulating it with itself turns 19
+/// partials into hundreds of inharmonic sum-and-difference products, which is
+/// what "gritty" is.
+///
+/// So the split is per track: drum tracks bypassed, melodic tracks left alone.
+fn render_warps_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
+    use drum_engine::machines::SLOT_STRIP_HOLD as WARP_DRV_SLOT;
+    use mi_drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE as SR};
+
+    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+    let bpm = 130.0f32;
+    let step_s = 60.0 / bpm / 4.0; // 16th notes
+    let steps = 16usize;
+    let bars = 2usize;
+    let tail_s = 2.0f32;
+    let total_s = steps as f32 * step_s * bars as f32 + tail_s;
+
+    // A plain backbeat so the difference is the strip, not the groove.
+    const PATTERN: [[bool; 16]; 6] = [
+        [
+            true, false, false, false, true, false, false, false, true, false, false, true, true,
+            false, false, false,
+        ],
+        [
+            false, false, false, false, true, false, false, false, false, false, false, false,
+            true, false, true, false,
+        ],
+        [
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, true,
+        ],
+        [
+            false, false, true, false, false, false, false, true, false, false, true, false, false,
+            false, false, false,
+        ],
+        [
+            false, false, false, true, false, false, false, false, false, true, false, false,
+            false, false, true, false,
+        ],
+        [
+            true, false, false, false, false, false, true, false, false, false, false, false, true,
+            false, false, false,
+        ],
+    ];
+
+    let total_steps = steps * bars;
+    let total_blocks = (total_s * SR / BLOCK as f32) as usize;
+    let mut out: Vec<f32> = Vec::with_capacity(total_blocks * BLOCK * 2 * 2);
+    let mut notes: Vec<(f32, String)> = Vec::new();
+
+    for bypass_drums in [false, true] {
+        let mut engine = mi_drum_engine::MiDrumEngine::new();
+        engine.set_master_gain(0.5);
+        if bypass_drums {
+            // Tracks 0-3 are the Peaks drums in the default kit, 4-5 the Plaits
+            // voices. 0.0 is a true bypass, not a zero drive.
+            for t in 0..4usize {
+                engine.tracks_mut()[t].set_macro(WARP_DRV_SLOT, 0.0);
+            }
+        }
+
+        notes.push((
+            out.len() as f32 / 2.0 / SR,
+            if bypass_drums {
+                "B - drum tracks BYPASSED, melodic tracks still warped".to_string()
+            } else {
+                "A - default kit as shipped (all tracks 60% warped)".to_string()
+            },
+        ));
+
+        let mut next_step = 0usize;
+        let mut next_step_at = 0.0f32;
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+
+        for b in 0..total_blocks {
+            let block_end = (b + 1) as f32 * BLOCK as f32 / SR;
+            while next_step < total_steps && next_step_at < block_end {
+                let s = next_step % steps;
+                for (track, row) in PATTERN.iter().enumerate() {
+                    if row[s] {
+                        engine.trigger(track, if s.is_multiple_of(4) { 1.0 } else { 0.7 });
+                    }
+                }
+                next_step += 1;
+                next_step_at += step_s;
+            }
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+    }
+
+    (out, notes)
+}
+
+/// Print a manifest next to its WAV so the file is navigable without scrubbing.
+fn print_gate_timeline(path: &str, samples: usize, timeline: &GateTimeline) {
+    println!(
+        "\nwrote {path} ({:.2}s)",
+        samples as f32 / 2.0 / SAMPLE_RATE
+    );
+    println!("  time    engine          what you are hearing");
+    println!("  ------  --------------  ----------------------------------------");
+    for (t, name, what) in timeline {
+        println!("  {t:>5.1}s  {name:<14}  {what}");
+    }
+}
+
+/// Render the Warps drive sweep: the kick at each point on the `WARP.DRV` axis,
+/// from the clean bypass to full destruction.
+///
+/// Every setting gets the same eight hits at a steady tempo, so the only thing
+/// changing between them is Warps.
+///
+/// # Why a kick and not a tonal voice
+///
+/// The source has to be *clean* for the drive to be legible. Warps is a
+/// saturating waveshaper, so what you hear is the harmonic structure of
+/// whatever you feed it — and a six-operator FM voice is dense in partials from
+/// the first millisecond. Warping one produces something already complex, and
+/// the drive change is masked by the source rather than revealed by it.
+///
+/// A kick is a pitch-swept sine plus a click: nearly all of its energy sits in
+/// one partial, so the shape of the transfer function is most of what you hear.
+/// As the drive comes up the sine flattens toward a square, the click smears,
+/// and the crest factor falls — three separate symptoms of the same change,
+/// which is what makes the sweep readable at a glance.
+fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
+    use drum_engine::machines::SLOT_LEVEL;
+    use drum_engine::machines::SLOT_STRIP_HOLD as WARP_DRV_SLOT;
+    use mi_drum_engine::{DeviceEngine, MiMachineId, BLOCK, SAMPLE_RATE as SR};
+
+    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+    let hits = 8usize;
+    let step_s = 0.25f32; // 8th notes at 120 BPM
+    let gap_s = 0.45f32;
+    let per_setting = hits as f32 * step_s + gap_s;
+
+    // (drive macro, what it should sound like)
+    let entries: &[(f32, &str)] = &[
+        (0.0, "BYPASS - bit transparent, kick uncoloured"),
+        (0.1, "light - Warps barely engaged, pre-gain ~0.4"),
+        (0.25, "unity - cleanest saturation point, pre-gain ~1.0"),
+        (0.5, "3x overdriven - the old default sat here"),
+        (0.75, "hard - pre-gain ~10, sine visibly flattening"),
+        (1.0, "destroyed - Warps at full drive, pre-gain 24"),
+    ];
+
+    let mut engine = mi_drum_engine::MiDrumEngine::new();
+    // Headroom. The top of this sweep is loud by design and the point is to hear
+    // the drive, not the limiter.
+    engine.set_master_gain(0.3);
+
+    // FILT 5 is `WARP.DRV` on mi-drum. Re-exported from `drum_engine` only so
+    // this reads next to `SLOT_LEVEL`, which is genuinely per-device.
+    {
+        let track = &mut engine.tracks_mut()[0];
+        track.load_machine(MiMachineId::PeaksBassDrum);
+        // The Peaks kick peaks at full scale by design (see
+        // docs/peaks-vendoring.md), which would slam Warps' input and hide the
+        // transfer curve. Back it off so Warps has somewhere to go.
+        track.set_macro(SLOT_LEVEL, 0.5);
+    }
+
+    let mut out: Vec<f32> =
+        Vec::with_capacity((entries.len() as f32 * per_setting * SR * 2.0) as usize);
+    let mut l = [0.0f32; BLOCK];
+    let mut r = [0.0f32; BLOCK];
+    let mut timeline = GateTimeline::new();
+    let blocks = |s: f32| (s * SR / BLOCK as f32) as usize;
+
+    for (i, (drive, why)) in entries.iter().enumerate() {
+        engine.tracks_mut()[0].set_macro(WARP_DRV_SLOT, *drive);
+        timeline.push((i as f32 * per_setting, format!("WARP.DRV {drive:.2}"), why));
+
+        for hit in 0..hits {
+            engine.trigger(0, 1.0);
+            // The last hit carries the gap so the settings are separated by
+            // silence rather than butting into each other.
+            let tail = if hit + 1 == hits {
+                step_s + gap_s
+            } else {
+                step_s
+            };
+            for _ in 0..blocks(tail) {
+                engine.process(&mut l, &mut r);
+                out.extend_from_slice(&l);
+                out.extend_from_slice(&r);
+            }
+        }
+    }
+
+    (out, timeline)
+}
+
 fn write_wav(path: &str, interleaved: &[f32]) -> Result<(), Box<dyn std::error::Error>> {
     let spec = hound::WavSpec {
         channels: 2,
@@ -1758,13 +2365,25 @@ mod mi_drum_baseline {
     /// not overlapping fixes the interleaving.
     #[test]
     fn mi_drum_baseline_is_unchanged() {
-        let samples = render_mi_drum(0.0);
+        let samples = render_mi_drum_marked(0.0).0;
 
         // The baseline has to exercise the machines, or the digest pins
         // silence and Phase 14.0 passes its gate by doing nothing.
+        // `fast::soft_clip` is a rational approximation and carries `recip`'s
+        // ~2 ulp of error, so a sample landing on its internal clamp can come
+        // back as 1.0000001. That is -200 dB and converts to exactly full
+        // scale in 24-bit rather than wrapping, so the bound to assert is
+        // "cannot wrap the DAC", not "is bit-exactly 1.0" — the same tolerance
+        // `output_never_exceeds_unity` uses in `mi-drum-engine`. 1 ulp at 1.0
+        // is 1.19e-7.
+        const TOL: f32 = 4.0 * 1.19e-7;
         let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.1, "baseline is near-silent: peak={peak}");
-        assert!(peak <= 1.0, "baseline clips: peak={peak}");
+        assert!(
+            peak <= 1.0 + TOL,
+            "baseline clips: peak={peak} — more than the clipper's own \
+             approximation error, so this is a real overflow"
+        );
 
         let actual = digest(&samples);
         assert_eq!(
