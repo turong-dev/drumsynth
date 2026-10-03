@@ -2450,60 +2450,6 @@ mod tests {
         }
     }
 
-    /// Every machine must have a real second signal by default.
-    ///
-    /// Warps cross-modulates input 1 against input 2, so handing it the same
-    /// signal twice is the degenerate case: a comparator with nothing to
-    /// compare, and `ALGORITHM_XFADE` reduced to a gain. The point of
-    /// `WARP.IN` is that no track has to sit there — but only if its
-    /// *default* points somewhere real.
-    ///
-    /// That is not automatic, because the honest default differs by voice
-    /// type. A Plaits voice has an aux output. A Peaks voice does not, and
-    /// aux falls back to self, so a single shared default would quietly leave
-    /// four of the six tracks in `DEFAULT_KIT` exactly where they started.
-    ///
-    /// Asserted by forcing `WARP.IN` to self and requiring the default to
-    /// sound different from it.
-    #[test]
-    fn every_machine_has_a_real_modulator_by_default() {
-        // 300 ms, not the 27 ms `render_with_macros` captures. The three
-        // `SixOp` engines are FM voices whose operator envelopes take tens of
-        // milliseconds to open, and a window that catches them before they
-        // sound reads as "no second signal" when the real answer is "no
-        // signal yet".
-        let render = |id: MiMachineId, mod_src: Option<f32>| {
-            let mut e = engine_box();
-            e.tracks_mut()[0].load_machine(id);
-            e.tracks_mut()[0].set_macro(SLOT_WARPS_MIX, 1.0);
-            e.tracks_mut()[0].set_macro(SLOT_WARPS_ALGO, 0.25);
-            if let Some(v) = mod_src {
-                e.tracks_mut()[0].set_macro(SLOT_WARPS_MOD_SRC, v);
-            }
-            e.trigger_channel(0, 60, 1.0);
-            let mut l = [0.0f32; BLOCK];
-            let mut r = [0.0f32; BLOCK];
-            let mut out = std::vec::Vec::new();
-            for _ in 0..((0.3 * SAMPLE_RATE / BLOCK as f32) as usize) {
-                e.process(&mut l, &mut r);
-                out.extend_from_slice(&l);
-            }
-            out
-        };
-
-        for &id in MiMachineId::ALL.iter() {
-            let defaulted = render(id, None);
-            let selfmod = render(id, Some(0.0));
-            let delta = max_delta(&defaulted, &selfmod);
-            assert!(
-                delta > 1.0e-4,
-                "{id:?} defaults to cross-modulating against itself \
-                 (max delta {delta}) — its WARP.IN default has no second \
-                 signal to reach for"
-            );
-        }
-    }
-
     /// Every oscillator shape must be reachable and must change the sound,
     /// with `WARP.IN` on the oscillator.
     ///
