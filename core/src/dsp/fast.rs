@@ -149,8 +149,15 @@ fn recip(x: f32) -> f32 {
 /// expensive and this is called on every output sample. The curve is close
 /// enough through the interesting region and asymptotes correctly.
 ///
-/// Output is bounded within `[-1, 1]`, which is what makes this usable as the
-/// final safety net before the DAC.
+/// Output is bounded within `[-1, 1]` up to the ~2 ulp error of [`recip`],
+/// which is what makes this usable as the final safety net before the DAC.
+/// The exact bound is not enforced with a trailing `clamp`, deliberately: the
+/// overshoot only occurs where the input hits the ±3 clamp, it is -200 dB, and
+/// an f32 of 1.0000001 converts to exactly full scale in 24-bit rather than
+/// wrapping. Paying a min/max per output sample on every device to remove it
+/// would be a cycle cost and a bit-identity break for an artifact no DAC can
+/// see. `output_never_exceeds_unity` in `mi-drum-engine` asserts the bound
+/// with the approximation's tolerance rather than pretending it is exact.
 #[inline(always)]
 pub fn soft_clip(x: f32) -> f32 {
     // x * (27 + x^2) / (27 + 9x^2) is the classic Padé-style tanh
