@@ -102,6 +102,12 @@ class SyntheticBassDrum {
     fm_lp_ = 0.0f;
     body_env_lp_ = 0.0f;
     body_env_ = 0.0f;
+    // LOCAL FIX (not upstream): both transient envelope states were left out
+    // of Init. `transient_env_lp_` is a ONE_POLE accumulator read before it is
+    // ever written, so the voice started from whatever the allocator left and
+    // the render differed every process. See docs/plaits-vendoring notes.
+    transient_env_ = 0.0f;
+    transient_env_lp_ = 0.0f;
     body_env_pulse_width_ = 0;
     fm_pulse_width_ = 0;
     tone_lp_ = 0.0f;

@@ -2343,18 +2343,32 @@ fn play_live(bpm: f32) -> Result<(), Box<dyn std::error::Error>> {
 mod mi_drum_baseline {
     use super::*;
 
-    /// The pre-Phase-14 mi-drum render, pinned.
+    /// The Phase 14 mi-drum render, pinned.
     ///
-    /// Phase 14 rebuilds the mi-drum strip as a block-rate chain around MI
-    /// stage classes. Phase 14.0 is the pure-refactor step of that work, and
-    /// its gate is that this digest does not move: the restructure is supposed
-    /// to change *when* the arithmetic happens, not what it computes. Once
-    /// 14.1 starts substituting actual stages the sound changes on purpose,
-    /// and this constant gets re-pinned with that change called out.
+    /// Re-pinned once the render became reproducible at all. For most of
+    /// Phase 14 this constant was decorative: two vendored voices read state
+    /// their `Init` never wrote, so the same binary produced a different
+    /// digest in every process and the gate passed or failed by luck. Both are
+    /// fixed (`peaks::HighHat`'s oscillator phases and
+    /// `plaits::SyntheticBassDrum`'s transient envelope states); this value is
+    /// the first one that means anything.
+    ///
+    /// Because the failure mode was *between* processes rather than within
+    /// one, a single green run does not prove much. The check that does:
+    ///
+    /// ```text
+    /// for i in $(seq 1 20); do
+    ///   cargo test -q -p render mi_drum_baseline 2>&1 | grep -oE "got 0x[0-9a-f]+"
+    /// done | sort | uniq -c
+    /// ```
+    ///
+    /// Silence means every run matched. More than one distinct digest means
+    /// something is reading uninitialised memory again, and
+    /// `mi-drum-engine`'s `slot_reuse` test is the place to start.
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0xe09f_f063_4b6c_aa61;
+    const BASELINE_DIGEST: u64 = 0x7b5d_4ef0_174f_d745;
 
     /// One test, one render, deliberately.
     ///

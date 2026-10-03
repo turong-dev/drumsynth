@@ -268,16 +268,20 @@ per-voice generator would require patching vendored code.
 
 The mi-drum baseline is a committed **FNV-1a digest**, not a WAV (`*.wav` is
 gitignored). `cargo test` asserts it via `mi_drum_baseline_is_unchanged`. The
-redesign invalidates the old 6-track Plaits digest; a new 6-track digest is
-pinned once the engine stabilises. Until the uninitialised-read bug is fixed
-the gate passes or fails by luck, so it must not be re-pinned in the meantime.
+redesign invalidated the old 6-track Plaits digest; the 6-track one is pinned.
 
-The gate change moved the digest again, deliberately: the render now includes a
-held-note-and-release pass, and the machine windows it covers are no longer
-silent. **The digest is still stale and has not been re-pinned**, for the
-uninitialised-read reason above. `every_catalogued_engine_makes_sound` in
-`mi-drum-engine` is the test that actually catches a regression here, and it
-does not depend on the digest.
+For most of Phase 14 that digest was decorative, because two vendored voices
+read state their `Init` never wrote and the same binary produced a different
+result in every process. Both are fixed (see `docs/peaks-vendoring.md` and
+`docs/plaits-vendoring.md`), and the digest is meaningful again.
+
+Because that failure mode lived *between* processes, a single green run is
+weak evidence: re-run the digest test ~20 times and check every run agrees.
+`PLAN.md` has the one-liner. `devices/mi-drum/tests/slot_reuse.rs` is the
+in-process guard — every machine must render identically whether its slot is
+clean or has held something else — and
+`every_catalogued_engine_makes_sound` still catches a silent engine without
+depending on the digest at all.
 
 ## Output routing
 

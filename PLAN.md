@@ -685,92 +685,106 @@ on tracks 0–3 and Plaits voices on tracks 4–5, and update `mi-bench` scenari
 *Gate:* `mi_drum_baseline_is_unchanged` passes with the new digest; bench
 worst-case under the ~70% ceiling; `MiDrumEngine` size still fits OCRAM.
 
-**Blocked twice over.** The uninitialised-read bug means there is no digest
-worth pinning — the gate passes or fails by luck. The Plaits gate bug is now
-fixed, so the "three of 28 machines emit digital silence" reason no longer
-applies, but the digest has moved again (deliberately: the render now includes
-a held-note-and-release pass) and still must not be re-pinned while the
-uninitialised read is open.
-
-The render itself has changed since the constant was last pinned, so
-`BASELINE_DIGEST` is stale for a third, boring reason: the machine sweep and
+**Unblocked, and the digest is pinned.** Three things had to happen first.
+The uninitialised reads are fixed, so a digest is worth pinning at all. The
+Plaits gate is real, so the three `SixOp` engines are no longer digital
+silence in the sweep. And the render itself had drifted: the machine sweep and
 the kit pattern both ran on Warps' internal carrier, so five of six tracks and
-all 28 machine hits were an oscillator rather than the voice being tested. The
-carrier is now External for both, with the five internal carriers covered by a
-separate pass at the end of the render. The render has since gained one more
-pass for the same kind of reason: the kit plays one bar with `WARP.DRV` at 0
-before the same bars with the kit's own drives, so the baseline carries an
-audible reference for what the strip is doing. Do not re-pin before the
-uninitialised-read bug is resolved. The
-`DEFAULT_KIT` half of this phase is already done in `100ade8`.
+all 28 machine hits were an oscillator rather than the voice under test — the
+carrier is External for both now, with the five internal carriers covered by
+their own pass, and the kit plays one bar at `WARP.DRV` 0 before the same bars
+driven, so the baseline carries its own reference for what the strip does.
+
+`BASELINE_DIGEST` is `0x7b5d_4ef0_174f_d745`, verified identical across 20
+separate processes. The `DEFAULT_KIT` half of this phase was already done in
+`100ade8`.
 
 ### Phase 14.7 (future) — Mod matrix
 
 User-configurable modulation patching. Not part of the first deliverable.
 
-## Open bug: mi-drum render reads uninitialised memory
+## Resolved: mi-drum rendered differently in every process
 
-**Status:** open. Blocks 14.6. The `mi_drum_baseline_is_unchanged` digest gate
-is currently meaningless and must not be re-pinned until this is fixed.
+**Status: fixed.** Two vendored voices read state their `Init` never wrote.
+The baseline digest is re-pinned and the 14.6 gate is unblocked.
 
-### Symptom
+### What it was
 
-The same test binary, run in separate processes, produces different FNV digests
-of the same render, and sometimes dies with `SIGSEGV` (exit 139). Five renders
-inside one process are byte-identical, so the synthesis itself is deterministic
-— the input it is reading is not.
+- `peaks::HighHat::Init` never initialised `uint32_t phase_[6]`, the six
+  square-oscillator phases.
+- `plaits::SyntheticBassDrum::Init` left out `transient_env_` and
+  `transient_env_lp_`. The second is a `ONE_POLE` accumulator read and
+  rewritten from its own previous value on the first sample, and assigned
+  nowhere else.
 
-### Established facts
+Neither is a bug upstream. On hardware both objects are zeroed statics whose
+`Init` runs once at boot, so the fields are zero because the BSS is. Here the
+engine is heap-allocated and a slot is re-initialised whenever its machine
+changes, so the forgotten fields picked up whatever the previous model left at
+those addresses — including, when those bytes had held a pointer, values that
+move with ASLR. Hence: deterministic within a process, different in every new
+one, and sensitive to `MallocScribble`.
 
-- **Pre-existing, not a Phase 14 regression.** Reproduced at `aa1a33e`, before
-  any Peaks work.
-- Reproducible with the engine's heap allocation zeroed first, so the read is
-  not the engine struct.
-- All mutable C++ statics are accounted for: the only one is
-  `stmlib::Random::rng_state_`, which `seed_random` sets. No function-local
-  statics in the vendored tree.
-- Ruled out by inspection: `plaits::Patch` (all 10 fields assigned by the shim),
-  `EngineParameters` (all 6 assigned in `Voice::Render`), and `UserData::ptr()`
-  (stubbed to return `NULL` during vendoring).
-- `MallocScribble=1` changes the digest, so the garbage is malloc-backed.
+Both fixes are marked `LOCAL FIX` in the vendored tree and written up in
+`docs/peaks-vendoring.md` and `docs/plaits-vendoring.md`. Re-apply them if the
+vendored tree is refreshed.
 
-### Bisected so far
+### How it was found, since the next one will hide the same way
 
-Progressively richer renders, one subsystem at a time, against a fixed binary
-with the engine zeroed:
+The earlier bisect stalled because it was reasoning about *subsystems*. What
+worked was localising in *time*: render twice into two WAVs, find the first
+differing sample, and map that offset onto the render's own section timeline.
+That pointed at one 0.75 s machine window rather than at a subsystem.
 
-| Render | Stable across processes? |
-|---|---|
-| idle, no trigger | yes |
-| single trigger | yes |
-| all 28 machines reloaded + trigger, no macros | yes |
-| Plaits-only machine sweep + trigger | yes |
-| all 28 machines + trigger + trailing blocks | **no** |
-| full `render_mi_drum` (macros, strip, engaged sends) | **no** |
-| full render with an all-Plaits `DEFAULT_KIT` | **no** |
+1. Two renders, diff the PCM, find the first divergent frame. It was 15.76 s,
+   which is machine 21 of the sweep — `mi-bd`.
+2. Digest each machine in isolation across three processes: only `mi-bd`.
+   Fixing it left `pk-hh` as the only unstable window, and `pk-hh` diverged
+   from the *first sample* of its window.
+3. `pk-hh` was stable on a fresh engine and unstable after any other machine
+   had been loaded — including after loading `pk-hh` itself. That is the
+   signature of re-initialisation over dirty storage, which named the fault
+   precisely.
 
-The last row matters: the remaining bug is on the **Plaits** side and predates
-Peaks, so it is not in the new Peaks code.
+Everything else that looked unstable was downstream contamination: `pk-hh` is
+the quietest machine in the catalogue, so a send-FX tail carrying divergence
+from an earlier window shows up there first.
 
-Note the send macros default to `0.0`, so every early bisect stage bypassed the
-send FX entirely. **The next thing to try is a minimal render with
-`SLOT_SEND_DELAY` / `SLOT_SEND_REVERB` driven** — that is the one untested
-variable, and `Reverb` is a plausible home for it (comb and allpass `phase_`
-indices, and `Reverb::new_in_place` zero-fills then patches only some fields).
-`SLOT_SEND_DELAY` and `SLOT_SEND_REVERB` are currently not re-exported from
-`mi-drum-engine`, so that test needs them public first.
+### Checking it stays fixed
 
-### Tooling notes
+The failure was *between* processes, so one green run proves little:
 
-ASan is a dead end for this: it reports no out-of-bounds or use-after-free, and
-structurally cannot see uninitialised reads. MSan is the tool that names the
-exact bytes, and it is Linux-only — Docker is available, so a
-`linux/amd64` MSan run is the fastest route if bisecting stalls.
+```bash
+for i in $(seq 1 20); do
+  cargo test -q -p render mi_drum_baseline 2>&1 | grep -oE "got 0x[0-9a-f]+"
+done | sort | uniq -c
+```
 
-If ASan is wanted again, note the working configuration. Instrumenting Rust
-*and* the C++ fails to link (`rustc`'s `librustc-nightly_rt.asan` and Xcode's
-ASan runtime collide on `_asan.module_ctor`). The build that works instruments
-only the C++ and lets clang link the runtime:
+No output means every run matched. More than one distinct digest means
+something is reading uninitialised memory again.
+
+`devices/mi-drum/tests/slot_reuse.rs` is the in-process guard: every machine
+must render identically on a clean slot and on a slot that has held something
+else. It is in its own test binary because it compares renders exactly, and
+`stmlib::Random` is a process-global generator that other rendering tests
+would interleave with. It catches the hi-hat class. It does **not** catch the
+bass drum one — by the end of a previous hit that accumulator has decayed to
+approximately zero, so in-process the stale and correct values are
+indistinguishable. Poisoning the allocation does not help either: a slot is
+built on the stack and moved into place, so the fill never reaches the
+vendored storage. For that class the multi-process digest check above is the
+only backstop.
+
+### Tooling notes, kept
+
+ASan reports no out-of-bounds or use-after-free here and structurally cannot
+see uninitialised reads. MSan is the tool that names the bytes and is
+Linux-only. Neither was needed in the end; a WAV diff and a section timeline
+were enough, and are a lot cheaper to reach for.
+
+If ASan is wanted for something else, this is the configuration that links:
+instrument only the C++ and let clang supply the runtime. Instrumenting Rust
+*and* C++ collides on `_asan.module_ctor`.
 
 ```bash
 CFLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \

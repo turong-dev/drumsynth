@@ -208,3 +208,26 @@ Phase 14 risk table already anticipates. Per the plan the Plaits tracks keep 2
 LFOs + 2 AD envelopes and the Peaks tracks get 1 + 1, which costs no extra
 Stages instances and frees ~41 KB.
 
+
+## Local modification: `HighHat::Init` does not initialise its phases
+
+`peaks::HighHat` holds `uint32_t phase_[6]`, one per square oscillator, and
+upstream's `Init()` never writes them. On the hardware that is harmless:
+the object is a zeroed static and `Init` runs once at boot, so the phases are
+zero because the BSS is.
+
+Here a slot is re-initialised every time its machine changes — the shim
+placement-news the model over shared storage and calls `Init` — so the phases
+came up holding whatever the previous model had left at those addresses.
+Sometimes that was another drum's state; sometimes it was bytes that had held
+a pointer, which move with ASLR. The result was a render that differed in
+every process, which is what made the committed baseline digest meaningless
+for most of Phase 14.
+
+The fix is four lines in `Init` zeroing `phase_[]`, marked `LOCAL FIX` in
+`vendor/peaks/drums/high_hat.cc`. Re-apply it if the vendored tree is ever
+refreshed from upstream.
+
+`devices/mi-drum/tests/slot_reuse.rs` is the regression guard: it renders each
+machine on a clean slot and on a slot that has held something else, and
+requires the two to be bit-identical.

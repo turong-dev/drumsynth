@@ -51,6 +51,16 @@ void HighHat::Init() {
   vca_envelope_.Init();
   vca_envelope_.set_delay(0);
   vca_envelope_.set_decay(4093);
+
+  // LOCAL FIX (not upstream): the six oscillator phases were never
+  // initialised. On hardware the object is a zeroed static and Init runs
+  // once, so upstream never sees it; here a slot is re-inited whenever its
+  // machine changes, so the phases started from whatever the previous model
+  // left in the shared storage -- including bytes that move with ASLR, which
+  // made the render differ every process.
+  for (size_t i = 0; i < 6; ++i) {
+    phase_[i] = 0;
+  }
 }
 
 void HighHat::Process(const GateFlags* gate_flags, int16_t* out, size_t size) {
