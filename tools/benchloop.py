@@ -97,8 +97,16 @@ BUDGET_RE = re.compile(r"budget\s+(\d+)\s+cycles per block")
 REGIONS = {
     "ITCM": ([".text"], 256 * 1024),
     "DTCM": ([".stack", ".vector_table", ".data", ".bss"], 256 * 1024),
-    "OCRAM": ([".rodata", ".uninit", ".heap"], 512 * 1024),
-    "FLASH": ([".boot"], 1984 * 1024),
+    "OCRAM": ([".uninit", ".heap"], 512 * 1024),
+    # `.rodata` is in FLASH, not OCRAM. `firmware/build.rs` moved it there when
+    # Phase 14 vendored Warps, Stages and Clouds and their lookup tables stopped
+    # fitting in OCRAM alongside the engine (`.rodata(Memory::Flash)`), but this
+    # table was not updated with it. The effect was a memory summary wrong in
+    # both directions at once: OCRAM reported 128% full -- which is impossible,
+    # and would have been a link error if it were true -- while FLASH reported
+    # 0.4%. Check the section addresses, not this table, if they ever disagree
+    # again: `.rodata` at 0x6... is flash, at 0x202... is OCRAM.
+    "FLASH": ([".boot", ".rodata"], 1984 * 1024),
 }
 
 
