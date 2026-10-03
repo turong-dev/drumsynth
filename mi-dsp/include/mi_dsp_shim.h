@@ -165,6 +165,13 @@ void mi_warps_set_parameters(
     int32_t carrier_shape,
     float note);
 
+// Route the input straight to the output, bit-transparently.
+//
+// `drive = 0` is not a clean setting: `SaturatingAmplifier`'s pre-gain is
+// `0.5*drive` blended towards `24*drive^5`, so zero drive attenuates to
+// silence. Bypass is how "no drive" becomes "no colour" instead.
+void mi_warps_set_bypass(void* storage, int32_t bypass);
+
 // ---------------------------------------------------------------------------
 // Stages
 // ---------------------------------------------------------------------------

@@ -184,6 +184,11 @@ extern "C" {
         carrier_shape: i32,
         note: f32,
     );
+    /// Route Warps' input to its output unchanged.
+    ///
+    /// `drive = 0` is silence, not clean, so the clean end of the drive axis
+    /// has to be a bypass rather than a knob position.
+    pub fn mi_warps_set_bypass(storage: *mut c_void, bypass: c_int);
 
     // Stages
     pub fn mi_stages_init(storage: *mut c_void);

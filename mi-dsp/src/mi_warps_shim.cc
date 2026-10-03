@@ -82,4 +82,14 @@ void mi_warps_set_parameters(
   p->note = note;
 }
 
+void mi_warps_set_bypass(void* storage, int32_t bypass) {
+  warps::Modulator* m = reinterpret_cast<warps::Modulator*>(storage);
+  // `Process` short-circuits to a straight copy of input to output, which is
+  // bit-transparent apart from the f32 <-> int16 round trip the shim does
+  // anyway. This is what makes "no drive" mean *clean* rather than *silent*:
+  // `SaturatingAmplifier`'s pre-gain is `0.5*drive` blended towards
+  // `24*drive^5`, so `drive = 0` attenuates to nothing rather than to unity.
+  m->set_bypass(bypass != 0);
+}
+
 }  // extern "C"

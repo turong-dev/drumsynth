@@ -78,6 +78,20 @@ impl Carrier {
 /// Mutable Instruments Warps meta-modulator.
 pub struct Warps {
     storage: Storage,
+    /// Sample rate the C++ object was last initialised at, so a move can be
+    /// repaired without the caller having to remember it.
+    sample_rate: f32,
+    /// Address `storage` had when the C++ object was constructed in it.
+    ///
+    /// `warps::Modulator` holds pointers into its own buffers, so moving the
+    /// Rust struct leaves them pointing at the old location and the next
+    /// `Process` dereferences freed or reused stack. That is a segfault that
+    /// depends on stack layout, which means it hides: it survived for months
+    /// of tests and then surfaced twice in one afternoon, once from adding a
+    /// call frame and once from constructing in a test rather than in the
+    /// engine. Comparing the address on the way into `Process` turns a
+    /// latent crash into a one-off re-init.
+    init_addr: usize,
 }
 
 impl Warps {
@@ -85,6 +99,8 @@ impl Warps {
     pub fn new(sample_rate: f32) -> Self {
         let mut stage = Self {
             storage: Storage::new(),
+            sample_rate,
+            init_addr: 0,
         };
         stage.init(sample_rate);
         stage
@@ -96,9 +112,25 @@ impl Warps {
     /// temporary into an engine array) to fix up any self-referential C++
     /// pointers. Safe to call on a freshly constructed instance.
     pub fn init(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+        self.init_addr = self.storage.as_ptr() as usize;
         #[allow(unsafe_code)]
         unsafe {
             sys::mi_warps_init(self.storage.as_ptr(), sample_rate);
+        }
+    }
+
+    /// Re-initialise if the struct has moved since it was constructed.
+    ///
+    /// One pointer compare per chunk. See [`Self::init_addr`] for why it earns
+    /// its place. Re-initialising discards Warps' internal state (SRC history,
+    /// feedback), which is the right trade: the alternative at that point is
+    /// reading through stale pointers.
+    #[inline]
+    fn repair_if_moved(&mut self) {
+        if self.storage.as_ptr() as usize != self.init_addr {
+            let sr = self.sample_rate;
+            self.init(sr);
         }
     }
 
@@ -106,6 +138,26 @@ impl Warps {
     /// plus the carrier source and, for an internal carrier, its MIDI pitch.
     ///
     /// `note` is ignored when `carrier` is [`Carrier::External`].
+    ///
+    /// **On `drive`:** 0.0 is *not* a clean setting. Warps'
+    /// `SaturatingAmplifier` computes its pre-gain as `0.5·drive` blended
+    /// towards `24·drive⁵`, and post-gain as `1/SoftClip(...)` of that, so the
+    /// knob's travel is:
+    ///
+    /// | `drive` | pre-gain | net gain | what it sounds like |
+    /// |---|---|---|---|
+    /// | 0.00 | 0.00 | 0.00 | **silence** |
+    /// | 0.25 | 0.12 | 0.51 | quiet, gentle |
+    /// | 0.50 | 0.38 | 1.07 | unity, mild colour |
+    /// | 0.62 | 1.00 | 1.18 | unity, cleanest saturation point |
+    /// | 0.70 | 2.16 | 2.19 | 2× overdriven |
+    /// | 0.80 | 5.18 | 5.18 | hard |
+    /// | 1.00 | 24.0 | 24.0 | destroyed |
+    ///
+    /// The bottom half of the knob is nearly linear and the top half covers
+    /// 48× of gain, which is where the "gets crazy past halfway" reputation
+    /// comes from — it is a property of the `drive⁵` term, not of this
+    /// wrapper. Use [`Self::set_bypass`] for a genuinely clean section.
     pub fn set_parameters(
         &mut self,
         algorithm: f32,
@@ -127,6 +179,18 @@ impl Warps {
         }
     }
 
+    /// Route input to output unchanged, ignoring every parameter.
+    ///
+    /// This is the clean end of the drive axis. `drive = 0.0` mutes the voice
+    /// outright (see [`Self::set_parameters`]), so a device that wants a
+    /// "no colour" setting has to bypass rather than turn the knob down.
+    pub fn set_bypass(&mut self, bypass: bool) {
+        #[allow(unsafe_code)]
+        unsafe {
+            sys::mi_warps_set_bypass(self.storage.as_ptr(), bypass as i32);
+        }
+    }
+
     /// Process one block in place. `buf` is mono; it is duplicated to both
     /// Warps inputs and the left output is written back.
     ///
@@ -134,23 +198,56 @@ impl Warps {
     /// this for 32-sample segments.
     pub fn process(&mut self, buf: &mut [f32]) {
         let n = buf.len();
+        let mut modulator = [0.0f32; MAX_BLOCK];
         assert!(n <= MAX_BLOCK, "Warps block size cannot exceed {MAX_BLOCK}");
+        modulator[..n].copy_from_slice(buf);
+        let mut aux = [0.0f32; MAX_BLOCK];
+        self.process_dual(buf, &modulator[..n], &mut aux[..n]);
+    }
+
+    /// Process one chunk with a **separate modulator**, writing both outputs.
+    ///
+    /// This is what Warps is actually built for. The module has two inputs and
+    /// cross-modulates one against the other; handing it the same signal twice
+    /// (which [`process`](Self::process) does) is a degenerate case where
+    /// several algorithms collapse — a comparator fed two identical inputs has
+    /// nothing to compare, and `ALGORITHM_XFADE` reduces to a gain of
+    /// `fade_in + fade_out`, making the timbre parameter a level control.
+    ///
+    /// - `carrier` is input 1 and receives Warps' **main** output.
+    /// - `modulator` is input 2, the signal the carrier is modulated against.
+    /// - `aux_out` receives Warps' **aux** output, which in the cross-modulation
+    ///   path is the sum of the two *saturated inputs* rather than a second
+    ///   cross-modulation result (`modulator.cc:209`-`:222`, `:276`). It is a
+    ///   drive-only tap, and it is scaled by 16384 against main's 32768, so it
+    ///   arrives at half the amplitude.
+    ///
+    /// With an internal carrier ([`Carrier::Sine`] and friends) the roles
+    /// shift: `carrier` becomes the oscillator's phase-modulation input and the
+    /// carrier itself is generated internally.
+    pub fn process_dual(&mut self, carrier: &mut [f32], modulator: &[f32], aux_out: &mut [f32]) {
+        let n = carrier.len().min(modulator.len()).min(aux_out.len());
+        assert!(n <= MAX_BLOCK, "Warps block size cannot exceed {MAX_BLOCK}");
+        self.repair_if_moved();
         let mut in_l = [0.0f32; MAX_BLOCK];
+        let mut in_r = [0.0f32; MAX_BLOCK];
         let mut out_l = [0.0f32; MAX_BLOCK];
         let mut out_r = [0.0f32; MAX_BLOCK];
-        in_l[..n].copy_from_slice(buf);
+        in_l[..n].copy_from_slice(&carrier[..n]);
+        in_r[..n].copy_from_slice(&modulator[..n]);
         #[allow(unsafe_code)]
         unsafe {
             sys::mi_warps_process(
                 self.storage.as_ptr(),
                 in_l.as_ptr(),
-                in_l.as_ptr(),
+                in_r.as_ptr(),
                 out_l.as_mut_ptr(),
                 out_r.as_mut_ptr(),
                 n,
             );
         }
-        buf.copy_from_slice(&out_l[..n]);
+        carrier[..n].copy_from_slice(&out_l[..n]);
+        aux_out[..n].copy_from_slice(&out_r[..n]);
     }
 }
 
@@ -200,6 +297,12 @@ mod tests {
     /// output, for comparing carriers against each other.
     fn render_with(carrier: Carrier) -> Vec<f32> {
         let mut warps = Warps::new(48000.0);
+        // `new` initialises the C++ object at a stack temporary and then
+        // returns it by value, so the self-referential pointers inside
+        // `warps::Modulator` point at the old address. Re-init at the final
+        // one — the same fix-up the engine does lazily in its strip. Without
+        // it this faults under `-O0`, where the move is a real copy.
+        warps.init(48000.0);
         warps.set_parameters(0.25, 0.5, 0.7, carrier, 48.0);
         let mut out = Vec::new();
         for block in 0..8 {
@@ -261,6 +364,8 @@ mod tests {
     /// artifact and reads the same.
     fn render_at_pitch(note: f32, blocks: usize) -> Vec<f32> {
         let mut warps = Warps::new(48000.0);
+        // See `render_with`: re-init at the final address.
+        warps.init(48000.0);
         warps.set_parameters(0.25, 0.5, 0.7, Carrier::Sine, note);
         let mut out = Vec::new();
         for block in 0..blocks {
@@ -287,5 +392,235 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(delta > 1.0e-3, "carrier ignored its pitch");
+    }
+
+    // ---- bandwidth and aliasing ------------------------------------------------
+    //
+    // "Sample rate loss" is the symptom these guard against: a 48 kHz engine whose
+    // top end has quietly gone missing, which is audible as a dull, band-limited
+    // character long before anyone thinks to measure it.
+    //
+    // Warps runs its cross-modulator at 6x (`kOversampling`, a 48-tap sinc SRC), so
+    // the harmonics its saturator generates have room to exist before folding back.
+    // The test is the gain *at the input frequency* — harmonics and intermod
+    // products are not what is under test, bandwidth is.
+
+    /// `sin` via a Taylor series, reduced to ±π first so the series stays
+    /// accurate. This crate is `no_std` with no `libm`, and a test helper should
+    /// not pull in a dependency for one transcendental.
+    fn sin_f(x: f32) -> f32 {
+        let two_pi = core::f32::consts::PI * 2.0;
+        let mut t = x % two_pi;
+        if t > core::f32::consts::PI {
+            t -= two_pi;
+        }
+        if t < -core::f32::consts::PI {
+            t += two_pi;
+        }
+        let t2 = t * t;
+        t * (1.0 - t2 / 6.0 * (1.0 - t2 / 20.0 * (1.0 - t2 / 42.0 * (1.0 - t2 / 72.0))))
+    }
+
+    fn cos_f(x: f32) -> f32 {
+        sin_f(x + core::f32::consts::FRAC_PI_2)
+    }
+
+    /// Newton's method, no transcendental needed. `no_std` has no `sqrt` either.
+    fn sqrt_f(x: f32) -> f32 {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        let mut r = x.max(1.0);
+        for _ in 0..8 {
+            r = 0.5 * (r + x / r);
+        }
+        r
+    }
+
+    /// Amplitude of `x` at `hz` by Goertzel. `x` must be an exact whole number
+    /// of cycles at that frequency or the reading is smeared.
+    fn amplitude_at(x: &[f32], hz: f32, sample_rate: f32) -> f32 {
+        let wr = 2.0 * cos_f(2.0 * core::f32::consts::PI * hz / sample_rate);
+        let (mut s1, mut s2) = (0.0f32, 0.0f32);
+        for &v in x {
+            let s0 = v + wr * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        sqrt_f((s1 * s1 + s2 * s2 - wr * s1 * s2).max(0.0)) / x.len() as f32 * 2.0
+    }
+
+    /// Run a whole signal through Warps, a block at a time.
+    ///
+    /// [`Warps::process`] takes at most [`MAX_BLOCK`] samples — it is the
+    /// engine's per-chunk call, not a file processor — while a spectral
+    /// measurement needs thousands of samples to resolve a bin. Feeding it the
+    /// whole stimulus trips the assert rather than returning a bad reading.
+    fn process_all(warps: &mut Warps, x: &mut [f32]) {
+        for chunk in x.chunks_mut(MAX_BLOCK) {
+            warps.process(chunk);
+        }
+    }
+
+    /// Gain at `hz` through Warps, as a ratio. `bypass` picks the clean path.
+    fn warps_gain_at(bypass: bool, drive: f32, hz: f32) -> f32 {
+        let sr = 48000.0f32;
+        let mut warps = Warps::new(sr);
+        // `new` initialises the C++ object at a stack temporary and then
+        // returns it by value, so the self-referential pointers inside
+        // `warps::Modulator` point at the old address. Re-init at the final
+        // one — the same fix-up the engine does lazily in its strip. Without
+        // it this faults under `-O0`, where the move is a real copy.
+        warps.init(sr);
+        warps.set_bypass(bypass);
+        warps.set_parameters(
+            0.0,
+            0.5,
+            if bypass { 0.0 } else { drive },
+            Carrier::External,
+            60.0,
+        );
+        // A whole number of cycles makes the stimulus exactly periodic.
+        let n = 4800usize;
+        let cycles = (hz * n as f32 / sr).round().max(1.0) as usize;
+        let tone: std::vec::Vec<f32> = (0..n)
+            .map(|i| {
+                sin_f((i as f32) * 2.0 * core::f32::consts::PI * cycles as f32 / n as f32) * 0.3
+            })
+            .collect();
+        // One pass of settling, then measure the second.
+        let mut warm = tone.clone();
+        process_all(&mut warps, &mut warm);
+        let mut out = tone.clone();
+        process_all(&mut warps, &mut out);
+        let got = amplitude_at(&out, cycles as f32 * sr / n as f32, sr);
+        let want = amplitude_at(&tone, cycles as f32 * sr / n as f32, sr);
+        if want > 0.0 {
+            got / want
+        } else {
+            0.0
+        }
+    }
+
+    /// Bypass is flat to 20 kHz, and the active path holds the band it is
+    /// actually responsible for.
+    ///
+    /// Measured gain at the input frequency, relative to the same
+    /// configuration at 1 kHz:
+    ///
+    /// | | 1 kHz | 5 kHz | 10 kHz | 15 kHz | 20 kHz |
+    /// |---|---|---|---|---|---|
+    /// | bypass | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 |
+    /// | drive 0.2 | 1.00 | 0.96 | 1.16 | 0.18 | 0.00 |
+    /// | drive 0.6 | 1.00 | 0.93 | 0.44 | 0.07 | 0.00 |
+    /// | drive 1.0 | 1.00 | 0.80 | 0.14 | 0.02 | 0.00 |
+    ///
+    /// So the active path **is** band-limited: it is flat to ~5 kHz, starts
+    /// falling by 10 kHz, and is gone by 20 kHz. That is Warps' own 6x SRC
+    /// (`kOversampling`, a 48-tap sinc) doing what it was designed to do at
+    /// the rate the hardware runs, not a defect introduced by this wrapper —
+    /// but it means a track with Warps engaged is darker than the same track
+    /// bypassed, by a lot, and that is a mix decision rather than a subtlety.
+    ///
+    /// The assertions therefore cover the two things that would be bugs:
+    /// bypass must be transparent, and the active path must hold the band up
+    /// to 5 kHz at every drive. The rolloff above that is pinned as a
+    /// measurement, not asserted as correct.
+    ///
+    /// The ratios are taken against the same drive's own 1 kHz gain, because
+    /// `drive` is a level control as well as a colour control — an absolute
+    /// threshold would fail at low drive for having turned the volume down.
+    #[test]
+    fn warps_holds_its_band_and_bypass_is_flat() {
+        for &hz in &[1_000.0f32, 5_000.0, 10_000.0, 15_000.0, 20_000.0] {
+            let g = warps_gain_at(true, 0.0, hz);
+            assert!(
+                (g - 1.0).abs() < 0.02,
+                "bypass is not transparent at {hz} Hz: gain {g:.3}"
+            );
+        }
+
+        for drive in [0.2f32, 0.6, 1.0] {
+            let reference = warps_gain_at(false, drive, 1_000.0);
+            assert!(reference > 0.0, "drive={drive} is silent at 1 kHz");
+            let rel = warps_gain_at(false, drive, 5_000.0) / reference;
+            assert!(
+                rel > 0.75,
+                "drive={drive}: 5 kHz is {rel:.3} of 1 kHz — the band Warps is \
+                 meant to pass is being lost, not just the top octave"
+            );
+        }
+    }
+
+    /// Moving the struct must not fault or silence it.
+    ///
+    /// `warps::Modulator` holds pointers into its own buffers, so a move
+    /// leaves them stale. The engine used to work around this with a
+    /// `warps_initialized` flag and a lazy `init` on the first strip call;
+    /// the wrapper now repairs itself, and this is what says so. Without the
+    /// repair this test is a segfault, not a failure.
+    #[test]
+    fn surviving_a_move_is_the_wrapper_s_job() {
+        let mut warps = Warps::new(48000.0);
+        warps.set_parameters(0.25, 0.5, 0.7, Carrier::External, 48.0);
+        let mut buf = [0.0f32; 32];
+        for (i, s) in buf.iter_mut().enumerate() {
+            *s = sin_f(i as f32 * 0.2) * 0.5;
+        }
+        warps.process(&mut buf);
+
+        // Move it: onto the heap, which is certainly a different address.
+        let mut moved = std::boxed::Box::new(warps);
+        let mut after = [0.0f32; 32];
+        for (i, s) in after.iter_mut().enumerate() {
+            *s = sin_f(i as f32 * 0.2) * 0.5;
+        }
+        moved.process(&mut after);
+
+        assert!(
+            after.iter().all(|s| s.is_finite()),
+            "non-finite output after a move"
+        );
+        let peak = after.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        assert!(peak > 1.0e-4, "silent after a move (peak {peak})");
+    }
+
+    /// A tone near the top of the band must not reappear somewhere it should not.
+    /// With a cross-modulator generating products, an under-oversampled path folds
+    /// them back into the audible band; 6x oversampling plus the 48-tap sinc SRC is
+    /// what prevents it.
+    #[test]
+    fn no_alias_image_of_a_high_tone() {
+        let sr = 48000.0f32;
+        let mut warps = Warps::new(sr);
+        // See `warps_gain_at`: re-init at the final address.
+        warps.init(sr);
+        warps.set_parameters(0.0, 0.5, 1.0, Carrier::External, 60.0);
+        let hz = 12_000.0f32;
+        let n = 4800usize;
+        let cycles = (hz * n as f32 / sr).round() as usize;
+        let tone: std::vec::Vec<f32> = (0..n)
+            .map(|i| {
+                sin_f((i as f32) * 2.0 * core::f32::consts::PI * cycles as f32 / n as f32) * 0.5
+            })
+            .collect();
+        let mut warm = tone.clone();
+        process_all(&mut warps, &mut warm);
+        let mut out = tone;
+        process_all(&mut warps, &mut out);
+
+        // The fundamental's own harmonics are legitimate. What must not be there
+        // is energy in a band the stimulus never occupied, which is what folding
+        // looks like from the outside.
+        let fundamental = amplitude_at(&out, hz, sr);
+        let stray = [18_000.0f32, 20_000.0, 22_000.0]
+            .iter()
+            .map(|&f| amplitude_at(&out, f, sr))
+            .fold(0.0f32, f32::max);
+        assert!(
+            stray < fundamental * 0.05,
+            "energy at 18-22 kHz ({stray:.5}) is close to the fundamental \
+             ({fundamental:.5}) — something is folding back into the band"
+        );
     }
 }
