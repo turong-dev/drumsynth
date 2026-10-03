@@ -104,10 +104,33 @@ fn main() -> ! {
     // something panicked before the log came up and you are staring at a dead
     // serial port wondering why.
     let led = board::led(&mut gpio2, pins.p13);
+    // On solid through init, toggling once the sweep is running. Dark means
+    // the fault was before this line; solid-on forever means it was during
+    // init; S.O.S. is `teensy4-panic`.
+    led.set();
 
     let mut pit = pit;
     let mut poller = imxrt_log::log::usbd(usb, imxrt_log::Interrupts::Disabled)
         .expect("failed to bring up USB logging");
+
+    // Enumerate before anything expensive runs.
+    //
+    // `Interrupts::Disabled` means the USB device only makes progress inside
+    // `poller.poll()`, so until the first poll the board is absent from the
+    // bus -- not silent on it, absent. Anything that faults between here and
+    // that first poll therefore looks, from the host, like a board that
+    // flashed, said `Booting`, and then never appeared: no port to open, no
+    // output to read, and nothing to say which of the 343 KB of engine
+    // construction below went wrong. `benchloop.py` reports it as "no
+    // /dev/cu.usbmodem* appeared", which is true and useless.
+    //
+    // Polling first costs the 3 s the host needed anyway to attach a terminal
+    // (it used to be spent after init, at the bottom of this block) and turns
+    // that failure into a port that opens and then goes quiet, which is a
+    // symptom with a name.
+    delay_blocking(&mut poller, &mut pit, 3_000);
+    log::info!("usb up; constructing the engine");
+    delay_blocking(&mut poller, &mut pit, 50);
 
     enable_cycle_counter();
 
@@ -146,9 +169,11 @@ fn main() -> ! {
     // spike used, so the two numbers are comparable.
     let mut res_send_fx = mi_drum_engine::stages::Resonator::new(0.3, 24);
 
-    // Give the host a moment to enumerate and for you to attach a terminal.
-    // Without this you miss the header every time.
-    delay_blocking(&mut poller, &mut pit, 3_000);
+    log::info!("engine ready");
+
+    // The enumeration wait has already happened, above. This is only the
+    // flush the report path needs between lines.
+    delay_blocking(&mut poller, &mut pit, 50);
 
     log::info!("");
     log::info!("mi-drum cycle bench — {} tracks", TRACKS);
