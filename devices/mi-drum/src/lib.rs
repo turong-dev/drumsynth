@@ -759,6 +759,20 @@ pub struct MiSlot {
     block_out: [f32; VOICE_BLOCK],
     block_aux: [f32; VOICE_BLOCK],
     block_pos: usize,
+    /// Where in the voice block this slot's render lands, in samples.
+    ///
+    /// `MiSlot` renders `VOICE_BLOCK` (24) samples at a time and drips them
+    /// out over `tick()`, while the engine block is 32 — so a voice renders
+    /// on some blocks and not others, and the per-block cost is uneven by
+    /// construction. Every slot used to start at the same phase, so all six
+    /// crossed their render boundary on the same tick and stayed in lockstep
+    /// forever. That is what made `6 sounding` peak at 1.67x its own average
+    /// while `idle` sat at 1.01x, and the deadline is set by the peak.
+    ///
+    /// Held separately from `block_pos` because `reset` re-aligns the slot,
+    /// and `panic` resets every track — so a phase applied only at
+    /// construction would be undone by the first panic.
+    render_phase: usize,
     patch: MiPlaitsPatch,
     modulations: MiPlaitsModulations,
     /// A note-on is waiting to be rendered. Consumed by the next
@@ -1124,6 +1138,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             block_out: [0.0f32; VOICE_BLOCK],
             block_aux: [0.0f32; VOICE_BLOCK],
             block_pos: VOICE_BLOCK, // force a render on the first tick
+            render_phase: 0,
             patch: MiPlaitsPatch {
                 note: 60.0,
                 harmonics: 0.5,
@@ -1237,6 +1252,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).block_out).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_aux).write([0.0f32; VOICE_BLOCK]);
             core::ptr::addr_of_mut!((*ptr).block_pos).write(VOICE_BLOCK);
+            core::ptr::addr_of_mut!((*ptr).render_phase).write(0);
             core::ptr::addr_of_mut!((*ptr).patch).write(MiPlaitsPatch {
                 note: 60.0,
                 harmonics: 0.5,
@@ -1454,7 +1470,7 @@ impl Slot<NUM_MACROS> for MiSlot {
         self.peaks_gate = GATE_LOW;
         self.active = false;
         self.silence_counter = 0;
-        self.block_pos = VOICE_BLOCK;
+        self.block_pos = VOICE_BLOCK - self.render_phase;
     }
 
     fn is_active(&self) -> bool {
@@ -1692,6 +1708,16 @@ fn ramp_into(out: &mut [f32], from: f32, to: f32) {
     }
 }
 
+impl MiSlot {
+    /// Spread this slot's voice-render across the block period.
+    ///
+    /// `phase` is in samples, `0..VOICE_BLOCK`. See `render_phase`.
+    pub fn set_render_phase(&mut self, phase: usize) {
+        self.render_phase = phase % VOICE_BLOCK;
+        self.block_pos = VOICE_BLOCK - self.render_phase;
+    }
+}
+
 /// One channel of the mi-drum kit.
 pub type Track = device_core::track::Track<MiSlot, NUM_MACROS>;
 /// A complete mi-drum sound: machine + macros + strip.
@@ -1848,6 +1874,7 @@ impl MiDrumEngine {
             inner: Engine::new_with_kit(&DEFAULT_KIT),
         };
         e.configure_strip();
+        e.stagger_render_phase();
         e
     }
 
@@ -1860,7 +1887,25 @@ impl MiDrumEngine {
         Engine::new_in_place_with_kit(core::ptr::addr_of_mut!((*dst).inner), &DEFAULT_KIT);
         let engine = &mut *dst;
         engine.configure_strip();
+        engine.stagger_render_phase();
         engine
+    }
+
+    /// Spread the six voices' render boundaries evenly across the voice
+    /// block, instead of leaving them all in phase.
+    ///
+    /// Costs nothing: the same work happens, just not all on the same tick.
+    /// It targets the *peak*, which is what the block deadline is set by —
+    /// `6 sounding` peaked at 1.67x its own average with every voice aligned,
+    /// and a block where all six render is the one that misses.
+    fn stagger_render_phase(&mut self) {
+        let n = self.inner.tracks.len();
+        if n == 0 {
+            return;
+        }
+        for (t, track) in self.inner.tracks.iter_mut().enumerate() {
+            track.slot.set_render_phase(t * VOICE_BLOCK / n);
+        }
     }
 
     fn configure_strip(&mut self) {
