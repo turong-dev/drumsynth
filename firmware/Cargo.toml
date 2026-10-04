@@ -21,6 +21,20 @@ mi-drum = ["dep:mi-drum-engine"]
 # button press. Off by default so `./flash.sh bench` still free-runs.
 autoboot = []
 
+# Self-triggering load generator, for measuring headroom without needing a
+# host to play the device.
+#
+# `render slack --drive-hz` drives over USB MIDI, which makes every headroom
+# measurement depend on the USB receive path — and that path is the one with
+# the open bug, so a build that breaks it cannot be measured at all. The
+# `stress` feature makes the firmware retrigger every track on a fixed period
+# of its own, so load is produced on-board and the measurement has no host
+# dependency beyond reading the report back.
+#
+# Deliberately not a runtime control: a CC would arrive over the same broken
+# path.
+stress = []
+
 # Enable the Cortex-M7 L1 instruction and data caches. On by default: with
 # them off, the same engine in OCRAM costs 87.2% of budget instead of 36.0%.
 # TCM bypasses the caches, so this only affects OCRAM and flash. Kept as a

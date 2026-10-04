@@ -391,19 +391,30 @@ pub fn poll(dst: &mut [u8]) -> usize {
         device.bus().configure();
     }
 
-    // Drain whatever the host has queued. `read` returns Ok(0) when there is
-    // nothing, so this loops until the pipe is dry (or `dst` is full).
+    // Drain whatever the host has queued, via a full-size scratch buffer.
     //
-    // The guard is `MAX_READ` of room, not one byte of it: `EndpointOut::read`
-    // fails the whole transfer with `BufferOverflow` if the destination is
-    // smaller than the packet that arrived, rather than filling what it can.
-    // A partially-full `dst` would therefore start losing transfers instead of
-    // deferring them to the next poll.
+    // `EndpointOut::read` fails a transfer with `BufferOverflow` rather than
+    // truncating if the destination is smaller than the packet that arrived,
+    // so the destination handed to it must always be a whole `MAX_READ`. An
+    // earlier version satisfied that by requiring `MAX_READ` of room in
+    // `dst`, which quietly cut the drain to exactly one read per poll once
+    // `MAX_READ` grew to 512 — the endpoint's `ep_out` bit is only refreshed
+    // by a `poll()` that catches `USBSTS.UI`, so packets left behind are not
+    // reliably picked up next time.
+    //
+    // Reading into scratch and copying out keeps the drain unbounded while
+    // still giving the endpoint a full packet's room every time.
+    let mut scratch = [0u8; MAX_READ];
     let mut total = 0;
-    while dst.len() - total >= MAX_READ {
-        match midi.read(&mut dst[total..]) {
+    loop {
+        match midi.read(&mut scratch) {
             Ok(0) => break,
-            Ok(n) => total += n,
+            Ok(n) if total + n <= dst.len() => {
+                dst[total..total + n].copy_from_slice(&scratch[..n]);
+                total += n;
+            }
+            // No room left in `dst`; the rest waits for the next poll.
+            Ok(_) => break,
             Err(_) => break,
         }
     }

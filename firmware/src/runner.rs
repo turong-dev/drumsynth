@@ -102,12 +102,14 @@ where
     let mut parser_grid_uart = GridParser::new();
     #[cfg(feature = "grid")]
     let mut grid = Grid::new();
-    // Sized from the endpoint, not guessed: a high-speed bulk transfer can be
-    // 512 bytes and `EndpointOut::read` rejects a smaller buffer outright.
-    let mut usb_midi_buf = [0u8; crate::usb::MAX_READ];
+    // `usb::poll` reads through its own full-size scratch buffer, so this one
+    // only has to hold what we want to parse in a single pass.
+    let mut usb_midi_buf = [0u8; 256];
 
     // Last slack report, in ms since boot.
     let mut last_report_ms: u32 = 0;
+    #[cfg(feature = "stress")]
+    let mut last_stress_ms: u32 = 0;
     // The report in flight: three control changes, sent one per loop pass
     // until each one lands. `usb::send_midi` returns false when the bulk
     // endpoint is still busy, and the grid's LED feedback keeps it busy
@@ -187,6 +189,21 @@ where
         // Render the next audio block when the ISR asks for it.
         crate::audio::render_next(engine);
 
+        // Self-inflicted load, so headroom can be measured without a host
+        // playing the device. See the `stress` feature in Cargo.toml.
+        #[cfg(feature = "stress")]
+        if now_ms.wrapping_sub(last_stress_ms) >= STRESS_PERIOD_MS {
+            last_stress_ms = now_ms;
+            let n = engine.tracks().len();
+            for t in 0..n {
+                // Release the previous hit before starting the next, or the
+                // gates latch open and the engine sits at a constant cost
+                // that has nothing to do with the trigger rate.
+                engine.release(t);
+                engine.trigger(t, 1.0);
+            }
+        }
+
         // Queue a headroom report once a second, but only once the previous
         // one has fully drained — a half-sent report would pair this second's
         // worst case with last second's counters.
@@ -197,6 +214,14 @@ where
         }
     }
 }
+
+/// Period of the `stress` feature's self-trigger, in ms.
+///
+/// 25 ms is 40 Hz on every track at once, which is what
+/// `render slack --drive-hz 40` produced over MIDI — chosen so the two
+/// methods are directly comparable.
+#[cfg(feature = "stress")]
+const STRESS_PERIOD_MS: u32 = 25;
 
 /// How often the headroom report goes out, in ms.
 const SLACK_REPORT_MS: u32 = 1_000;
