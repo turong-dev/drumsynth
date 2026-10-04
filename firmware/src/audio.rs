@@ -160,6 +160,65 @@ static SAMPLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// write the buffer the ISR is playing.
 static RENDER_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Core clock, for turning cycle counts into a fraction of the block period.
+///
+/// Must match what the firmware actually runs at, or the slack figures lie in
+/// exactly the direction that matters.
+const CORE_HZ: u32 = 600_000_000;
+
+/// Cycles available between one block boundary and the next.
+///
+/// `600 MHz / 48 kHz * 32` = 400,000. This is the real deadline: the main loop
+/// has to finish rendering the next block within it, and everything else the
+/// loop does — USB polling, MIDI parsing, grid LED feedback — comes out of the
+/// same budget, as does the SAI ISR preempting all of it.
+pub const BUDGET_CYCLES: u32 = (CORE_HZ / SAMPLE_RATE_HZ) * BLOCK as u32;
+
+/// `DWT::cycle_count()` sampled at the block boundary, by the ISR, immediately
+/// before it raises [`RENDER_PENDING`].
+static BLOCK_START: AtomicU32 = AtomicU32::new(0);
+
+/// Worst cycles from a block boundary to that block's render completing,
+/// since the last [`take_worst_used`].
+static WORST_USED: AtomicU32 = AtomicU32::new(0);
+
+/// Blocks whose render finished after the deadline had already passed.
+static LATE_BLOCKS: AtomicU32 = AtomicU32::new(0);
+
+/// Blocks rendered since boot, as the denominator for [`LATE_BLOCKS`].
+static BLOCKS_RENDERED: AtomicU32 = AtomicU32::new(0);
+
+/// Worst-case cycles used since the last call, and reset.
+///
+/// This is the measurement the `~70%` ceiling in `BENCHMARKS.md` was always a
+/// stand-in for. `mi-bench` times `engine.process()` alone, with USB
+/// interrupts disabled, nothing on MIDI, no grid and a warm cache — every
+/// term the ceiling was meant to cover is exactly what it leaves out. This
+/// counts from the block boundary to the render finishing, on the real
+/// binary, so it includes the ISR preempting the render, the main loop's USB
+/// and MIDI polling happening *before* the render gets a turn, and whatever
+/// those do to the cache.
+///
+/// Reset-on-read so a caller logging periodically gets a worst-per-window
+/// rather than a worst-since-boot that one startup transient pins forever.
+pub fn take_worst_used() -> u32 {
+    WORST_USED.swap(0, Ordering::Relaxed)
+}
+
+/// Blocks that missed the deadline, since boot.
+///
+/// Distinct from [`UNDERRUNS`]: this counts the render being late, which the
+/// double buffer can absorb once before the FIFO notices. A non-zero value
+/// here with zero underruns is the warning shot.
+pub fn late_blocks() -> u32 {
+    LATE_BLOCKS.load(Ordering::Relaxed)
+}
+
+/// Blocks rendered since boot.
+pub fn blocks_rendered() -> u32 {
+    BLOCKS_RENDERED.load(Ordering::Relaxed)
+}
+
 /// SAI TX FIFO underruns detected since boot.
 ///
 /// `TCSR.FEF` (transmit FIFO error — a W1C status flag) latches whenever the
@@ -460,6 +519,17 @@ where
         (&mut st.left, &mut st.right)
     };
     engine.process(left, right);
+
+    // Close the measurement the ISR opened. `wrapping_sub` because CYCCNT is
+    // free-running 32-bit and rolls over about every 7 seconds at 600 MHz;
+    // the interval being measured is under a millisecond, so a rollover
+    // inside it is not possible and the wrap is the correct arithmetic.
+    let used = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(BLOCK_START.load(Ordering::Relaxed));
+    WORST_USED.fetch_max(used, Ordering::Relaxed);
+    BLOCKS_RENDERED.fetch_add(1, Ordering::Relaxed);
+    if used >= BUDGET_CYCLES {
+        LATE_BLOCKS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The SAI1 FIFO-pump interrupt.
@@ -512,6 +582,13 @@ pub unsafe extern "C" fn SAI1() {
             // the next block. No engine work here — that was the underrun bug.
             st.play_slot = !st.play_slot;
             st.block_pos = 0;
+            // Timestamp *before* raising the flag, so the main loop cannot
+            // observe `RENDER_PENDING` against a stale start. Costs one
+            // register read of CYCCNT in the ISR.
+            BLOCK_START.store(
+                cortex_m::peripheral::DWT::cycle_count(),
+                Ordering::Relaxed,
+            );
             RENDER_PENDING.store(true, Ordering::SeqCst);
             SAMPLE_COUNTER.fetch_add(BLOCK as u32, Ordering::Relaxed);
         }

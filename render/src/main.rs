@@ -43,6 +43,8 @@ mod device;
 /// `midir` for port enumeration and connection.
 #[cfg(feature = "live")]
 mod monitor;
+#[cfg(feature = "live")]
+mod slack;
 
 /// The 8-track kit you get from `DrumEngine::new()`.
 #[derive(Parser)]
@@ -319,6 +321,35 @@ enum Command {
         #[arg(long)]
         multi_out: bool,
     },
+    /// Read the firmware's headroom report off its USB MIDI port.
+    ///
+    /// The real measure of whether the engine fits: cycles from a block
+    /// boundary to that block's render completing, on the real binary, as a
+    /// fraction of the 400,000-cycle block period. `mi-bench` times
+    /// `engine.process()` with USB interrupts off, nothing on MIDI, no grid
+    /// and a warm cache — this includes the SAI ISR preempting the render,
+    /// the main loop's polling, the grid pass and the cache damage all of
+    /// that does. Those are exactly what the informal `~70%` ceiling stands
+    /// in for, and what nothing has ever measured.
+    ///
+    /// Drive the board hard while this runs — every track sounding, MIDI
+    /// streaming in, the grid active — and watch the worst case.
+    #[cfg(feature = "live")]
+    Slack {
+        /// Substring of the MIDI input port name. Defaults to "Teensy", then
+        /// to the first port available.
+        #[arg(short, long)]
+        port: Option<String>,
+        /// Stop after this many seconds instead of running until Ctrl-C.
+        #[arg(short, long)]
+        seconds: Option<u64>,
+        /// Retrigger all six tracks at this rate (Hz) while measuring, rather
+        /// than waiting for someone to play the board. Worst case has to be
+        /// produced, not waited for.
+        #[arg(long)]
+        drive_hz: Option<f32>,
+    },
+
     /// Monitor a MIDI input port, printing each message with a timestamp.
     ///
     /// Useful for checking what a controller or sequencer is sending before
@@ -825,6 +856,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hex,
             realtime,
         } => monitor::run(&port, channel, list, hex, realtime)?,
+
+        #[cfg(feature = "live")]
+        Command::Slack {
+            port,
+            seconds,
+            drive_hz,
+        } => slack::run(port.as_deref(), seconds, drive_hz)?,
     }
 
     Ok(())
