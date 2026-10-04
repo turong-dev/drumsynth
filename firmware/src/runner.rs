@@ -318,7 +318,7 @@ fn slack_report() -> [(u8, u8); 5] {
     [
         (CC_SLACK_PCT, used),
         (CC_PROCESS_PCT, proc),
-        (CC_LATE_BLOCKS, sat(crate::audio::late_blocks())),
+        (CC_LATE_BLOCKS, sat(crate::audio::take_late_blocks())),
         (CC_UNDERRUNS, sat(crate::audio::underruns() as u32)),
         (
             CC_MIDI_RX,

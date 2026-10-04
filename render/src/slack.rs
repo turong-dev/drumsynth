@@ -283,9 +283,6 @@ pub fn run(
     let deadline = seconds.map(|s| std::time::Instant::now() + Duration::from_secs(s));
     let mut acc = Report::default();
     let mut worst_seen = 0u8;
-    // `LATE_BLOCKS` is cumulative since boot, so the flag has to key on the
-    // delta or it latches on forever after one late block.
-    let mut prev_late: Option<u8> = None;
 
     loop {
         if let Some(d) = deadline {
@@ -310,11 +307,8 @@ pub fn run(
                     let of = |v: u8| 100.0 * cyc(v) as f32 / BUDGET_CYCLES as f32;
                     // 127 is the top of the scale, not a reading.
                     let cap = |v: u8| if v >= 127 { " +" } else { "  " };
-                    let late_now = acc
-                        .late
-                        .unwrap()
-                        .saturating_sub(prev_late.unwrap_or(acc.late.unwrap()));
-                    prev_late = acc.late;
+                    // Already per-window; the firmware resets on read.
+                    let late_now = acc.late.unwrap();
                     let flag = if acc.underruns.unwrap() > 0 {
                         "  <-- UNDERRUNS"
                     } else if late_now > 0 {

@@ -221,13 +221,19 @@ pub fn take_worst_process() -> u32 {
     WORST_PROCESS.swap(0, Ordering::Relaxed)
 }
 
-/// Blocks that missed the deadline, since boot.
+/// Blocks that missed the deadline since the last call, and reset.
 ///
 /// Distinct from [`UNDERRUNS`]: this counts the render being late, which the
 /// double buffer can absorb once before the FIFO notices. A non-zero value
 /// here with zero underruns is the warning shot.
-pub fn late_blocks() -> u32 {
-    LATE_BLOCKS.load(Ordering::Relaxed)
+///
+/// Reset-on-read, like [`take_worst_used`], because the report channel is 7
+/// bits: a cumulative count saturates within a minute of any load at all, and
+/// a saturated counter differenced against itself reads as a steady zero —
+/// which is exactly how a run at 110% of budget came back showing no late
+/// blocks whatsoever.
+pub fn take_late_blocks() -> u32 {
+    LATE_BLOCKS.swap(0, Ordering::Relaxed)
 }
 
 /// Blocks rendered since boot.
