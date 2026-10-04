@@ -180,6 +180,27 @@ This counts static occurrences, not executions. Pair it with `benchloop.py`.
 - Sustained machines (Dub Siren, Sweep FX) defeat the per-track idle early-out
   for the whole gesture, so a kit with one idles at "N-1 idle + 1 sounding".
 
+### What the peak/average ratio is made of
+
+The block deadline is set by the **peak**, and `6 sounding` runs at 1.35x its
+own average while `idle` sits at 1.01x. Partly accounted for:
+
+- **Not uneven track costs.** `1 sounding` shows 1.34x — a single voice on its
+  own has essentially the same ratio as six. The kit's voices do differ a lot
+  (Peaks BD 33.6k, SD 38.1k, HH 24.9k, **FM 71.8k**, Plaits 49.2k each, avg
+  cy/block) but that spread is not what makes the peak.
+- **Render alignment: fixed, worth 19%.** Every slot used to start at the same
+  phase so all six crossed their 24-sample render boundary together. Spreading
+  them took peak from 123.9% to 100.3% with the average unchanged. The spacing
+  is provably optimal — see `MiSlot::render_phase`.
+- **Cold cache after `panic()`: ~12 points.** 32 warm-up passes instead of 1
+  drops `6 sounding` peak/avg from 1.35x to 1.19x. Not corrected, for the
+  reason in the rejected table above.
+- **Unexplained: the ~1.34x on a single voice.** It does not move with the
+  voice block size (16 vs 24) or with warm-up, so it is neither render
+  scheduling nor cache warming. Whatever it is, it is the thing to understand
+  before cutting more DSP, because it sets the deadline.
+
 ### mi-drum per-unit costs
 
 Derived from `mi-baseline.json` and the `mi-stages-chain.json` spike deltas, so
@@ -205,6 +226,8 @@ Do not re-try these:
 | change | result |
 |---|---|
 | `opt-level = 2` | +3.1% to +11.7% worse |
+| `VOICE_BLOCK` 24 → 16 | **peak +8 points worse** (100.3% → 108.4%). 16 divides the 32-sample engine block exactly, so every block gets two renders and the 2/1/1 pattern disappears — but 1.5x the render calls costs more than the flattening saves. The average barely moved (74.3% → 73.2%); only the peak got worse. |
+| `mi-bench` warm-up 1 → 32 passes | Drops `6 sounding` peak from 100.3% to 88.3% by excluding the cold-cache blocks after `panic()`. **Rejected as flattery, not accuracy**: hardware measures ~131% worst in continuous operation, so the 1-pass figure is already the *optimistic* one and more warm-up moves the bench further from the truth. |
 | `-C llvm-args=-inline-threshold=500` | +1.0% to +1.4% cycles, +56% ITCM |
 
 ## Recording results
