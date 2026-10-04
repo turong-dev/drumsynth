@@ -2404,8 +2404,13 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    // Re-pinned when the strip's shaping stage changed from `warps::Modulator`
-    // to `core::dsp::shaper`. That is a deliberate change to the sound, not a
+    // Re-pinned again when the modulation bus moved from four
+    // `stages::SegmentGenerator`s to `Lfo` + `AhdEnv`, which also made the
+    // `AD.ATK` map exponential — the linear one put the shipped default at
+    // 51 ms, slower than the transient it shapes.
+    //
+    // Previously re-pinned when the strip's shaping stage changed from
+    // `warps::Modulator` to `core::dsp::shaper`. That is a deliberate change to the sound, not a
     // regression: Warps cost 79,855 cycles per track against a 400,000-cycle
     // budget for the whole engine, and the replacement is roughly a tenth of
     // that. See `docs/warps-vendoring.md`.
@@ -2413,7 +2418,7 @@ mod mi_drum_baseline {
     // Verified identical across five separate processes before pinning — the
     // discipline `1633ca5` established after two uninitialised reads made this
     // digest drift between runs.
-    const BASELINE_DIGEST: u64 = 0xc70a_121c_591c_db5d;
+    const BASELINE_DIGEST: u64 = 0x7148_33fe_8b82_ac2d;
 
     /// One test, one render, deliberately.
     ///

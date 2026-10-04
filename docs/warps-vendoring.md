@@ -20,9 +20,49 @@ Measured before and after, six tracks sounding, avg cycles per block:
 | ITCM | 89.8% | 85.2% | |
 | OCRAM | 93.9% | 89.2% | |
 
-Still over budget — the strip has simply stopped being the dominant term. What
-remains is the voices, the four always-on Stages generators, and the `powf` in
-the Ripples cutoff loop.
+The four `stages::SegmentGenerator`s went the same way immediately after, for
+the same reason — see "The modulation bus" below. Together:
+
+| | Warps + Stages | house shaper + house bus | |
+|---|---|---|---|
+| `6 sounding` | 818,952 (204.7%) | **327,369 (81.8%)** | 2.50x |
+| `6 + MOD on` | 1,078,046 (269.5%) | **396,931 (99.2%)** | 2.72x |
+| ITCM | 89.8% | **81.1%** | -22,768 B |
+| OCRAM | 93.9% | **70.2%** | -124,272 B |
+
+What remains over budget is the voices and the `powf` in the Ripples cutoff
+loop, which is still per sample, per track and ungated.
+
+## The modulation bus
+
+The strip held four `stages::SegmentGenerator`s — 4,184 bytes each, 16,736 per
+track, ~98 KB across the kit — and this is everything it ever asked of them:
+
+```rust
+lfo1.set_parameters(rate, 0.5);          // one looping ramp, shape fixed at 0.5
+lfo2.set_parameters(rate + 0.12, 0.5);
+env1.configure_ad(attack, decay);        // two ramps, shape fixed at 0.5
+env2.configure_ad(attack, decay);
+```
+
+Two free-running LFOs and two AD envelopes, with the shape parameter hardcoded
+at every call site. `core::dsp::lfo::Lfo` and `core::dsp::ahd::AhdEnv` are
+**48 bytes each** and offer more than was reachable: six waveshapes against the
+one, and a real decay curve through `set_decay_coeff`.
+
+Two things worth knowing about the swap:
+
+- **`Lfo` is block-rate.** Writing its value flat across a block steps the
+  modulation once every 32 samples, which at the top of the rate range (~19 Hz,
+  1.3% of a cycle per block) zippers audibly on a resonant cutoff. The buffers
+  ramp between block values instead — one add per sample.
+- **`AD.ATK` had to be remapped.** Stages took these as normalised *segment
+  parameters* and applied its own curve, so the strip's linear
+  `0.001 + 0.999 * macro` was a passthrough, not a time map. Fed straight to
+  `AhdEnv` as seconds it put the shipped default at 51 ms — slower than the
+  transient it is supposed to shape, which
+  `ad_filter_depth_needs_the_filter_closed_first` caught immediately. Now
+  exponential over 0.5 ms .. 1 s, default ~0.7 ms.
 
 Everything below is measured on hardware via `tools/benchloop.py --bin
 mi-bench`, 600 MHz, 32-sample block, 400,000 cycles of budget. Figures marked

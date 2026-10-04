@@ -53,9 +53,9 @@ use device_core::macros::{
 };
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
-use mi_dsp::stages::{
-    Stages as ModStages, GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING, SEGMENT_ALT,
-};
+use device_core::dsp::ahd::{AhdEnv, HoldMode};
+use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
+use mi_dsp::stages::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use device_core::dsp::Shaper;
 use mi_dsp::warps::{OscShape, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
 
@@ -809,10 +809,25 @@ pub struct MiSlot {
     /// voice droning under the kit.
     osc_env: f32,
     ripples: Svf,
-    lfo1: ModStages,
-    lfo2: ModStages,
-    env1: ModStages,
-    env2: ModStages,
+    /// The modulation bus: two free-running LFOs and two AD envelopes.
+    ///
+    /// These were four `stages::SegmentGenerator`s — 4,184 bytes each, 16,736
+    /// per track, ~98 KB across the kit — configured as one looping ramp and
+    /// one two-ramp AD, with the shape parameter hardcoded to 0.5 at every
+    /// call site. `Lfo` and `AhdEnv` are 48 bytes each and give more: six
+    /// waveshapes against the one that was reachable, and a real decay curve
+    /// through `set_decay_coeff`. See `docs/warps-vendoring.md` for how the
+    /// Stages cost came to be carried in the budget unmeasured.
+    lfo1: Lfo,
+    lfo2: Lfo,
+    env1: AhdEnv,
+    env2: AhdEnv,
+    /// Previous block's LFO values, so the per-sample buffers can ramp rather
+    /// than step. `Lfo` is block-rate by design; at the top of the range
+    /// (~19 Hz) a block is 1.3% of a cycle, which stepped straight into a
+    /// resonant filter's cutoff is an audible zipper.
+    lfo1_prev: f32,
+    lfo2_prev: f32,
     segment: [f32; BLOCK],
     lfo1_out: [f32; BLOCK],
     lfo2_out: [f32; BLOCK],
@@ -929,17 +944,52 @@ impl MiSlot {
         }
     }
 
-    /// Set up the four Stages segment generators as 2 LFOs + 2 AD envelopes.
+    /// Set up the modulation bus: 2 free-running LFOs + 2 AD envelopes.
+    ///
+    /// The envelopes hold for zero time, so `Timed` hold degenerates to a
+    /// straight attack-decay — the shape the Stages pair was configured for
+    /// and the only one the strip ever asked for.
     fn configure_stages(&mut self) {
-        // Two looping LFOs. SEGMENT_ALT is an alternating oscillator; rate and
-        // shape are updated from macros in set_macros.
+        self.env1.set_hold_mode(HoldMode::Timed);
+        self.env2.set_hold_mode(HoldMode::Timed);
+        self.apply_mod_params();
+    }
+
+    /// Push the LFO rates and envelope times onto the bus. Control rate.
+    fn apply_mod_params(&mut self) {
+        // Preserve the rate curve the Stages mapping produced, because it is
+        // the one the kits were voiced against: a segment's `primary` ran
+        // through `SemitonesToRatio(96 * (primary - 0.5)) * 2.044 Hz`, and the
+        // strip fed it `-0.05 + 0.95 * LFO.RATE`. Folding the two together
+        // gives `2.044 * 2^(7.6 * rate - 4.4)` Hz directly — ~0.1 Hz at 0,
+        // ~1.35 Hz at centre, ~19 Hz at full.
+        //
+        // `exp2_approx` rather than `powf`: this is control rate, but the
+        // Ripples cutoff loop is a standing reminder of how a libm call gets
+        // into an audio path, and a few cents of error on an LFO rate is not
+        // a quantity anyone can perceive.
+        let hz1 = 2.044 * dsp::fast::exp2_approx(7.6 * self.lfo_rate - 4.4);
+        // LFO 2 ran at `primary + 0.12`, which is `96 * 0.12 = 11.52`
+        // semitones — very nearly an octave, not the fifth the old comment
+        // claimed. Kept as the same ratio so the pairing is unchanged.
+        let hz2 = hz1 * 1.9449;
+
+        // Triangle, because it is what the Stages alternating segment was
+        // closest to and it is cleanly bipolar. `ModDest::None` and unit
+        // depth: routing and depth are the strip's own, applied per target in
+        // `process_audio_strip`, so the LFO must hand over its raw value.
         self.lfo1
-            .configure_single(SEGMENT_ALT, true, false, 0.5, 0.5);
+            .set_params(hz1, LfoWave::Triangle, LfoMode::Free, 1.0, ModDest::None, 0.0);
         self.lfo2
-            .configure_single(SEGMENT_ALT, true, false, 0.5, 0.5);
-        // Two triggered AD envelopes.
-        self.env1.configure_ad(self.ad_attack, self.ad_decay);
-        self.env2.configure_ad(self.ad_attack, self.ad_decay);
+            .set_params(hz2, LfoWave::Triangle, LfoMode::Free, 1.0, ModDest::None, 0.25);
+
+        // `ad_attack` and `ad_decay` are already seconds (0.001..1.0 and
+        // 0.01..5.0). Stages took them as normalised segment parameters and
+        // mapped them to something its own header called "seconds-ish", so
+        // this is a straightening as well as a swap.
+        self.env1.set_params(self.ad_attack, 0.0, self.ad_decay);
+        self.env2
+            .set_params(self.ad_attack * 0.8, 0.0, self.ad_decay * 1.2);
     }
 
     /// Map the `RIP.CUT` macro onto a cutoff in Hz, `20 Hz` at 0 to the
@@ -1113,10 +1163,12 @@ impl Slot<NUM_MACROS> for MiSlot {
             warps_osc: WarpsOscillator::new(SAMPLE_RATE),
             osc_env: 0.0,
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
-            lfo1: ModStages::new(),
-            lfo2: ModStages::new(),
-            env1: ModStages::new(),
-            env2: ModStages::new(),
+            lfo1: Lfo::new(),
+            lfo2: Lfo::new(),
+            env1: AhdEnv::new(),
+            env2: AhdEnv::new(),
+            lfo1_prev: 0.0,
+            lfo2_prev: 0.0,
             segment: [0.0f32; BLOCK],
             lfo1_out: [0.0f32; BLOCK],
             lfo2_out: [0.0f32; BLOCK],
@@ -1224,10 +1276,12 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).warps_osc).write(WarpsOscillator::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).osc_env).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
-            core::ptr::addr_of_mut!((*ptr).lfo1).write(ModStages::new());
-            core::ptr::addr_of_mut!((*ptr).lfo2).write(ModStages::new());
-            core::ptr::addr_of_mut!((*ptr).env1).write(ModStages::new());
-            core::ptr::addr_of_mut!((*ptr).env2).write(ModStages::new());
+            core::ptr::addr_of_mut!((*ptr).lfo1).write(Lfo::new());
+            core::ptr::addr_of_mut!((*ptr).lfo2).write(Lfo::new());
+            core::ptr::addr_of_mut!((*ptr).env1).write(AhdEnv::new());
+            core::ptr::addr_of_mut!((*ptr).env2).write(AhdEnv::new());
+            core::ptr::addr_of_mut!((*ptr).lfo1_prev).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).lfo2_prev).write(0.0);
             core::ptr::addr_of_mut!((*ptr).segment).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).lfo1_out).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).lfo2_out).write([0.0f32; BLOCK]);
@@ -1320,25 +1374,26 @@ impl Slot<NUM_MACROS> for MiSlot {
 
         self.lfo_rate = macros[SLOT_LFO_RATE];
         self.lfo_depth = macros[SLOT_LFO_DEPTH];
-        self.ad_attack = 0.001 + 0.999 * macros[SLOT_AD_ATTACK];
+        // Exponential, not linear, now that these are real seconds.
+        //
+        // Stages took them as normalised segment parameters and applied its
+        // own curve, so the linear `0.001 + 0.999 * macro` they used to go
+        // through was never a time map — it was a parameter passthrough. Fed
+        // straight to `AhdEnv` it is a bad knob: the whole useful range for a
+        // drum's modulation attack is under 10 ms, which linear buries in the
+        // bottom 1% of travel, and the shipped default of 0.05 would land at
+        // 51 ms — slower than the transient it is supposed to shape.
+        //
+        // 0.5 ms .. 1 s puts the default at ~0.7 ms and spaces the knob the
+        // way a time control is expected to feel.
+        self.ad_attack = 0.0005 * dsp::fast::exp2_approx(11.0 * macros[SLOT_AD_ATTACK]);
         self.ad_decay = 0.01 + 4.99 * macros[SLOT_AD_DECAY];
         self.lfo_filter_depth = macros[SLOT_LFO_FILTER_DEPTH];
         self.lfo_warps_depth = macros[SLOT_LFO_WARPS_DEPTH];
         self.ad_filter_depth = macros[SLOT_AD_FILTER_DEPTH];
         self.ad_warps_depth = macros[SLOT_AD_WARPS_DEPTH];
 
-        // Update Stages parameters from macros. A Stages segment's `primary`
-        // is a normalised rate: the free-running path maps it as
-        // `SemitonesToRatio(96 * (primary - 0.5)) * 2.044 Hz`, so the useful
-        // LFO band is roughly -0.05..0.9 rather than the 0..1 the parameter
-        // nominally takes. This maps the knob onto ~0.1 Hz .. ~19 Hz, with
-        // centre (0.5) at ~1.4 Hz. LFO 2 runs a fifth above LFO 1.
-        let lfo_primary = -0.05 + 0.95 * self.lfo_rate;
-        self.lfo1.set_parameters(lfo_primary, 0.5);
-        self.lfo2.set_parameters(lfo_primary + 0.12, 0.5);
-        self.env1.configure_ad(self.ad_attack, self.ad_decay);
-        self.env2
-            .configure_ad(self.ad_attack * 0.8, self.ad_decay * 1.2);
+        self.apply_mod_params();
     }
 
     fn trigger(&mut self, _velocity: f32) {
@@ -1386,6 +1441,11 @@ impl Slot<NUM_MACROS> for MiSlot {
         // The ADAA states hold the previous sample and its antiderivative; a
         // new note must not difference against the last one's tail.
         self.shaper.reset();
+        // The envelopes are the voice's own; the LFOs free-run and are
+        // deliberately left alone, so a reset does not phase-align every
+        // track's modulation to the same instant.
+        self.env1.reset();
+        self.env2.reset();
         self.osc_env = 0.0;
         self.trigger_pending = false;
         self.gate_open = false;
@@ -1425,19 +1485,30 @@ impl Slot<NUM_MACROS> for MiSlot {
     fn process_audio_strip(&mut self, buf: &mut [f32], _start: usize) {
         let n = buf.len();
 
-        // Render the four Stages modulators into per-segment buffers. The LFOs
-        // must free-run: a gate array would clock them from the gates and hold
-        // them at a constant. `SEGMENT_ALT` already emits bipolar output, so
-        // the LFO buffers need no recentring; the AD envelopes are unipolar.
-        let mut gate = [GATE_LOW; BLOCK];
+        // Render the modulation bus into per-sample buffers. The LFOs are
+        // bipolar and free-running; the AD envelopes are unipolar and fire on
+        // the note.
         if self.env_trigger_pending {
-            gate[0] = GATE_RISING;
+            self.env1.trigger(1.0);
+            self.env2.trigger(1.0);
             self.env_trigger_pending = false;
         }
-        self.lfo1.process_free_running(&mut self.lfo1_out[..n]);
-        self.lfo2.process_free_running(&mut self.lfo2_out[..n]);
-        self.env1.process(&gate[..n], &mut self.env1_out[..n]);
-        self.env2.process(&gate[..n], &mut self.env2_out[..n]);
+
+        // `Lfo` advances a whole block at a time, so each buffer ramps from
+        // last block's value to this one rather than stepping to it. One add
+        // per sample, and it keeps a fast LFO off the Ripples cutoff as a
+        // staircase.
+        self.lfo1.tick_block();
+        self.lfo2.tick_block();
+        ramp_into(&mut self.lfo1_out[..n], self.lfo1_prev, self.lfo1.value());
+        ramp_into(&mut self.lfo2_out[..n], self.lfo2_prev, self.lfo2.value());
+        self.lfo1_prev = self.lfo1.value();
+        self.lfo2_prev = self.lfo2.value();
+
+        for i in 0..n {
+            self.env1_out[i] = self.env1.tick();
+            self.env2_out[i] = self.env2.tick();
+        }
 
         // Modulate Warps timbre once per Warps-sized chunk (Warps interpolates
         // parameters internally over the chunk). Ripples cutoff is updated per
@@ -1566,6 +1637,26 @@ impl Slot<NUM_MACROS> for MiSlot {
 
         // The segment is done with; the next one refills from zero.
         self.aux_filled = 0;
+    }
+}
+
+/// Fill `out` with a linear ramp from `from` to `to`.
+///
+/// `Lfo` produces one value per block. Writing that value across the block
+/// would step the modulation once every 32 samples, which a resonant filter
+/// cutoff turns into a zipper at the top of the rate range. Ramping costs one
+/// add per sample and removes the question.
+#[inline]
+fn ramp_into(out: &mut [f32], from: f32, to: f32) {
+    let n = out.len();
+    if n == 0 {
+        return;
+    }
+    let step = (to - from) / n as f32;
+    let mut v = from;
+    for s in out.iter_mut() {
+        v += step;
+        *s = v;
     }
 }
 

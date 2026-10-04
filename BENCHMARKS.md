@@ -137,9 +137,11 @@ Warps, Ripples, and Stages objects also live in the engine struct.
 > **This section used to end "so OCRAM is the binding region for mi-drum, not
 > cycles." That was wrong, and it is why Phase 14 shipped at 290% of budget
 > without anyone noticing.** The work optimised for *capacity* — does it fit in
-> 512 KB — and the thing that actually bit was cycles. Memory is tight (ITCM
-> 85.2%, OCRAM 89.2% after Warps came out) but the cycle budget is **exceeded**,
-> which is a different category of problem. See `docs/warps-vendoring.md`.
+> 512 KB — and the thing that actually bit was cycles. Retiring Warps and the
+> Stages modulation bus for in-house equivalents took `6 sounding` from 205% of
+> budget to 81.8% *and* OCRAM from 93.9% to 70.2%, so the two were never in
+> tension — the vendored modules were simply expensive in both. See
+> `docs/warps-vendoring.md`.
 
 It is also close to the ceiling: 474,864 bytes measured against a 500 KB test
 cap, and 268,560 of that is track-independent overhead — of which `SendFx` is
@@ -187,7 +189,7 @@ the next estimate does not have to re-derive them. Peak cycles, block 32:
 |---|---|---|
 | whole engine, every track silent | ~29,700 | `idle` scenario |
 | one Plaits voice | ~38,900 | (`6 sounding` − `idle`) / 6 |
-| one Stages segment | **unmeasured** | the ~2,100 that used to sit here came from `6 + LPG`, and the spike `Lpg` is **not** a Stages segment — it is a 64 B `plaits::LPGEnvelope`+`LowPassGate` in `mi_dsp::spike_stages`, against a 4,184 B `stages::SegmentGenerator`. Different C++ class, 65x the size. Nothing has measured a real segment. |
+| one Stages segment | **never measured, now removed** | the ~2,100 that used to sit here came from `6 + LPG`, and the spike `Lpg` is **not** a Stages segment — it is a 64 B `plaits::LPGEnvelope`+`LowPassGate` in `mi_dsp::spike_stages`, against a 4,184 B `stages::SegmentGenerator`. Different C++ class, 65x the size. Nothing has measured a real segment. |
 | one Overdrive spike stage | ~2,550 | (`6 + DRIVE` − `6 sounding`) / 6 |
 | `Resonator` per track | ~32,000 | (`6 + RESON` − `6 sounding`) / 6 |
 | `Resonator` as a single send | ~19,200 | `6 + RES SND` − `6 sounding` |
