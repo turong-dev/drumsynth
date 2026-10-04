@@ -343,6 +343,10 @@ enum Command {
         /// Stop after this many seconds instead of running until Ctrl-C.
         #[arg(short, long)]
         seconds: Option<u64>,
+        /// Send the reboot-to-HalfKay command and exit, so the next flash
+        /// needs no button press. `mi-drum` has no `autoboot`.
+        #[arg(long)]
+        reboot: bool,
         /// Retrigger all six tracks at this rate (Hz) while measuring, rather
         /// than waiting for someone to play the board. Worst case has to be
         /// produced, not waited for.
@@ -862,7 +866,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             seconds,
             drive_hz,
-        } => slack::run(port.as_deref(), seconds, drive_hz)?,
+            reboot,
+        } => {
+            if reboot {
+                slack::reboot(port.as_deref())?
+            } else {
+                slack::run(port.as_deref(), seconds, drive_hz)?
+            }
+        }
     }
 
     Ok(())

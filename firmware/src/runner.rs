@@ -112,8 +112,8 @@ where
     // constantly, so a fire-and-forget send is simply dropped — which is how
     // the first version of this measured nothing at all while the board was
     // visibly transmitting. `REPORT_IDLE` means nothing is pending.
-    const REPORT_IDLE: usize = 3;
-    let mut report: [(u8, u8); 3] = [(0, 0); 3];
+    const REPORT_IDLE: usize = 5;
+    let mut report: [(u8, u8); 5] = [(0, 0); 5];
     let mut report_idx: usize = REPORT_IDLE;
 
     loop {
@@ -131,6 +131,22 @@ where
         // USB MIDI: the host sends 4-byte USB MIDI event packets. Channel 16
         // is reserved for the Monome Grid; feed it to the grid parser as well.
         let n = crate::usb::poll(&mut usb_midi_buf);
+
+        // Reboot-to-bootloader command, checked on the raw packets before
+        // either parser sees them.
+        //
+        // `mi-drum` has no `autoboot`, so every reflash otherwise needs
+        // someone to physically press the button — which makes iterating on
+        // anything measured *on this binary* a two-person job. One reserved
+        // CC fixes that: `bkpt #251` is what the MKL02 bootloader chip
+        // watches for, the same mechanism `bench.rs` uses to make the cycle
+        // bench hands-free.
+        if n > 0 {
+            MIDI_RX.fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
+        }
+        if reboot_requested(&usb_midi_buf[..n]) {
+            reboot_to_bootloader();
+        }
         let mut i = 0;
         while i < n {
             for &b in &usb_midi_buf[i + 1..i + 4] {
@@ -190,12 +206,61 @@ const SLACK_REPORT_MS: u32 = 1_000;
 /// the grid already set that precedent.
 const SLACK_CHANNEL: u8 = 14;
 
-/// CC carrying worst-case cycles used, as 0..127 of the block budget.
+/// Cycles represented by one step of a 7-bit report value.
+///
+/// Shared with `render/src/slack.rs`, which multiplies back.
+pub const CYCLES_PER_STEP: u32 = 8_192;
+
+/// CC carrying worst-case cycles from block boundary to render complete.
 const CC_SLACK_PCT: u8 = 20;
 /// CC carrying late blocks since boot, saturating.
 const CC_LATE_BLOCKS: u8 = 21;
 /// CC carrying SAI TX FIFO underruns since boot, saturating.
 const CC_UNDERRUNS: u8 = 22;
+/// CC carrying worst `engine.process()` alone, as 0..127 of the block budget.
+///
+/// Directly comparable to what `mi-bench` prints, which is the point: the gap
+/// between this and [`CC_SLACK_PCT`] is everything the bench cannot see.
+const CC_PROCESS_PCT: u8 = 23;
+
+/// CC carrying USB MIDI bytes received since boot, saturating.
+///
+/// Diagnostic: the host-side driver and the `MidiParser` both check out on
+/// the host, so if this stays at zero while the host is streaming notes, the
+/// firmware's USB MIDI *receive* path is where they are being lost — which
+/// nothing has ever exercised, the grid being the only other consumer.
+const CC_MIDI_RX: u8 = 24;
+
+/// Total USB MIDI bytes `usb::poll` has handed back since boot.
+static MIDI_RX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// CC that asks the board to drop into the HalfKay bootloader.
+const CC_REBOOT: u8 = 119;
+
+/// Did a USB-MIDI packet in `buf` carry the reboot command?
+///
+/// Packets are 4 bytes: a cable/CIN header then the MIDI status and data.
+/// Checked raw rather than through `MidiParser` so it cannot be swallowed by
+/// running-status handling or by the grid parser consuming the bytes first.
+fn reboot_requested(buf: &[u8]) -> bool {
+    buf.chunks_exact(4).any(|p| {
+        p[1] == 0xB0 | SLACK_CHANNEL && p[2] == CC_REBOOT && p[3] >= 64
+    })
+}
+
+/// Drop into the Teensy 4 HalfKay bootloader.
+///
+/// The MKL02 chip watches for `bkpt #251`. Spins rather than returning: a
+/// fall-through would look like a reboot that worked and then came back.
+fn reboot_to_bootloader() -> ! {
+    #[allow(unsafe_code)]
+    unsafe {
+        core::arch::asm!("bkpt #251");
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 /// Build the headroom measurement as three control changes.
 ///
@@ -209,18 +274,29 @@ const CC_UNDERRUNS: u8 = 22;
 /// 7 bits is 0.8% of budget per step, which is ample: the question these
 /// answer is whether the worst case sits nearer 70% or 90%, not what it is to
 /// a tenth of a percent.
-fn slack_report() -> [(u8, u8); 3] {
-    let used = crate::audio::take_worst_used();
-    // `* 127 / BUDGET` in u64 so the multiply cannot overflow before the
-    // divide — `used` can legitimately exceed the budget, which is the
-    // interesting case and exactly when a u32 product would wrap.
-    let pct = ((used as u64 * 127) / crate::audio::BUDGET_CYCLES as u64).min(127) as u8;
+fn slack_report() -> [(u8, u8); 5] {
+    // Cycles in units of `CYCLES_PER_STEP`, not a percentage of budget.
+    //
+    // A 7-bit percentage saturates at 100%, which is useless here: the
+    // question under load is *how far* over the deadline the render goes, and
+    // the first version answered "at least 100%" for everything from a near
+    // miss to a threefold overrun. At 8,192 cycles a step, 127 steps covers
+    // 1,040,384 cycles — 260% of the block budget — at about 2% resolution,
+    // which is far finer than any decision this informs.
+    let step = |v: u32| -> u8 { (v / CYCLES_PER_STEP).min(127) as u8 };
+    let used = step(crate::audio::take_worst_used());
+    let proc = step(crate::audio::take_worst_process());
     let sat = |v: u32| -> u8 { v.min(127) as u8 };
     // Control change: 0x0B is the USB-MIDI CIN for one.
     [
-        (CC_SLACK_PCT, pct),
+        (CC_SLACK_PCT, used),
+        (CC_PROCESS_PCT, proc),
         (CC_LATE_BLOCKS, sat(crate::audio::late_blocks())),
         (CC_UNDERRUNS, sat(crate::audio::underruns() as u32)),
+        (
+            CC_MIDI_RX,
+            sat(MIDI_RX.load(core::sync::atomic::Ordering::Relaxed)),
+        ),
     ]
 }
 

@@ -182,6 +182,17 @@ static BLOCK_START: AtomicU32 = AtomicU32::new(0);
 /// since the last [`take_worst_used`].
 static WORST_USED: AtomicU32 = AtomicU32::new(0);
 
+/// Worst `engine.process()` alone, since the last [`take_worst_process`].
+///
+/// The companion to [`WORST_USED`], and the one that tells the two apart.
+/// `WORST_USED` is boundary-to-complete, so it carries the render *plus*
+/// everything the main loop did before reaching it; this is the render by
+/// itself, directly comparable to what `mi-bench` reports. If the two move
+/// together the loop overhead is small; if this one moves and the other does
+/// not, the boundary timestamp is wrong; if neither moves under load, nothing
+/// is reaching the voices.
+static WORST_PROCESS: AtomicU32 = AtomicU32::new(0);
+
 /// Blocks whose render finished after the deadline had already passed.
 static LATE_BLOCKS: AtomicU32 = AtomicU32::new(0);
 
@@ -203,6 +214,11 @@ static BLOCKS_RENDERED: AtomicU32 = AtomicU32::new(0);
 /// rather than a worst-since-boot that one startup transient pins forever.
 pub fn take_worst_used() -> u32 {
     WORST_USED.swap(0, Ordering::Relaxed)
+}
+
+/// Worst `engine.process()` alone since the last call, and reset.
+pub fn take_worst_process() -> u32 {
+    WORST_PROCESS.swap(0, Ordering::Relaxed)
 }
 
 /// Blocks that missed the deadline, since boot.
@@ -506,6 +522,18 @@ where
         return;
     }
 
+    // Snapshot the boundary *now*, before rendering.
+    //
+    // Reading it afterwards is wrong in exactly the case that matters: a
+    // render that overruns its block period is still running when the ISR
+    // hits the next boundary and overwrites `BLOCK_START`, so the subtraction
+    // would measure "time since the most recent boundary" — a small number —
+    // precisely when the real answer is "more than one block period". The
+    // first version did that, and the symptom was the boundary measure
+    // reading just under 100% while the render-only measure was pegged at its
+    // cap, which is arithmetically impossible since one contains the other.
+    let started_at = BLOCK_START.load(Ordering::Relaxed);
+
     // SAFETY: the main loop is the only context that touches the engine and
     // the render slots; the ISR reads only the slot `play_slot` points at
     // (flipped *before* RENDER_PENDING was raised), so the slot chosen below
@@ -518,13 +546,18 @@ where
     } else {
         (&mut st.left, &mut st.right)
     };
+    let t0 = cortex_m::peripheral::DWT::cycle_count();
     engine.process(left, right);
+    WORST_PROCESS.fetch_max(
+        cortex_m::peripheral::DWT::cycle_count().wrapping_sub(t0),
+        Ordering::Relaxed,
+    );
 
     // Close the measurement the ISR opened. `wrapping_sub` because CYCCNT is
     // free-running 32-bit and rolls over about every 7 seconds at 600 MHz;
     // the interval being measured is under a millisecond, so a rollover
     // inside it is not possible and the wrap is the correct arithmetic.
-    let used = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(BLOCK_START.load(Ordering::Relaxed));
+    let used = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(started_at);
     WORST_USED.fetch_max(used, Ordering::Relaxed);
     BLOCKS_RENDERED.fetch_add(1, Ordering::Relaxed);
     if used >= BUDGET_CYCLES {

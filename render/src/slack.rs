@@ -43,13 +43,49 @@ const SLACK_CHANNEL: u8 = 14;
 const CC_SLACK_PCT: u8 = 20;
 const CC_LATE_BLOCKS: u8 = 21;
 const CC_UNDERRUNS: u8 = 22;
+const CC_PROCESS_PCT: u8 = 23;
+/// Asks the board to drop into HalfKay so the next flash needs no button.
+const CC_MIDI_RX: u8 = 24;
+const CC_REBOOT: u8 = 119;
+
+/// Must match `firmware/src/runner.rs::CYCLES_PER_STEP`.
+const CYCLES_PER_STEP: u32 = 8_192;
+/// Must match `firmware/src/audio.rs::BUDGET_CYCLES`.
+const BUDGET_CYCLES: u32 = (600_000_000 / 48_000) * 32;
+
+/// Send the reboot command and return.
+pub fn reboot(port_filter: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let out = MidiOutput::new("drumsynth reboot")?;
+    let ports = out.ports();
+    let wanted = port_filter.unwrap_or("drumkit");
+    let chosen = ports
+        .iter()
+        .find(|p| {
+            out.port_name(p)
+                .map(|n| n.to_lowercase().contains(&wanted.to_lowercase()))
+                .unwrap_or(false)
+        })
+        .or_else(|| ports.first())
+        .ok_or("no MIDI output port")?
+        .clone();
+    let name = out.port_name(&chosen)?;
+    let mut conn = out.connect(&chosen, "reboot")?;
+    conn.send(&[0xB0 | SLACK_CHANNEL, CC_REBOOT, 127])?;
+    println!("sent reboot-to-HalfKay on '{name}' — the board is ready to flash");
+    // The board vanishes off the bus the moment it takes the bkpt; give
+    // CoreMIDI a beat to push the packet before the connection is dropped.
+    std::thread::sleep(Duration::from_millis(200));
+    Ok(())
+}
 
 /// One decoded report.
 #[derive(Default, Clone, Copy)]
 struct Report {
     pct: Option<u8>,
+    proc_pct: Option<u8>,
     late: Option<u8>,
     underruns: Option<u8>,
+    midi_rx: Option<u8>,
 }
 
 impl Report {
@@ -57,7 +93,7 @@ impl Report {
     /// are sent back to back, but USB MIDI packs several into a transfer and
     /// nothing guarantees the host hands them over together.
     fn complete(&self) -> bool {
-        self.pct.is_some() && self.late.is_some() && self.underruns.is_some()
+        self.pct.is_some() && self.proc_pct.is_some() && self.late.is_some() && self.underruns.is_some() && self.midi_rx.is_some()
     }
 }
 
@@ -193,8 +229,11 @@ pub fn run(
         }
     };
     println!("budget is 400,000 cycles per block; the informal ceiling is ~70%\n");
-    println!("  {:>8}  {:>12}  {:>10}  {:>9}", "worst", "of budget", "late blks", "underruns");
-    println!("  {}", "-".repeat(46));
+    println!(
+        "  {:>11}  {:>11}  {:>9}  {:>9}",
+        "boundary→done", "process only", "late blks", "midi rx"
+    );
+    println!("  {}", "-".repeat(52));
 
     let deadline = seconds.map(|s| std::time::Instant::now() + Duration::from_secs(s));
     let mut acc = Report::default();
@@ -210,29 +249,36 @@ pub fn run(
             Ok((cc, value)) => {
                 match cc {
                     CC_SLACK_PCT => acc.pct = Some(value),
+                    CC_PROCESS_PCT => acc.proc_pct = Some(value),
                     CC_LATE_BLOCKS => acc.late = Some(value),
                     CC_UNDERRUNS => acc.underruns = Some(value),
+                    CC_MIDI_RX => acc.midi_rx = Some(value),
                     _ => {}
                 }
                 if acc.complete() {
                     let pct = acc.pct.unwrap();
                     worst_seen = worst_seen.max(pct);
-                    // 7 bits across the budget: each step is 1/127 of it.
-                    let cycles = (pct as u32 * crate::slack::BUDGET_CYCLES) / 127;
-                    let of_budget = 100.0 * pct as f32 / 127.0;
+                    let cyc = |v: u8| v as u32 * CYCLES_PER_STEP;
+                    let of = |v: u8| 100.0 * cyc(v) as f32 / BUDGET_CYCLES as f32;
+                    // 127 is the top of the scale, not a reading.
+                    let cap = |v: u8| if v >= 127 { " +" } else { "  " };
                     let flag = if acc.underruns.unwrap() > 0 {
                         "  <-- UNDERRUNS"
                     } else if acc.late.unwrap() > 0 {
                         "  <-- LATE"
-                    } else if of_budget > 70.0 {
+                    } else if of(pct) > 70.0 {
                         "  <-- over 70%"
                     } else {
                         ""
                     };
                     println!(
-                        "  {cycles:>8}  {of_budget:>11.1}%  {:>10}  {:>9}{flag}",
+                        "  {:>9.1}%{}  {:>9.1}%{}  {:>9}  {:>9}{flag}",
+                        of(pct),
+                        cap(pct),
+                        of(acc.proc_pct.unwrap()),
+                        cap(acc.proc_pct.unwrap()),
                         acc.late.unwrap(),
-                        acc.underruns.unwrap()
+                        acc.midi_rx.unwrap()
                     );
                     acc = Report::default();
                 }
@@ -242,9 +288,10 @@ pub fn run(
         }
     }
 
-    println!("\nworst over the run: {:.1}% of budget", 100.0 * worst_seen as f32 / 127.0);
+    println!(
+        "\nworst over the run: {:.1}% of budget{}",
+        100.0 * (worst_seen as u32 * CYCLES_PER_STEP) as f32 / BUDGET_CYCLES as f32,
+        if worst_seen >= 127 { " (scale capped — the real figure is higher)" } else { "" }
+    );
     Ok(())
 }
-
-/// Must match `firmware/src/audio.rs::BUDGET_CYCLES`.
-pub const BUDGET_CYCLES: u32 = (600_000_000 / 48_000) * 32;
