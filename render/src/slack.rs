@@ -70,11 +70,21 @@ pub fn reboot(port_filter: Option<&str>) -> Result<(), Box<dyn Error>> {
         .clone();
     let name = out.port_name(&chosen)?;
     let mut conn = out.connect(&chosen, "reboot")?;
-    conn.send(&[0xB0 | SLACK_CHANNEL, CC_REBOOT, 127])?;
-    println!("sent reboot-to-HalfKay on '{name}' — the board is ready to flash");
-    // The board vanishes off the bus the moment it takes the bkpt; give
-    // CoreMIDI a beat to push the packet before the connection is dropped.
-    std::thread::sleep(Duration::from_millis(200));
+    // Sent repeatedly, not once.
+    //
+    // A single CC in isolation was unreliable: note traffic from `--drive-hz`
+    // always arrives (the firmware's `midi rx` counter climbs with it), but
+    // one packet after an idle bus sometimes does not take, and on one
+    // occasion it was delivered only when the device next re-enumerated —
+    // which looks exactly like a board that reboots itself on startup for no
+    // reason. Ten packets over a second costs nothing and removes the
+    // ambiguity; if the board is still up afterwards, it genuinely did not
+    // receive them.
+    for _ in 0..10 {
+        conn.send(&[0xB0 | SLACK_CHANNEL, CC_REBOOT, 127])?;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    println!("sent reboot-to-HalfKay on '{name}' — the board should be ready to flash");
     Ok(())
 }
 
@@ -134,7 +144,23 @@ fn drive(port_filter: Option<&str>, hz: f32) -> Result<DriveHandle, Box<dyn Erro
                 // Note 60 is each track's default pitch.
                 let _ = conn.send(&[0x90 | ch, 60, 100]);
             }
-            std::thread::sleep(period);
+            // Hold for half the period, then release.
+            //
+            // Without the note-off the gates never close: the first version
+            // of this sent note-ons only, every voice latched on, and the
+            // engine stayed at 43% of budget indefinitely *after* the driver
+            // stopped. That is not a measurement, it is a stuck instrument —
+            // and it made idle and driven readings indistinguishable once the
+            // board had been driven once.
+            std::thread::sleep(period / 2);
+            for ch in 0..TRACKS {
+                let _ = conn.send(&[0x80 | ch, 60, 0]);
+            }
+            std::thread::sleep(period / 2);
+        }
+        // Leave nothing latched behind.
+        for ch in 0..TRACKS {
+            let _ = conn.send(&[0x80 | ch, 60, 0]);
         }
     });
     Ok(DriveHandle {
@@ -233,11 +259,14 @@ pub fn run(
         "  {:>11}  {:>11}  {:>9}  {:>9}",
         "boundary→done", "process only", "late blks", "midi rx"
     );
-    println!("  {}", "-".repeat(52));
+    println!("  {}", "-".repeat(62));
 
     let deadline = seconds.map(|s| std::time::Instant::now() + Duration::from_secs(s));
     let mut acc = Report::default();
     let mut worst_seen = 0u8;
+    // `LATE_BLOCKS` is cumulative since boot, so the flag has to key on the
+    // delta or it latches on forever after one late block.
+    let mut prev_late: Option<u8> = None;
 
     loop {
         if let Some(d) = deadline {
@@ -262,22 +291,28 @@ pub fn run(
                     let of = |v: u8| 100.0 * cyc(v) as f32 / BUDGET_CYCLES as f32;
                     // 127 is the top of the scale, not a reading.
                     let cap = |v: u8| if v >= 127 { " +" } else { "  " };
+                    let late_now = acc
+                        .late
+                        .unwrap()
+                        .saturating_sub(prev_late.unwrap_or(acc.late.unwrap()));
+                    prev_late = acc.late;
                     let flag = if acc.underruns.unwrap() > 0 {
                         "  <-- UNDERRUNS"
-                    } else if acc.late.unwrap() > 0 {
-                        "  <-- LATE"
+                    } else if late_now > 0 {
+                        "  <-- MISSED DEADLINE"
                     } else if of(pct) > 70.0 {
                         "  <-- over 70%"
                     } else {
                         ""
                     };
                     println!(
-                        "  {:>9.1}%{}  {:>9.1}%{}  {:>9}  {:>9}{flag}",
+                        "  {:>9.1}%{}  {:>9.1}%{}  {:>9}  {:>9}  {:>7}{flag}",
                         of(pct),
                         cap(pct),
                         of(acc.proc_pct.unwrap()),
                         cap(acc.proc_pct.unwrap()),
-                        acc.late.unwrap(),
+                        late_now,
+                        acc.underruns.unwrap(),
                         acc.midi_rx.unwrap()
                     );
                     acc = Report::default();
