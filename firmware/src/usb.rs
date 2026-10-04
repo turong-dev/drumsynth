@@ -42,11 +42,20 @@ use usb_device::{LangID, Result, UsbDirection};
 
 // ---- static USB objects ---------------------------------------------------
 
-// Two 64-byte bulk endpoints + EP0 control + slack. This is deliberately
-// sized for the MIDI class only. If a CDC class joins this bus its bulk
-// endpoints are 512 bytes and the buffer must grow to ~1280 (see
-// imxrt-log's `usbd.rs`, which documents the panic you will get otherwise).
-const EP_MEMORY_BYTES: usize = 64 * 2 + 64 * 2 + 128;
+// Two 512-byte bulk endpoints + EP0 control + slack.
+//
+// 512 because this bus runs at [`Speed::High`], where it is the *only* legal
+// bulk max-packet size — 64 is a full-speed value. imxrt-log says so in as
+// many words ("if IMXRT_LOG_USB_SPEED=HIGH, then IMXRT_LOG_USB_BULK_MPS must
+// be 512") and asserts it at compile time; this file mirrors that stack and
+// did not mirror this.
+//
+// It was 64, and the symptom was specific and quiet: the device enumerated,
+// the host accepted every packet it sent, and the firmware received roughly
+// one before the OUT endpoint stopped delivering. Outbound traffic was
+// unaffected, so the board looked alive — the grid's LED stream kept
+// flowing — while MIDI input had never worked at all.
+const EP_MEMORY_BYTES: usize = 512 * 2 + 64 * 2 + 128;
 static EP_MEMORY: EndpointMemory<EP_MEMORY_BYTES> = EndpointMemory::new();
 
 // Endpoints are counted in pairs (OUT + IN per index). 8 = EP0 control +
@@ -89,7 +98,17 @@ const EXTERNAL: u8 = 0x02;
 ///
 /// MIDI carries 4-byte event packets; 64 keeps latency low and is what every
 /// other MIDI class uses.
-const MAX_PACKET_SIZE: u16 = 64;
+/// Bulk endpoint max packet size.
+///
+/// Must be 512 while the bus is [`Speed::High`]; see [`EP_MEMORY_BYTES`].
+/// A MIDI event is 4 bytes, so transfers are short packets either way — the
+/// number is a bus-level requirement, not a throughput choice.
+const MAX_PACKET_SIZE: u16 = 512;
+
+/// A host transfer can carry up to [`MAX_PACKET_SIZE`] bytes, and
+/// `EndpointOut::read` fails with `BufferOverflow` rather than truncating if
+/// handed something smaller. Callers size their read buffer with this.
+pub const MAX_READ: usize = MAX_PACKET_SIZE as usize;
 
 /// A USB MIDI 1.0 device class.
 ///
@@ -374,8 +393,14 @@ pub fn poll(dst: &mut [u8]) -> usize {
 
     // Drain whatever the host has queued. `read` returns Ok(0) when there is
     // nothing, so this loops until the pipe is dry (or `dst` is full).
+    //
+    // The guard is `MAX_READ` of room, not one byte of it: `EndpointOut::read`
+    // fails the whole transfer with `BufferOverflow` if the destination is
+    // smaller than the packet that arrived, rather than filling what it can.
+    // A partially-full `dst` would therefore start losing transfers instead of
+    // deferring them to the next poll.
     let mut total = 0;
-    while total < dst.len() {
+    while dst.len() - total >= MAX_READ {
         match midi.read(&mut dst[total..]) {
             Ok(0) => break,
             Ok(n) => total += n,

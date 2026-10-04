@@ -102,7 +102,9 @@ where
     let mut parser_grid_uart = GridParser::new();
     #[cfg(feature = "grid")]
     let mut grid = Grid::new();
-    let mut usb_midi_buf = [0u8; 64];
+    // Sized from the endpoint, not guessed: a high-speed bulk transfer can be
+    // 512 bytes and `EndpointOut::read` rejects a smaller buffer outright.
+    let mut usb_midi_buf = [0u8; crate::usb::MAX_READ];
 
     // Last slack report, in ms since boot.
     let mut last_report_ms: u32 = 0;
