@@ -135,14 +135,24 @@ fn drive(port_filter: Option<&str>, hz: f32) -> Result<DriveHandle, Box<dyn Erro
 
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
+    // Counted, not discarded: a driver that silently fails to send looks
+    // exactly like a firmware that silently fails to receive.
+    let sent = Arc::new(core::sync::atomic::AtomicU32::new(0));
+    let errs = Arc::new(core::sync::atomic::AtomicU32::new(0));
+    let (sent_c, errs_c) = (sent.clone(), errs.clone());
     let period = Duration::from_secs_f32(1.0 / hz.max(1.0));
     let join = std::thread::spawn(move || {
+        let (sent, errs) = (sent_c, errs_c);
         // One channel per track, which is the mapping `runner.rs` uses.
         const TRACKS: u8 = 6;
         while !flag.load(Ordering::Relaxed) {
             for ch in 0..TRACKS {
                 // Note 60 is each track's default pitch.
-                let _ = conn.send(&[0x90 | ch, 60, 100]);
+                if conn.send(&[0x90 | ch, 60, 100]).is_err() {
+                    errs.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    sent.fetch_add(1, Ordering::Relaxed);
+                }
             }
             // Hold for half the period, then release.
             //
@@ -167,6 +177,8 @@ fn drive(port_filter: Option<&str>, hz: f32) -> Result<DriveHandle, Box<dyn Erro
         stop,
         join: Some(join),
         name,
+        sent,
+        errs,
     })
 }
 
@@ -174,6 +186,8 @@ struct DriveHandle {
     stop: Arc<AtomicBool>,
     join: Option<std::thread::JoinHandle<()>>,
     name: String,
+    sent: Arc<core::sync::atomic::AtomicU32>,
+    errs: Arc<core::sync::atomic::AtomicU32>,
 }
 
 impl Drop for DriveHandle {
@@ -182,6 +196,11 @@ impl Drop for DriveHandle {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+        println!(
+            "driver: {} note-ons sent, {} send errors",
+            self.sent.load(Ordering::Relaxed),
+            self.errs.load(Ordering::Relaxed)
+        );
     }
 }
 
