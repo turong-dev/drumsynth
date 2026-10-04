@@ -2404,7 +2404,14 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    // Re-pinned again when the modulation bus moved from four
+    // Re-pinned again when the per-sample `libm::powf(2.0, x)` in the Ripples
+    // cutoff loop became `fast::exp2_approx`. Measured against the `powf`
+    // render, the difference is **59.9 dB below the signal** (peak sample
+    // delta 7.5e-3) — an approximation error on a filter cutoff, not added
+    // noise, in exchange for a call that cost 1,214 cycles per sample per
+    // track.
+    //
+    // Re-pinned before that when the modulation bus moved from four
     // `stages::SegmentGenerator`s to `Lfo` + `AhdEnv`, which also made the
     // `AD.ATK` map exponential — the linear one put the shipped default at
     // 51 ms, slower than the transient it shapes.
@@ -2418,7 +2425,7 @@ mod mi_drum_baseline {
     // Verified identical across five separate processes before pinning — the
     // discipline `1633ca5` established after two uninitialised reads made this
     // digest drift between runs.
-    const BASELINE_DIGEST: u64 = 0x7148_33fe_8b82_ac2d;
+    const BASELINE_DIGEST: u64 = 0xfdcd_64b0_d89f_6cfd;
 
     /// One test, one render, deliberately.
     ///

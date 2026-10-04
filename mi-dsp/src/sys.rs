@@ -33,19 +33,6 @@ pub const MI_PEAKS_MODEL_HIGH_HAT: i32 = 2;
 /// FM drum model tag.
 pub const MI_PEAKS_MODEL_FM_DRUM: i32 = 3;
 
-/// Bytes required for the C++ `stages::SegmentGenerator` object.
-pub const MI_STAGES_STORAGE_SIZE: usize = 4184;
-/// Required alignment for the C++ `stages::SegmentGenerator` object.
-pub const MI_STAGES_STORAGE_ALIGN: usize = 8;
-/// Segment type constants matching `stages::segment::Type`.
-pub const MI_STAGES_SEGMENT_RAMP: i32 = 0;
-/// Step segment type.
-pub const MI_STAGES_SEGMENT_STEP: i32 = 1;
-/// Hold segment type.
-pub const MI_STAGES_SEGMENT_HOLD: i32 = 2;
-/// Alt segment type (oscillator/LFO).
-pub const MI_STAGES_SEGMENT_ALT: i32 = 3;
-
 /// Bytes required for the C++ `clouds::GranularProcessor` object.
 pub const MI_CLOUDS_STORAGE_SIZE: usize = 9096;
 /// Required alignment for the C++ `clouds::GranularProcessor` object.
@@ -206,29 +193,6 @@ extern "C" {
     pub fn mi_warps_set_bypass(storage: *mut c_void, bypass: c_int);
 
     // Stages
-    pub fn mi_stages_init(storage: *mut c_void);
-    pub fn mi_stages_configure_single(
-        storage: *mut c_void,
-        segment_type: i32,
-        loop_: i32,
-        has_trigger: i32,
-        primary: f32,
-        secondary: f32,
-    );
-    pub fn mi_stages_configure_ad(storage: *mut c_void, attack: f32, decay: f32);
-    pub fn mi_stages_set_segment_parameters(
-        storage: *mut c_void,
-        index: i32,
-        primary: f32,
-        secondary: f32,
-    );
-    pub fn mi_stages_trigger(storage: *mut c_void);
-    pub fn mi_stages_process(
-        storage: *mut c_void,
-        gate_flags: *const u8,
-        out: *mut f32,
-        size: usize,
-    );
 
     // Peaks
     pub fn mi_peaks_init(storage: *mut c_void, model: i32);

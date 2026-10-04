@@ -30,8 +30,18 @@ the same reason — see "The modulation bus" below. Together:
 | ITCM | 89.8% | **81.1%** | -22,768 B |
 | OCRAM | 93.9% | **70.2%** | -124,272 B |
 
-What remains over budget is the voices and the `powf` in the Ripples cutoff
-loop, which is still per sample, per track and ungated.
+The `powf` in the Ripples cutoff loop went next — `fast::exp2_approx`, plus a
+short-circuit for the case where no route is modulating the cutoff, which is
+the shipped default. With all three landed:
+
+| | Warps + Stages | now |
+|---|---|---|
+| `6 sounding` | 818,952 (204.7%) | **296,564 (74.1%)** |
+| `6 + MOD on` | 1,078,046 (269.5%) | **342,925 (85.7%)** |
+
+Against the informal ~70% gate that is within a few points on the typical case
+and still over on the worst. What remains is the voices themselves — and the
+gate, which is a number nobody has measured (see `BENCHMARKS.md`).
 
 ## The modulation bus
 

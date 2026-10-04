@@ -209,7 +209,7 @@ pub const SILENCE_F32: f32 = 3.0e-3;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stages::{GATE_HIGH, GATE_LOW, GATE_RISING};
+    use crate::gate::{GATE_HIGH, GATE_LOW, GATE_RISING};
     use std::vec::Vec;
 
     /// Render one hit — rising gate on the first sample, low after — and return

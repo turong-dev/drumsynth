@@ -94,7 +94,6 @@ fn main() {
     // Plaits voice shim and the voice implementation it wraps.
     build.file(manifest_dir.join("src/mi_dsp_shim.cc"));
     build.file(manifest_dir.join("src/mi_warps_shim.cc"));
-    build.file(manifest_dir.join("src/mi_stages_shim.cc"));
     build.file(manifest_dir.join("src/mi_clouds_shim.cc"));
 
     // Engine set 1.
@@ -179,10 +178,13 @@ fn main() {
     }
     build.file(vendor.join("warps/resources.cc"));
 
-    // Stages segment generator / LFO / envelope.
-    build.file(vendor.join("stages/segment_generator.cc"));
-    build.file(vendor.join("stages/resources.cc"));
-    build.file(vendor.join("tides2/ramp/ramp_extractor.cc"));
+    // Stages is no longer built. `MiSlot` ran four `SegmentGenerator`s as two
+    // LFOs and two AD envelopes with the shape parameter hardcoded at every
+    // call site, at 4,184 bytes each; `core::dsp::lfo::Lfo` and
+    // `core::dsp::ahd::AhdEnv` do the same job in 48. The vendored tree stays
+    // in `vendor/stages` (and `vendor/tides2`, which only the segment
+    // generator's ramp extractor needed) against a future use, but nothing
+    // links it today. See `docs/warps-vendoring.md`.
 
     // Clouds texture synthesizer.
     build.file(vendor.join("clouds/resources.cc"));
@@ -199,7 +201,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/mi_dsp_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_peaks_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_warps_shim.cc");
-    println!("cargo:rerun-if-changed=src/mi_stages_shim.cc");
     println!("cargo:rerun-if-changed=src/mi_clouds_shim.cc");
     println!("cargo:rerun-if-changed=include/mi_dsp_shim.h");
     println!("cargo:rerun-if-changed=vendor");
