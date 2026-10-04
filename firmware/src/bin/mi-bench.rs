@@ -32,6 +32,45 @@
 //! 6 + FX      worst case with delay + reverb, the realistic ceiling
 //! ```
 //!
+//! # Decomposing the strip
+//!
+//! `6 sounding` is 290% of budget, and PLAN.md's per-unit table cannot say
+//! which term is responsible: of its four strip terms, only the Stages
+//! segment was ever measured. These subtract one component at a time, each
+//! using a knob that already ships, so a delta is that component's whole
+//! cost at six tracks:
+//!
+//! ```text
+//! 1 sounding  }  scaling curve. Per-track cost is flat if the engine is
+//! 2 sounding  }  compute-bound and rises if it is cache-bound.
+//! 4 sounding     tracks 0-3 = the four Peaks drums of DEFAULT_KIT, so
+//!                `6 - 4` is the two Plaits voices and `(4 - idle) / 4`
+//!                is one Peaks voice with the strip on it
+//! 6 no SHAPE     WARP.DRV = 0 is a bypass detent, so
+//!                `6 sounding - 6 no SHAPE` is the shaping stage's cost
+//! ```
+//!
+//! **What is still not reachable from here.** The four Stages generators
+//! (2 LFO + 2 AD) run unconditionally in `MiSlot`, every block, every track,
+//! whatever the route depths are — see `lib.rs`'s
+//! `process_free_running`/`process` calls. No macro gates them, so no
+//! scenario here can subtract them, and their cost stays folded into
+//! `6 sounding`.
+//!
+//! That is worth more than a measurement gap. Every route depth defaults to
+//! 0, so a stock kit already runs four segment generators per track and
+//! multiplies all four outputs by zero. An early-out when every depth is
+//! zero would be both the missing instrumentation and a real saving, but it
+//! is an engine change rather than a bench one.
+//!
+//! One number this harness has already pinned without a new scenario: the
+//! `libm::powf` in the Ripples cutoff loop. It is per sample, per track,
+//! ungated, and `6 + MOD on` − `6 + MOD off` isolates it at **407,257
+//! cycles per block — 102% of the whole budget**, 2,121 cycles across each
+//! of 192 calls. At depth 0 the exponent is 0 and libm takes its fast path,
+//! which is why `6 + MOD off` and `6 sounding` agree and why the difference
+//! is that clean.
+//!
 //! # What this establishes
 //!
 //! Phase 13.5's gate ("bench under ~70%") was never runnable, because no
@@ -78,7 +117,7 @@ use teensy4_panic as _;
 use cortex_m::peripheral::DWT;
 use mi_drum_engine::{
     DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH, SLOT_FILT_0,
-    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_WARPS_DEPTH, BLOCK, SAMPLE_RATE, TRACKS,
+    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_HOLD, BLOCK, SAMPLE_RATE, TRACKS,
 };
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -238,6 +277,52 @@ fn main() -> ! {
         let all = measure(engine, &mut left, &mut right, TRACKS);
         report("6 sounding", all, &mut poller, &mut pit);
 
+        // --- Decomposition: where the strip's cycles actually go ---
+        //
+        // `6 sounding` is 4.4x its September value and 290% of budget, and
+        // PLAN.md's per-unit table cannot say which term is responsible
+        // because three of its four strip terms were never measured. These
+        // scenarios subtract one thing at a time using knobs that already
+        // exist, so each delta is a component's whole cost at six tracks.
+
+        // Scaling curve. If the engine were compute-bound, per-track cost
+        // would be flat in the track count. It is not: 3 tracks cost
+        // ~148,700 each and 6 cost ~188,200 each, +26% for identical work.
+        // One track's slot state is 33,328 B (Plaits 12,288 + Warps 4,112 +
+        // four Stages 16,736 + Peaks 196) against a 32 KB L1 D-cache, so a
+        // single track already evicts itself and the engine streams from
+        // OCRAM. These two fill in the bottom of that curve: if 1 and 2 are
+        // much cheaper per track than 3 and 6, the cliff is locality and no
+        // amount of per-unit arithmetic will predict it.
+        let one = measure(engine, &mut left, &mut right, 1);
+        report("1 sounding", one, &mut poller, &mut pit);
+
+        let two = measure(engine, &mut left, &mut right, 2);
+        report("2 sounding", two, &mut poller, &mut pit);
+
+        // Tracks 0-3 of `DEFAULT_KIT` are the four Peaks drums; 4 and 5 are
+        // Plaits (String, Modal). `retrigger` takes the first `n` tracks, so
+        // `6 sounding - 4 sounding` is exactly the two Plaits voices and
+        // `(4 sounding - idle) / 4` is one Peaks voice carrying the full
+        // strip. PLAN.md estimated a Peaks voice at 5,000-15,000 cycles
+        // against a *measured* 38,900 for Plaits, and that estimate is what
+        // the six-track shape was signed off on.
+        let peaks_only = measure(engine, &mut left, &mut right, 4);
+        report("4 sounding", peaks_only, &mut poller, &mut pit);
+
+        // The shaping stage, subtracted. `WARP.DRV = 0` is a discrete bypass
+        // detent rather than a gain of zero: `warps_drive_from_macro` returns
+        // `(true, 0.0)` and `Shaper::process_dual` copies its input and
+        // returns. So `6 sounding - 6 no SHAPE` is the stage's whole cost,
+        // with the strip's own scaffolding -- the dry copy, the modulator
+        // source, the `WARP.MIX` blend -- left exactly where it was.
+        //
+        // This is the number that retired Warps. Measured the same way,
+        // `warps::Modulator` cost 79,855 cycles per track; `PLAN.md` had
+        // estimated 2,000-5,000. See `docs/warps-vendoring.md`.
+        let no_shape = measure_without_shaper(engine, &mut left, &mut right);
+        report("6 no SHAPE", no_shape, &mut poller, &mut pit);
+
         // Sends explicitly zeroed inside, so this measures FX-on-silence
         // regardless of what ran before it — `eff_send_*` survives
         // `panic()`/`reset()` and would otherwise leak between scenarios.
@@ -253,19 +338,15 @@ fn main() -> ! {
         // ~70% ceiling. Each is the 6-track worst case with one stage
         // selected on every track, so the delta against `6 sounding` is the
         // whole cost of that stage times six.
-        let lpg = measure_with_stage(engine, &mut left, &mut right, WARPS_ALGO_LPG);
-        report("6 + LPG   ", lpg, &mut poller, &mut pit);
-
-        let od = measure_with_stage(engine, &mut left, &mut right, WARPS_ALGO_OVERDRIVE);
-        report("6 + DRIVE ", od, &mut poller, &mut pit);
-
-        let res = measure_with_stage(engine, &mut left, &mut right, WARPS_ALGO_RESONATOR);
-        report("6 + RESON ", res, &mut poller, &mut pit);
-
-        // Heaviest Warps algorithm setting. If this does not fit, the fixed
-        // strip is too expensive.
-        let chain = measure_with_stage(engine, &mut left, &mut right, WARPS_ALGO_LPG_DRIVE);
-        report("6 + WARP+DR", chain, &mut poller, &mut pit);
+        // Warps algorithm sweep: one point per integral entry of the xmod
+        // table, against `6 no WARPS` as the floor. The question these answer
+        // is whether a cheaper algorithm is worth reaching for -- and how much
+        // of Warps' cost an algorithm choice can reach at all, given the
+        // oversampling underneath it is the same whichever entry is selected.
+        for &(label, value) in &WARPS_ALGO_SWEEP {
+            let s = measure_with_stage(engine, &mut left, &mut right, value);
+            report(label, s, &mut poller, &mut pit);
+        }
 
         // The resonator as a *shared send*, which is what it was always meant
         // to be: one instance fed by the tracks, not one per track. The
@@ -358,6 +439,24 @@ fn measure(
     right: &mut [f32; BLOCK],
     retrigger_count: usize,
 ) -> Stats {
+    // Silence whatever the previous scenario left behind, so this one
+    // measures its own `retrigger_count` and not someone else's tail.
+    //
+    // Without this the scenarios contaminate each other, and the Phase 14
+    // gate work made it much worse: a triggered voice now holds its gate open
+    // until a note-off or the watchdog, so a track that `retrigger` stops
+    // touching keeps sounding into the next scenario instead of decaying out
+    // of it. The first run of the decomposition scenarios caught it -- the
+    // track count went 3 < 2 < 1 in cost, and `1 sounding` had a peak/avg
+    // ratio of 1.95x against 1.10-1.28x everywhere else, which is what a
+    // scenario inheriting five ringing voices looks like.
+    //
+    // `panic()` resets every track and the send-FX tanks. Macros, strip
+    // params and `eff_send_*` all survive it (`Track::reset` touches voice
+    // state only), so the scenarios that set those before calling in here are
+    // unaffected -- see `measure_fx_only`, which already relied on that.
+    engine.panic();
+
     // One untimed pass so the branch predictor and caches are warm. Matters
     // more here than on the drum device: the first pass also forces each
     // Plaits voice's first block render.
@@ -416,14 +515,25 @@ fn measure_with_fx(
     stats
 }
 
-/// Warps algorithm values (SLOT_FILT_0). Phase 14.2 replaced the spike stage
-/// selector with the Warps algorithm macro, so these now exercise different
-/// cross-modulation algorithms rather than LPG/overdrive/resonator stages.
+/// The restore value for `SLOT_FILT_0` — also the shipped default, and (see
+/// below) the most expensive entry in the table.
 const WARPS_ALGO_NONE: f32 = 0.0;
-const WARPS_ALGO_LPG: f32 = 0.25;
-const WARPS_ALGO_OVERDRIVE: f32 = 0.45;
-const WARPS_ALGO_RESONATOR: f32 = 0.65;
-const WARPS_ALGO_LPG_DRIVE: f32 = 0.85;
+
+/// One macro value per entry of the shaper's algorithm table.
+///
+/// `Shaper::set_parameters` scales the macro across `ALGORITHM_COUNT` and
+/// blends adjacent entries, so `i / (COUNT - 1)` lands on entry `i`.
+///
+/// These used to be six points named after Warps' `xmod_table_` pairs, which
+/// stopped meaning anything twice over: 14.2 had already repointed
+/// `SLOT_FILT_0` from the spike stage selector at the algorithm, and the
+/// stage is no longer Warps. Four entries now, named for what they are.
+const WARPS_ALGO_SWEEP: [(&str, f32); 4] = [
+    ("ALG0 xfade ", 0.0),       // equal-power blend of the two inputs
+    ("ALG1 fold  ", 1.0 / 3.0), // ADAA sine folder
+    ("ALG2 diode ", 2.0 / 3.0), // ADAA diode ring, Warps' analog model
+    ("ALG3 ring  ", 1.0),       // digital ring, band-limited modulator
+];
 
 /// Worst case with one Warps algorithm selected on every track.
 ///
@@ -448,6 +558,39 @@ fn measure_with_stage(
 
     stats
 }
+
+/// Worst case with the shaping stage bypassed on every track.
+///
+/// `SLOT_STRIP_HOLD` is `WARP.DRV` on this device -- the alias
+/// `SLOT_WARPS_DRIVE` is private to `mi-drum-engine`, the same reason the
+/// algorithm scenarios above reach for `SLOT_FILT_0` rather than
+/// `SLOT_WARPS_ALGO`.
+///
+/// Restores the default drive (0.2, `WARPS_DRIVE_INFO`) on the way out, so a
+/// later scenario in the same loop iteration does not silently measure a
+/// bypassed strip -- the discipline `measure_with_stage` applies to its
+/// algorithm and `measure_with_fx` to its sends.
+fn measure_without_shaper(
+    engine: &mut MiDrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+) -> Stats {
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_macro(SLOT_STRIP_HOLD, WARPS_DRIVE_BYPASS);
+    }
+
+    let stats = measure(engine, left, right, TRACKS);
+
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_macro(SLOT_STRIP_HOLD, WARPS_DRIVE_DEFAULT);
+    }
+
+    stats
+}
+
+/// `WARP.DRV` values: the bypass detent, and the shipped default.
+const WARPS_DRIVE_BYPASS: f32 = 0.0;
+const WARPS_DRIVE_DEFAULT: f32 = 0.2;
 
 /// Worst case with the Stages modulation bus driven at `depth` on every track.
 ///

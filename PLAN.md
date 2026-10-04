@@ -248,7 +248,10 @@ Restated for the shipped shape — 4 Peaks + 2 Plaits, 2 LFOs + 2 AD envelopes
 per track, plus Clouds on the send bus. Per-unit figures marked *measured* are
 derived from committed bench JSON, not guessed: a Plaits voice from
 `6 sounding − idle` in `mi-stages-chain.json`, one Stages segment from the
-`6 + LPG` delta (LPG *is* a Stages segment, so it is a direct proxy).
+`6 + LPG` delta. **That proxy is invalid** — the spike `Lpg` is a 64 B
+`plaits::LPGEnvelope`+`LowPassGate` from `mi_dsp::spike_stages`, not a 4,184 B
+`stages::SegmentGenerator`. The 24 x 2,100 = 50,400 row below is therefore the
+largest line in this table and rests on nothing. See `docs/warps-vendoring.md`.
 
 | Component | Count | Per-unit | Subtotal |
 |---|---|---|---|

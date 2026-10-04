@@ -1,0 +1,178 @@
+{
+  "budget": 400000,
+  "label": "mi-phase14-algo",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "1 sounding",
+    "2 sounding",
+    "4 sounding",
+    "6 no WARPS",
+    "6 FX idle",
+    "6 + FX",
+    "ALG0 xfd/fld",
+    "ALG1 fld/arm",
+    "ALG2 arm/drm",
+    "ALG3 drm/xor",
+    "ALG4 xor/cmp",
+    "ALG5 cmp/nop",
+    "6 + RES SND",
+    "6 + MOD off",
+    "6 + MOD on"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "1 sounding": {
+      "avg": 109439,
+      "cy_per_frame": 4078,
+      "pct": 32.6,
+      "peak": 130500
+    },
+    "2 sounding": {
+      "avg": 230554,
+      "cy_per_frame": 10006,
+      "pct": 80.1,
+      "peak": 320217
+    },
+    "3 sounding": {
+      "avg": 307317,
+      "cy_per_frame": 12507,
+      "pct": 100.1,
+      "peak": 400225
+    },
+    "4 sounding": {
+      "avg": 519562,
+      "cy_per_frame": 20401,
+      "pct": 163.2,
+      "peak": 652849
+    },
+    "6 + FX": {
+      "avg": 805425,
+      "cy_per_frame": 30435,
+      "pct": 243.5,
+      "peak": 973940
+    },
+    "6 + MOD off": {
+      "avg": 820659,
+      "cy_per_frame": 31445,
+      "pct": 251.6,
+      "peak": 1006241
+    },
+    "6 + MOD on": {
+      "avg": 1065711,
+      "cy_per_frame": 44606,
+      "pct": 356.9,
+      "peak": 1427405
+    },
+    "6 + RES SND": {
+      "avg": 849393,
+      "cy_per_frame": 32815,
+      "pct": 262.5,
+      "peak": 1050093
+    },
+    "6 FX idle": {
+      "avg": 806123,
+      "cy_per_frame": 30867,
+      "pct": 246.9,
+      "peak": 987746
+    },
+    "6 no WARPS": {
+      "avg": 329085,
+      "cy_per_frame": 15535,
+      "pct": 124.3,
+      "peak": 497138
+    },
+    "6 sounding": {
+      "avg": 790840,
+      "cy_per_frame": 29849,
+      "pct": 238.8,
+      "peak": 955168
+    },
+    "ALG0 xfd/fld": {
+      "avg": 822186,
+      "cy_per_frame": 31777,
+      "pct": 254.2,
+      "peak": 1016867
+    },
+    "ALG1 fld/arm": {
+      "avg": 876058,
+      "cy_per_frame": 32641,
+      "pct": 261.1,
+      "peak": 1044513
+    },
+    "ALG2 arm/drm": {
+      "avg": 645654,
+      "cy_per_frame": 24438,
+      "pct": 195.5,
+      "peak": 782018
+    },
+    "ALG3 drm/xor": {
+      "avg": 593357,
+      "cy_per_frame": 23020,
+      "pct": 184.2,
+      "peak": 736654
+    },
+    "ALG4 xor/cmp": {
+      "avg": 612668,
+      "cy_per_frame": 22827,
+      "pct": 182.6,
+      "peak": 730466
+    },
+    "ALG5 cmp/nop": {
+      "avg": 592801,
+      "cy_per_frame": 22465,
+      "pct": 179.7,
+      "peak": 718908
+    },
+    "idle": {
+      "avg": 30651,
+      "cy_per_frame": 968,
+      "pct": 7.8,
+      "peak": 31005
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165344
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 188636
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 232828
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 492128
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2752,
+      ".debug_abbrev": 89788,
+      ".debug_aranges": 5216,
+      ".debug_frame": 17984,
+      ".debug_info": 1432536,
+      ".debug_line": 430126,
+      ".debug_loc": 189816,
+      ".debug_loclists": 381851,
+      ".debug_ranges": 93472,
+      ".debug_rnglists": 84309,
+      ".debug_str": 533187,
+      ".heap": 16384,
+      ".rodata": 180444,
+      ".stack": 16384,
+      ".text": 232828,
+      ".uninit": 475744,
+      ".vector_table": 696
+    }
+  }
+}

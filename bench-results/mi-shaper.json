@@ -1,0 +1,164 @@
+{
+  "budget": 400000,
+  "label": "mi-shaper",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "1 sounding",
+    "2 sounding",
+    "4 sounding",
+    "6 no SHAPE",
+    "6 FX idle",
+    "6 + FX",
+    "ALG0 xfade",
+    "ALG1 fold",
+    "ALG2 diode",
+    "ALG3 ring",
+    "6 + RES SND",
+    "6 + MOD off",
+    "6 + MOD on"
+  ],
+  "ports_before": [],
+  "scenarios": {
+    "1 sounding": {
+      "avg": 84248,
+      "cy_per_frame": 3304,
+      "pct": 26.4,
+      "peak": 105757
+    },
+    "2 sounding": {
+      "avg": 138593,
+      "cy_per_frame": 4953,
+      "pct": 39.6,
+      "peak": 158506
+    },
+    "3 sounding": {
+      "avg": 183486,
+      "cy_per_frame": 7452,
+      "pct": 59.6,
+      "peak": 238488
+    },
+    "4 sounding": {
+      "avg": 281460,
+      "cy_per_frame": 13020,
+      "pct": 104.2,
+      "peak": 416642
+    },
+    "6 + FX": {
+      "avg": 427974,
+      "cy_per_frame": 16167,
+      "pct": 129.3,
+      "peak": 517357
+    },
+    "6 + MOD off": {
+      "avg": 424751,
+      "cy_per_frame": 17106,
+      "pct": 136.9,
+      "peak": 547416
+    },
+    "6 + MOD on": {
+      "avg": 490323,
+      "cy_per_frame": 18069,
+      "pct": 144.6,
+      "peak": 578239
+    },
+    "6 + RES SND": {
+      "avg": 445569,
+      "cy_per_frame": 17002,
+      "pct": 136.0,
+      "peak": 544070
+    },
+    "6 FX idle": {
+      "avg": 428631,
+      "cy_per_frame": 16707,
+      "pct": 133.7,
+      "peak": 534628
+    },
+    "6 no SHAPE": {
+      "avg": 339536,
+      "cy_per_frame": 14268,
+      "pct": 114.1,
+      "peak": 456589
+    },
+    "6 sounding": {
+      "avg": 418846,
+      "cy_per_frame": 19026,
+      "pct": 152.2,
+      "peak": 608854
+    },
+    "ALG0 xfade": {
+      "avg": 422736,
+      "cy_per_frame": 17268,
+      "pct": 138.1,
+      "peak": 552591
+    },
+    "ALG1 fold": {
+      "avg": 424134,
+      "cy_per_frame": 16113,
+      "pct": 128.9,
+      "peak": 515646
+    },
+    "ALG2 diode": {
+      "avg": 424421,
+      "cy_per_frame": 16803,
+      "pct": 134.4,
+      "peak": 537703
+    },
+    "ALG3 ring": {
+      "avg": 424348,
+      "cy_per_frame": 17245,
+      "pct": 138.0,
+      "peak": 551844
+    },
+    "idle": {
+      "avg": 30377,
+      "cy_per_frame": 958,
+      "pct": 7.7,
+      "peak": 30667
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165272
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 145556
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 223276
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 467648
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2680,
+      ".debug_abbrev": 89788,
+      ".debug_aranges": 5216,
+      ".debug_frame": 17984,
+      ".debug_info": 1437832,
+      ".debug_line": 432108,
+      ".debug_loc": 193895,
+      ".debug_loclists": 381851,
+      ".debug_ranges": 98872,
+      ".debug_rnglists": 84309,
+      ".debug_str": 535514,
+      ".heap": 16384,
+      ".rodata": 137364,
+      ".stack": 16384,
+      ".text": 223276,
+      ".uninit": 451264,
+      ".vector_table": 696
+    }
+  }
+}

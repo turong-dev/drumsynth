@@ -56,7 +56,8 @@ use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::stages::{
     Stages as ModStages, GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING, SEGMENT_ALT,
 };
-use mi_dsp::warps::{Carrier, OscShape, Warps, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
+use device_core::dsp::Shaper;
+use mi_dsp::warps::{OscShape, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
 
 /// What feeds Warps' modulator input. See [`SLOT_WARPS_MOD_SRC`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -782,7 +783,16 @@ pub struct MiSlot {
     tune_macro: f32,
     retune_semitones: f32,
     // Phase 14 fixed-strip modules.
-    warps: Warps,
+    /// The strip's shaping stage.
+    ///
+    /// This was `warps::Modulator` until it was measured: 82,183 cycles per
+    /// track per block at the shipped default algorithm, against a budget of
+    /// 400,000 for the whole engine. `core::dsp::shaper` does the same job
+    /// through antiderivative antialiasing instead of 6x oversampling, in 72
+    /// bytes against 4,112 and roughly a tenth of the cycles. See
+    /// `docs/warps-vendoring.md` for the measurements and for what was given
+    /// up with it.
+    shaper: Shaper,
     /// Shape of the strip's own oscillator, from `WARP.OSC`.
     warps_osc_shape: OscShape,
     /// The strip's modulator oscillator. Not Warps' internal carrier: this
@@ -847,7 +857,6 @@ pub struct MiSlot {
     ad_filter_depth: f32,
     ad_warps_depth: f32,
     env_trigger_pending: bool,
-    warps_initialized: bool,
     // Peaks-only state. The 16-bit parameter block the model was configured
     // with, kept so a macro edit can reconfigure without a voice restart.
     peaks_params: [f32; 4],
@@ -1099,7 +1108,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             silence_counter: 0,
             tune_macro: 0.45,
             retune_semitones: 0.0,
-            warps: Warps::new(SAMPLE_RATE),
+            shaper: Shaper::new(SAMPLE_RATE),
             warps_osc_shape: OscShape::Sine,
             warps_osc: WarpsOscillator::new(SAMPLE_RATE),
             osc_env: 0.0,
@@ -1134,7 +1143,6 @@ impl Slot<NUM_MACROS> for MiSlot {
             ad_filter_depth: 0.0,
             ad_warps_depth: 0.0,
             env_trigger_pending: false,
-            warps_initialized: false,
         };
         slot.configure_stages();
         slot.set_macros(macros);
@@ -1211,7 +1219,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).silence_counter).write(0);
             core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).warps).write(Warps::new(SAMPLE_RATE));
+            core::ptr::addr_of_mut!((*ptr).shaper).write(Shaper::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).warps_osc_shape).write(OscShape::Sine);
             core::ptr::addr_of_mut!((*ptr).warps_osc).write(WarpsOscillator::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).osc_env).write(0.0);
@@ -1246,7 +1254,6 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).ad_filter_depth).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ad_warps_depth).write(0.0);
             core::ptr::addr_of_mut!((*ptr).env_trigger_pending).write(false);
-            core::ptr::addr_of_mut!((*ptr).warps_initialized).write(false);
             (*ptr).configure_stages();
             (*ptr).set_macros(macros);
             (*ptr)
@@ -1376,6 +1383,9 @@ impl Slot<NUM_MACROS> for MiSlot {
     }
 
     fn reset(&mut self) {
+        // The ADAA states hold the previous sample and its antiderivative; a
+        // new note must not difference against the last one's tail.
+        self.shaper.reset();
         self.osc_env = 0.0;
         self.trigger_pending = false;
         self.gate_open = false;
@@ -1414,15 +1424,6 @@ impl Slot<NUM_MACROS> for MiSlot {
 
     fn process_audio_strip(&mut self, buf: &mut [f32], _start: usize) {
         let n = buf.len();
-
-        // Warps' C++ state contains a self-referential pointer. It must be
-        // initialised at its final memory location, which for `new()` happens
-        // to be after the struct has been moved into the engine. Lazy-init on
-        // first audio strip call covers both construction paths.
-        if !self.warps_initialized {
-            self.warps.init(SAMPLE_RATE);
-            self.warps_initialized = true;
-        }
 
         // Render the four Stages modulators into per-segment buffers. The LFOs
         // must free-run: a gate array would clock them from the gates and hold
@@ -1464,18 +1465,13 @@ impl Slot<NUM_MACROS> for MiSlot {
             // Drive 0 is a real bypass, not silence — see `WARPS_DRIVE_INFO` for
             // why the knob is remapped rather than passed straight through.
             // Both flags were resolved at control rate in `set_macros`.
-            self.warps.set_bypass(self.warps_bypassed);
+            self.shaper.set_bypass(self.warps_bypassed);
+            self.shaper
+                .set_parameters(self.warps_algorithm, modulated_timbre, self.warps_drive);
             // `Carrier::External` always: the strip supplies its own
             // oscillator on the modulator side, so Warps' internal-carrier
             // path — which replaces the voice rather than modulating it — is
             // never used, and `note` goes unread as a result.
-            self.warps.set_parameters(
-                self.warps_algorithm,
-                modulated_timbre,
-                self.warps_drive,
-                Carrier::External,
-                self.patch.note,
-            );
 
             let len = chunk.len();
             // The dry signal, kept so `WARP.MIX` has something to blend back
@@ -1531,7 +1527,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             }
 
             let mut warps_aux = [0.0f32; WARPS_MAX_BLOCK];
-            self.warps
+            self.shaper
                 .process_dual(chunk, &modulator[..len], &mut warps_aux[..len]);
 
             // `WARP.OUT` picks the tap, then `WARP.MIX` decides how much of

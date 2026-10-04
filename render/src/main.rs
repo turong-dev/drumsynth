@@ -112,6 +112,19 @@ enum Command {
     /// 48× of gain and `drive = 0` is silence rather than clean — neither is
     /// visible in a number, and both are the difference between a kit that
     /// sounds like itself and one that does not.
+    /// A/B the ADAA waveshaper against the vendored Warps modulator.
+    ///
+    /// Two files. The kit comparison is the musical question — does the
+    /// cheaper stage still sound like the instrument. The alias test is the
+    /// honest one: first-order ADAA *attenuates* aliasing rather than
+    /// removing it, and drums hide aliasing well, so the stage is also put
+    /// under a pitched sweep at full drive and full wet, which is where a
+    /// cheap antialiasing scheme fails audibly if it is going to.
+    Shaper {
+        /// Output path.
+        #[arg(short, long, default_value = "shaper-ab.wav")]
+        output: String,
+    },
     Warps {
         /// Output path.
         #[arg(short, long, default_value = "warps-drive.wav")]
@@ -474,6 +487,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (drum_samples, drum_timeline) = render_gate_demo_drum();
             write_wav(&drum_path, &drum_samples)?;
             print_gate_timeline(&drum_path, drum_samples.len(), &drum_timeline);
+        }
+
+        Command::Shaper { output } => {
+            let (samples, notes) = render_shaper_kit_comparison();
+            write_wav(&output, &samples)?;
+            println!(
+                "\nwrote {output} ({:.2}s)",
+                samples.len() as f32 / 2.0 / SAMPLE_RATE
+            );
+            for (t, what) in &notes {
+                println!("  {t:>5.1}s  {what}");
+            }
+
+            let alias_path = output.replacen(".wav", "-alias.wav", 1);
+            let (alias_samples, alias_notes) = render_shaper_alias_test();
+            write_wav(&alias_path, &alias_samples)?;
+            println!(
+                "\nwrote {alias_path} ({:.2}s)",
+                alias_samples.len() as f32 / 2.0 / SAMPLE_RATE
+            );
+            println!("  full drive, full wet, chromatic rise over three octaves.");
+            println!("  Aliasing sounds like partials moving DOWN as the note moves up.");
+            for (t, what) in &alias_notes {
+                println!("  {t:>5.1}s  {what}");
+            }
         }
 
         Command::Warps { output } => {
@@ -2366,7 +2404,16 @@ mod mi_drum_baseline {
     ///
     /// Rendered WAVs are gitignored, so the digest is the committed artefact.
     /// Reproduce the audio with `cargo run -p render -- mi-drum`.
-    const BASELINE_DIGEST: u64 = 0xed53_ae09_78b5_5acd;
+    // Re-pinned when the strip's shaping stage changed from `warps::Modulator`
+    // to `core::dsp::shaper`. That is a deliberate change to the sound, not a
+    // regression: Warps cost 79,855 cycles per track against a 400,000-cycle
+    // budget for the whole engine, and the replacement is roughly a tenth of
+    // that. See `docs/warps-vendoring.md`.
+    //
+    // Verified identical across five separate processes before pinning — the
+    // discipline `1633ca5` established after two uninitialised reads made this
+    // digest drift between runs.
+    const BASELINE_DIGEST: u64 = 0xc70a_121c_591c_db5d;
 
     /// One test, one render, deliberately.
     ///
@@ -2405,4 +2452,204 @@ mod mi_drum_baseline {
              If it is a later phase that changes the sound on purpose, re-pin the constant."
         );
     }
+}
+
+/// The shipped kit, twice: with the shaping stage, and with it bypassed.
+///
+/// Same seed, same pattern, same macros, same two bars, so the only variable
+/// is the stage. This used to carry a third pass for `warps::Modulator`; that
+/// comparison is in `docs/warps-vendoring.md` and the module is gone.
+fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
+    use mi_drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE as SR};
+
+    let bpm = 130.0f32;
+    let step_s = 60.0 / bpm / 4.0;
+    let steps = 16usize;
+    let bars = 2usize;
+    let tail_s = 2.0f32;
+    let total_s = steps as f32 * step_s * bars as f32 + tail_s;
+
+    // The same backbeat `render_warps_kit_comparison` uses, so the two
+    // auditions are directly comparable to each other as well.
+    const PATTERN: [[bool; 16]; 6] = [
+        [
+            true, false, false, false, true, false, false, false, true, false, false, true, true,
+            false, false, false,
+        ],
+        [
+            false, false, false, false, true, false, false, false, false, false, false, false,
+            true, false, true, false,
+        ],
+        [
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, true,
+        ],
+        [
+            false, false, true, false, false, false, false, true, false, false, true, false, false,
+            false, false, false,
+        ],
+        [
+            false, false, false, true, false, false, false, false, false, true, false, false,
+            false, false, true, false,
+        ],
+        [
+            true, false, false, false, false, false, true, false, false, false, false, false, true,
+            false, false, false,
+        ],
+    ];
+
+    let total_steps = steps * bars;
+    let total_blocks = (total_s * SR / BLOCK as f32) as usize;
+    let mut out: Vec<f32> = Vec::new();
+    let mut notes: Vec<(f32, String)> = Vec::new();
+
+    // Warps is gone; the comparison that remains is the stage against its own
+    // bypass, which is the one that says whether it is doing anything.
+    let passes: &[(bool, &str)] = &[
+        (true, "A - ADAA shaper, kit defaults"),
+        (false, "B - no shaping at all (WARP.DRV bypass), the reference"),
+    ];
+
+    for (shaped, label) in passes {
+        // Re-seeding per pass rather than once for the file: `stmlib::Random`
+        // is a process-global generator, so three passes sharing one seed
+        // would have the noise diverge between them and the comparison would
+        // be of two different performances.
+        mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+        // Heap, not stack: `MiDrumEngine` is ~476 KB and returning one by
+        // value overflows the main thread's stack. See `mi_drum_in_place`.
+        let mut engine = mi_drum_in_place();
+        engine.set_master_gain(0.5);
+        if !*shaped {
+            for t in 0..mi_drum_engine::TRACKS {
+                engine.tracks_mut()[t].set_macro(mi_drum_engine::SLOT_STRIP_HOLD, 0.0);
+            }
+        }
+
+        notes.push((out.len() as f32 / 2.0 / SR, (*label).to_string()));
+
+        let mut next_step = 0usize;
+        let mut next_step_at = 0.0f32;
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+
+        for b in 0..total_blocks {
+            let block_end = (b + 1) as f32 * BLOCK as f32 / SR;
+            while next_step < total_steps && next_step_at < block_end {
+                let s = next_step % steps;
+                for (track, row) in PATTERN.iter().enumerate() {
+                    if row[s] {
+                        engine.trigger(track, if s.is_multiple_of(4) { 1.0 } else { 0.7 });
+                    }
+                }
+                next_step += 1;
+                next_step_at += step_s;
+            }
+            engine.process(&mut l, &mut r);
+            out.extend_from_slice(&l);
+            out.extend_from_slice(&r);
+        }
+    }
+
+    (out, notes)
+}
+
+/// The stage under the conditions that expose a cheap antialiasing scheme.
+///
+/// Track 4 of `DEFAULT_KIT` is a Plaits `String` — sustained and pitched,
+/// which is the opposite of what drums are and exactly what aliasing shows up
+/// on. Driven hard and taken fully wet so nothing is hidden behind
+/// `WARP.MIX`, then walked up three octaves a semitone at a time.
+///
+/// What to listen for: alias partials move *down* as the fundamental moves
+/// up, because they are reflections about Nyquist. A stage that stays
+/// harmonically coherent across the rise is working; one that grows a
+/// descending metallic shadow is not.
+fn render_shaper_alias_test() -> (Vec<f32>, Vec<(f32, String)>) {
+    use mi_drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE as SR};
+
+    const MELODIC_TRACK: usize = 4;
+    const SEMIS: i32 = 36;
+    let note_s = 0.22f32;
+    let tail_s = 1.5f32;
+
+    let mut out: Vec<f32> = Vec::new();
+    let mut notes: Vec<(f32, String)> = Vec::new();
+
+    // One pass per algorithm. ADAA is first order, so it attenuates aliasing
+    // rather than removing it, and the four algorithms do not stress it
+    // equally: the crossfade is linear and generates nothing, while the fold
+    // is the most harmonically violent thing in the set. If any of them is
+    // going to fall apart on a pitched sweep it will be audible here.
+    for (algo, label) in [
+        (0.0f32, "A - crossfade (linear, nothing to alias)"),
+        (1.0 / 3.0, "B - sine fold (the violent one)"),
+        (2.0 / 3.0, "C - diode ring (Warps' analog model)"),
+        (1.0, "D - digital ring (band-limited modulator)"),
+    ] {
+        mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+
+        // Heap, not stack: `MiDrumEngine` is ~476 KB and returning one by
+        // value overflows the main thread's stack. See `mi_drum_in_place`.
+        let mut engine = mi_drum_in_place();
+        // Low, because this pass is deliberately driven into the region where
+        // both stages are at their most extreme and neither may be allowed to
+        // hit the output clipper: a clipped pass generates its own harmonics
+        // and the comparison stops being about either shaper. The passes are
+        // loudness-matched below instead.
+        engine.set_master_gain(0.12);
+        {
+            let track = &mut engine.tracks_mut()[MELODIC_TRACK];
+            // Hard drive, fully wet: the worst case for aliasing.
+            track.set_macro(mi_drum_engine::SLOT_STRIP_HOLD, 0.9);
+            track.set_macro(mi_drum_engine::SLOT_WARPS_MIX, 1.0);
+            track.set_macro(mi_drum_engine::SLOT_FILT_0, algo);
+        }
+        // Everything else silent: one voice, one variable.
+        for t in 0..mi_drum_engine::TRACKS {
+            if t != MELODIC_TRACK {
+                engine.tracks_mut()[t].set_macro(drum_engine::machines::SLOT_LEVEL, 0.0);
+            }
+        }
+
+        notes.push((out.len() as f32 / 2.0 / SR, label.to_string()));
+
+        let mut pass: Vec<f32> = Vec::new();
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        let blocks_per_note = (note_s * SR / BLOCK as f32) as usize;
+
+        for semi in 0..=SEMIS {
+            engine.tracks_mut()[MELODIC_TRACK].retune(semi as f32);
+            engine.trigger(MELODIC_TRACK, 1.0);
+            for _ in 0..blocks_per_note {
+                engine.process(&mut l, &mut r);
+                pass.extend_from_slice(&l);
+                pass.extend_from_slice(&r);
+            }
+        }
+        for _ in 0..((tail_s * SR / BLOCK as f32) as usize) {
+            engine.process(&mut l, &mut r);
+            pass.extend_from_slice(&l);
+            pass.extend_from_slice(&r);
+        }
+
+        // Normalise each pass to a fixed *peak*, not a fixed RMS.
+        //
+        // RMS matching was right when this file compared two implementations
+        // and loudness was the confound. Comparing four algorithms of one
+        // stage, it is actively wrong: a plucked string has a ~26 dB crest
+        // factor, so scaling it to a common RMS drives the transients into
+        // the clamp and every pass comes back reading as clipped. The
+        // algorithms are already level-matched to within 8 dB by
+        // construction (`the_algorithms_are_level_matched_to_each_other`), so
+        // peak-normalising with headroom keeps them comparable and keeps the
+        // file honest about what the stage actually does.
+        let peak = pass.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let g = if peak > 1.0e-9 { 0.7 / peak } else { 1.0 };
+        out.extend(pass.iter().map(|v| v * g));
+    }
+
+    (out, notes)
 }

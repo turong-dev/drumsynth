@@ -16,6 +16,7 @@ pub mod fx;
 pub mod lfo;
 pub mod noise;
 pub mod osc;
+pub mod shaper;
 pub mod svf;
 
 pub use ahd::{AhdEnv, HoldMode};
@@ -26,6 +27,7 @@ pub use fx::SendFx;
 pub use lfo::{Lfo, LfoMode, LfoRateMode, LfoWave, ModDest};
 pub use noise::Noise;
 pub use osc::SineOsc;
+pub use shaper::Shaper;
 pub use svf::{Svf, SvfMode};
 
 /// Convert a decay time in seconds to a one-pole coefficient.
