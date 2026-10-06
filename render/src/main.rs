@@ -836,8 +836,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // so it requires `E: Send`. `MiDrumEngine` is not: `PlaitsVoice`
             // holds a `*mut u8` into `mi-dsp`'s static scratch pool, whose
             // `static mut` free-bitmap is documented as single-threaded. Wiring
-            // this up means making that pool thread-safe first — see the
-            // known-issue note in PLAN.md. Every other mi-drum path (render,
+            // this up means making that pool thread-safe first — see issue
+            // #9. Every other mi-drum path (render,
             // play, WAV) works today; only live device mode is blocked.
             "mi-drum" => {
                 return Err(

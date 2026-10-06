@@ -21,8 +21,7 @@ drumsynth/
 │   ├── benchloop.py      closed-loop build/flash/capture/diff harness
 │   └── checkasm.sh       instruction census
 ├── BENCHMARKS.md         how to measure and gate changes
-├── DESIGN.md             long-lived architecture decisions
-└── PLAN.md               active Phase 14 work only
+└── DESIGN.md             long-lived architecture decisions
 ```
 
 ## Build and test
@@ -92,10 +91,11 @@ host and fail in `bsp::rt`.
 5. Update renderer `MachineArg` if needed.
 6. Add a bench scenario if the voice is heavy or unusual.
 
-## Adding an MI stage (Phase 14)
+## Changing the mi-drum strip
 
-See `PLAN.md`. Gate per sub-phase against the 14.0 baseline. Do not touch the
-core strip or the drum device's determinism contract.
+Gate against the committed baseline digest. Do not touch the core strip or the
+drum device's determinism contract. Active work is tracked in GitHub issues;
+see `DESIGN.md` for the settled strip topology.
 
 ## Common commands
 

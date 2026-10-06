@@ -217,7 +217,7 @@ the next estimate does not have to re-derive them. Peak cycles, block 32:
 
 Warps, the Ripples SVF, the Peaks voices and Clouds are **not** in this table —
 no bench has measured them yet. Anything quoting a per-unit figure for those is
-an estimate; `PLAN.md` marks which is which.
+an estimate, not a measurement.
 
 ## Things that were measured and rejected
 

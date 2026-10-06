@@ -74,7 +74,7 @@ fn voice_out(previous: Option<MiMachineId>, id: MiMachineId) -> Vec<f32> {
 /// that field has decayed to approximately zero, so in-process the stale value
 /// and the correct one are indistinguishable. Only genuinely foreign memory
 /// shows it, which means across processes — running the baseline digest in a
-/// loop, as `PLAN.md` describes. Poisoning the allocation does not substitute:
+/// loop, as `DESIGN.md` describes. Poisoning the allocation does not substitute:
 /// a slot is built on the stack and moved into place, so the fill never
 /// reaches the vendored storage.
 #[test]

@@ -13,7 +13,7 @@
 //! an edge, so the pulse this replaced starved the three `SixOp` engines into
 //! digital silence; holding the level fixes them and gives every
 //! level-reading engine a note to sustain, while the edge still fires once.
-//! See `DESIGN.md` for the measurements and `PLAN.md` for what the gate still
+//! See `DESIGN.md` for the measurements, and issue #4 for what the gate still
 //! does not do.
 //!
 //! Release is the engine's own, not a cut: dropping the gate starts Plaits'

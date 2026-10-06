@@ -34,7 +34,7 @@
 //!
 //! # Decomposing the strip
 //!
-//! `6 sounding` is 290% of budget, and PLAN.md's per-unit table cannot say
+//! `6 sounding` is 290% of budget, and the Phase 14 per-unit table cannot say
 //! which term is responsible: of its four strip terms, only the Stages
 //! segment was ever measured. These subtract one component at a time, each
 //! using a knob that already ships, so a delta is that component's whole
@@ -280,7 +280,7 @@ fn main() -> ! {
         // --- Decomposition: where the strip's cycles actually go ---
         //
         // `6 sounding` is 4.4x its September value and 290% of budget, and
-        // PLAN.md's per-unit table cannot say which term is responsible
+        // the Phase 14 per-unit table cannot say which term is responsible
         // because three of its four strip terms were never measured. These
         // scenarios subtract one thing at a time using knobs that already
         // exist, so each delta is a component's whole cost at six tracks.
@@ -304,7 +304,7 @@ fn main() -> ! {
         // Plaits (String, Modal). `retrigger` takes the first `n` tracks, so
         // `6 sounding - 4 sounding` is exactly the two Plaits voices and
         // `(4 sounding - idle) / 4` is one Peaks voice carrying the full
-        // strip. PLAN.md estimated a Peaks voice at 5,000-15,000 cycles
+        // strip. Phase 14 estimated a Peaks voice at 5,000-15,000 cycles
         // against a *measured* 38,900 for Plaits, and that estimate is what
         // the six-track shape was signed off on.
         let peaks_only = measure(engine, &mut left, &mut right, 4);
@@ -318,7 +318,7 @@ fn main() -> ! {
         // source, the `WARP.MIX` blend -- left exactly where it was.
         //
         // This is the number that retired Warps. Measured the same way,
-        // `warps::Modulator` cost 79,855 cycles per track; `PLAN.md` had
+        // `warps::Modulator` cost 79,855 cycles per track; Phase 14 had
         // estimated 2,000-5,000. See `docs/warps-vendoring.md`.
         let no_shape = measure_without_shaper(engine, &mut left, &mut right);
         report("6 no SHAPE", no_shape, &mut poller, &mut pit);

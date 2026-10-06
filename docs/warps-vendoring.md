@@ -86,7 +86,8 @@ mi-bench`, 600 MHz, 32-sample block, 400,000 cycles of budget. Figures marked
 | Warps, cheapest algorithm | 43,952 | 1,373 | ~110% |
 | ADAA shaper (`core::dsp::shaper`) | ~7,400 | ~230 | 96% total engine |
 
-`PLAN.md` estimated the whole stage at **2,000-5,000 cycles per track**. The
+The original Phase 14 plan estimated the whole stage at **2,000-5,000 cycles
+per track**. The
 *irreducible floor* — the part no algorithm choice can reach — is 43,952, nine
 times the top of that range.
 
@@ -192,8 +193,8 @@ Worth knowing before tuning anything, because none of it is reachable:
 - **The internal carrier.** `3378389` pinned `Carrier::External` permanently,
   which also left `parameters_.note` unread.
 - **`ProcessEasterEgg`.** Linked but never enabled. An earlier draft of
-  `PLAN.md` claimed Warps' drive doubled as a dry/wet mix citing a line inside
-  it; the line never runs here. The *live* `channel_drive` does behave that way
+  the Phase 14 plan claimed Warps' drive doubled as a dry/wet mix, citing a
+  line inside it; the line never runs here. The *live* `channel_drive` does behave that way
   (`wet_dry = 1 - channel_drive`), which is why driving Warps hard also pulls
   it back toward dry — and why the ADAA shaper, which has no such coupling,
   reads ~4 dB louder at the same macro value.

@@ -28,7 +28,8 @@ tree is ever refreshed from upstream.
 by the end of a preceding hit `transient_env_lp_` has decayed to approximately
 zero, so the stale value and the correct value are indistinguishable within a
 process. It was found by running the baseline digest in separate processes and
-bisecting which machine window diverged. `PLAN.md` describes that procedure.
+bisecting which machine window diverged. `DESIGN.md` ("mi-drum determinism")
+has the procedure.
 
 ## `kMaxEngines` is 24, but `RegisterInstance` is called 28 times
 

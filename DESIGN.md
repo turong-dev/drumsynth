@@ -1,8 +1,8 @@
 # Design
 
 Long-lived design decisions for the drum engine. For the benchmark process that
-governs whether a change is affordable, see `BENCHMARKS.md`. For the still-active
-MI drum fixed-strip work, see `PLAN.md`.
+governs whether a change is affordable, see `BENCHMARKS.md`. Active work is
+tracked in GitHub issues.
 
 ## Constraints
 
@@ -100,7 +100,7 @@ starts the release but does not set its length. For the eight
 `already_enveloped` engines the amplitude belongs to the engine outright, and
 for `SixOp1`/`2`/`3` the gate *is* the amplitude authority, so those do follow
 the key. A macro-controlled release time is a separate change, and the
-dedicated amplitude envelope in `PLAN.md` is the design for it.
+dedicated amplitude envelope is the design for it (issue #4).
 
 ### Sin table is mandatory
 
@@ -159,7 +159,36 @@ preserve 24-sample Plaits phasing against the 32-sample engine block; the strip
 is hoisted into per-stage loops over the segment. Same arithmetic in the same
 order — bit-identical by construction.
 
+### mi-drum strip lineage
+
+The strip has had three designs. The reasoning is kept because the same
+trade-offs recur whenever a new stage is proposed.
+
+1. **Per-stage catalog ("stage substitution").** Each position in a track's
+   chain — source, envelope, colour, drive, LFO, send FX — would have been
+   independently selectable from a catalog of MI modules. Abandoned after a
+   spike: freely selectable stages could not all run on six tracks within the
+   cycle budget (two cheap stages already pushed the worst case past the ~70%
+   ceiling, and `Resonator` was 10x cheaper as a send than per track), and
+   every machine x stage combination is a separate path to bench and to voice.
+   Cost was neither bounded nor predictable per track.
+2. **Fixed strip with vendored modules.** One chain for every track:
+   source -> Warps -> Ripples, with Stages providing 2 LFOs + 2 AD envelopes.
+   One code path, bounded cost.
+3. **Fixed strip with house modules.** Warps and Stages replaced by
+   `core::dsp::shaper::Shaper` and an in-house modulation bus. The vendored
+   versions cost roughly 2.5x the cycles and ~124 KB more OCRAM for character
+   that could be had more cheaply. See `docs/warps-vendoring.md` for the
+   measurements.
+
+The lesson that carries: fix the topology, measure the stage before adopting
+it, and prefer a send over a per-track instance when the module allows it.
+
 ### mi-drum strip topology
+
+> **Note:** this section still describes design 2 above (Warps + Stages).
+> Those modules have been replaced; see the lineage above and issue #10.
+
 
 Phase 14 was redesigned from a per-track selectable stage catalog to a **fixed
 strip**. The mi-drum chain is:
@@ -277,7 +306,20 @@ result in every process. Both are fixed (see `docs/peaks-vendoring.md` and
 
 Because that failure mode lived *between* processes, a single green run is
 weak evidence: re-run the digest test ~20 times and check every run agrees.
-`PLAN.md` has the one-liner. `devices/mi-drum/tests/slot_reuse.rs` is the
+Run the digest test ~20 times and check every run agrees:
+
+```bash
+for i in $(seq 1 20); do
+  cargo test -q -p render mi_drum_baseline 2>&1 | grep -oE "got 0x[0-9a-f]+"
+done | sort | uniq -c
+```
+
+No output means every run matched. More than one distinct digest means
+something is reading uninitialised memory again. That cross-process loop, with
+a bisect on which machine window diverged, is also how the original
+uninitialised reads were found.
+
+`devices/mi-drum/tests/slot_reuse.rs` is the
 in-process guard — every machine must render identically whether its slot is
 clean or has held something else — and
 `every_catalogued_engine_makes_sound` still catches a silent engine without
