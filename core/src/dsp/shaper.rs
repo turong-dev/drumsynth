@@ -294,8 +294,27 @@ impl Shaper {
 
     /// Bypass detent, matching `warps::Modulator::set_bypass`: the carrier
     /// passes through untouched and the aux tap carries the modulator.
+    ///
+    /// Clear the ADAA states on the edge into bypass. [`Self::process_dual`]
+    /// returns before it runs them, so leaving them alone freezes `x_prev` and
+    /// `F_prev` at the last pre-bypass sample — and releasing bypass then
+    /// differences the first engaged sample against a stale input rather than
+    /// against the sample before it. Measured on a 0.02 transient after a full
+    /// -0.9 note: the first sample out was **-0.30, sign-flipped and 15x too
+    /// loud**, a 30 dB step, and the second was still 8x out. Warps' bypass had
+    /// no memory to go stale and could not do this, so it is a regression the
+    /// replacement introduced rather than one it inherited.
+    ///
+    /// Control rate, so clearing costs nothing on the audio path, and a fresh
+    /// stage is already at zero — so this only fires on a real transition. What
+    /// the first engaged sample produces is then `f(x/2)` from the `dx < eps`
+    /// fallback against a zeroed `x_prev`, which for every nonlinearity here is
+    /// within rounding of `f(x)` at the levels this stage runs at.
     #[inline]
     pub fn set_bypass(&mut self, bypass: bool) {
+        if bypass && !self.bypass {
+            self.reset();
+        }
         self.bypass = bypass;
     }
 
@@ -369,9 +388,7 @@ impl Shaper {
         for i in 0..n {
             // Both inputs through their own ADAA saturator, which is where
             // the drive character comes from and what feeds the aux tap.
-            let c = self
-                .sat_carrier
-                .tick(carrier[i] * gain, clip3, clip3_int);
+            let c = self.sat_carrier.tick(carrier[i] * gain, clip3, clip3_int);
             let m = self
                 .sat_modulator
                 .tick(modulator[i] * gain, clip3, clip3_int);
@@ -515,6 +532,67 @@ mod tests {
         s.process_dual(&mut carrier, &modulator, &mut aux);
         assert_eq!(carrier, before);
         assert_eq!(aux, modulator);
+    }
+
+    /// Releasing bypass must not step. Bypass skips the ADAA states entirely,
+    /// so without clearing them on the edge the first sample back in is
+    /// differentiated against the last pre-bypass one — which, for a note that
+    /// was loud and then decayed to silence, is a sign-flipped transient an
+    /// order of magnitude too large.
+    ///
+    /// The reference is the same transient through a stage that was never
+    /// bypassed: `clip3_int(0) == 0`, so clearing to zero makes the first
+    /// sample agree with the quotient rather than merely being close to it.
+    #[test]
+    fn releasing_bypass_does_not_step() {
+        let silent = [0.0f32; 32];
+        let mut aux = [0.0f32; 32];
+
+        let mut s = Shaper::new(48_000.0);
+        s.set_parameters(0.0, 0.5, 1.0);
+
+        // A loud note, so the states are nowhere near zero.
+        for _ in 0..16 {
+            let mut carrier = [0.0f32; 32];
+            for (k, c) in carrier.iter_mut().enumerate() {
+                *c = 0.9 * fast::sin_turns(k as f32 / 32.0);
+            }
+            s.process_dual(&mut carrier, &silent, &mut aux);
+        }
+
+        // Bypassed, with the voice decayed away — a drum tail, not silence.
+        s.set_bypass(true);
+        for _ in 0..64 {
+            let mut carrier = [0.0f32; 32];
+            for (k, c) in carrier.iter_mut().enumerate() {
+                *c = 0.002 * k as f32;
+            }
+            s.process_dual(&mut carrier, &silent, &mut aux);
+        }
+
+        // A fresh transient at the size a hit actually has at the strip input.
+        let transient: [f32; 32] = core::array::from_fn(|k| 0.02 * (k as f32 + 1.0));
+        let mut bypassed_then_released = transient;
+        s.set_bypass(false);
+        s.process_dual(&mut bypassed_then_released, &silent, &mut aux);
+
+        let mut never_bypassed = transient;
+        let mut clean = Shaper::new(48_000.0);
+        clean.set_parameters(0.0, 0.5, 1.0);
+        clean.process_dual(&mut never_bypassed, &silent, &mut aux);
+
+        let worst = bypassed_then_released
+            .iter()
+            .zip(&never_bypassed)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1.0e-3,
+            "releasing bypass stepped by {worst}: \
+             {} vs a never-bypassed {}",
+            bypassed_then_released[0],
+            never_bypassed[0]
+        );
     }
 
     /// Nothing in here may produce a NaN or run away, whatever it is handed.
