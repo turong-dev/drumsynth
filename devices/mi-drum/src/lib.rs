@@ -43,7 +43,10 @@ pub use device_core::macros::{
     SLOT_STRIP_RESO,
 };
 
+use device_core::dsp::ahd::{AhdEnv, HoldMode};
+use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
 use device_core::dsp::svf::stability_ceiling_hz;
+use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::macros::{
     macro_index, mi, MacroInfo, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO, NUM_MACROS, OUT_INFO,
@@ -51,12 +54,9 @@ use device_core::macros::{
     SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
     SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
+use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
-use device_core::dsp::ahd::{AhdEnv, HoldMode};
-use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
-use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
-use device_core::dsp::Shaper;
 use mi_dsp::warps::{OscShape, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
 
 /// What feeds Warps' modulator input. See [`SLOT_WARPS_MOD_SRC`].
@@ -530,7 +530,16 @@ const SLOT_WARPS_TIMBRE: usize = SLOT_FILT_1;
 /// stays the carrier and keeps its identity, and the strip no longer needs
 /// Warps' `carrier_shape` at all — `Carrier::External` is now permanent.
 pub const SLOT_WARPS_OSC_SHAPE: usize = macro_index(BANK_FILT, 6);
-const SLOT_WARPS_DRIVE: usize = SLOT_STRIP_HOLD;
+
+/// FILT 5: input drive into the shaping stage, and the bypass detent at 0.
+///
+/// An alias for [`SLOT_STRIP_HOLD`], which is the same slot index — Phase 14
+/// spent the strip AHD's four slots on the fixed Warps -> Ripples strip and
+/// gave the generic names back to the generic names. Public because the host
+/// renderer reaches for "take the stage out" by name, and `SLOT_STRIP_HOLD`
+/// next to a printed `WARP.DRV 0` label reads like the bypass silently missed.
+pub const SLOT_WARPS_DRIVE: usize = SLOT_STRIP_HOLD;
+
 const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
 const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
@@ -600,47 +609,57 @@ pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
 const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
 const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
 const WARPS_OSC_SHAPE_INFO: MacroInfo = mi("WARP.OSC", "WOS", 0.0);
-/// Warps input drive, and the clean end of the strip.
+/// Input drive into the shaping stage, and the clean end of the strip.
 ///
-/// The macro is **not** Warps' `drive` directly. Warps'
-/// `SaturatingAmplifier` computes pre-gain as `0.5·drive` blended towards
-/// `24·drive⁵` (`modulator.h:88`-`:91`), with post-gain normalising it back.
-/// That makes the raw knob's travel:
+/// The stage is `core::dsp::shaper`, which takes an input gain rather than
+/// Warps' `drive` parameter, so the macro is remapped twice on the way in:
+/// [`warps_drive_from_macro`] rescales `0.0..1.0` onto `0.50..1.00` — Warps'
+/// usable span, kept so the knob means the same thing it used to — and
+/// `Shaper::set_parameters` maps that onto `1 + 7·macro` of input gain. The
+/// resulting travel:
 ///
-/// | `WARP.DRV` | Warps `drive` | pre-gain | net gain | character |
+/// | `WARP.DRV` | stage `drive` | input gain | knee at | character |
 /// |---|---|---|---|---|
 /// | 0.00 | — | — | — | **bypass**: bit-transparent, no colour |
-/// | 0.01 | 0.51 | 0.39 | 1.08 | unity, gentle |
-/// | 0.25 | 0.63 | 1.05 | 1.19 | unity, cleanest saturation point |
-/// | 0.50 | 0.75 | 3.37 | 3.37 | 3× overdriven |
-/// | 0.75 | 0.88 | 9.72 | 9.72 | hard |
-/// | 1.00 | 1.00 | 24.0 | 24.0 | destroyed |
+/// | 0.01 | 0.505 | 1.07 | 0.93 | barely engaged |
+/// | 0.20 | 0.60 | 2.40 | 0.42 | light colour, the shipped default |
+/// | 0.50 | 0.75 | 4.50 | 0.22 | driven, most of a drum inside the knee |
+/// | 0.75 | 0.875 | 6.25 | 0.16 | hard |
+/// | 1.00 | 1.00 | 8.00 | 0.13 | destroyed |
 ///
-/// Two things fall out of that table, and both are why the remap exists:
+/// "Knee at" is where the cubic clipper stops being linear, i.e. the strip-input
+/// level at which `clip3` starts compressing. It is *not* the stage's net gain:
+/// that also depends on `WARP.ALG` and `WARP.TIM`, which set the post-gain of
+/// whichever algorithm the crossfade has landed on. The default
+/// (crossfade, timbre 0.5) is unity-summed at 0.707 per side.
 ///
-/// - **`drive = 0` is silence, not clean.** Passing the macro straight through
-///   would make "no drive" mute the track. The bottom of the knob is a real
-///   `Modulator::set_bypass`, which is what makes a clean section possible.
-/// - **The top half of Warps' own knob covers 48× of gain.** The `drive⁵` term
-///   is nearly linear below 0.5 and explodes above it, which is where the
-///   "gets crazy past halfway" reputation comes from. Rescaling onto
-///   `0.50..1.00` keeps that character but spends the whole knob on it, so
-///   there is a usable clean-ish region below halfway and the destructive
-///   region is something you choose rather than something you inherit.
+/// Two things fell out of Warps' table, and both are why the remap exists:
+///
+/// - **`drive = 0` is silence, not clean.** Warps' `SaturatingAmplifier`
+///   computes pre-gain as `0.5·drive` blended towards `24·drive⁵`
+///   (`modulator.h:88`-`:91`), so passing a raw zero through would make "no
+///   drive" mute the track. The bottom of the knob is a real
+///   `Shaper::set_bypass`, which is what makes a clean section possible.
+/// - **Warps' own top half covered 48× of gain**, nearly linear below 0.5 and
+///   exploding above it — the "gets crazy past halfway" reputation. Rescaling
+///   onto `0.50..1.00` spent the whole knob on the part of that curve worth
+///   having. The in-house stage covers 8× over its whole range, which is less
+///   dramatic at the top; if the destructive end ever needs to be more
+///   destructive, `MAX_DRIVE_GAIN` in `core::dsp::shaper` is the lever.
 ///
 /// `0.0` is a discrete detent onto the bypass and the rest of the knob is
 /// strictly monotonic, so there is no dead zone between them.
 const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.2);
 
-/// Map the `WARP.DRV` macro onto Warps' own `drive` parameter.
+/// Map the `WARP.DRV` macro onto the shaping stage's `drive` parameter.
 ///
-/// Returns `(bypassed, warps_drive)`.
+/// Returns `(bypassed, drive)`.
 ///
 /// `0.0` is a discrete detent onto the bypass. Anything above it is rescaled
-/// `0.0..1.0` onto Warps' `0.50..1.00`, so the knob is strictly monotonic and
-/// spends its whole travel on the part of Warps' curve that is usable.
-/// Resolving this at control rate keeps the per-chunk strip path to two FFI
-/// calls with no arithmetic. See [`WARPS_DRIVE_INFO`].
+/// `0.0..1.0` onto `0.50..1.00`, so the knob is strictly monotonic and spends
+/// its whole travel on the part of Warps' curve that was usable.
+/// Resolving this at control rate keeps the per-chunk strip path to two calls
+/// with no arithmetic. See [`WARPS_DRIVE_INFO`].
 fn warps_drive_from_macro(macro_value: f32) -> (bool, f32) {
     let m = macro_value.clamp(0.0, 1.0);
     if m <= 0.0 {
@@ -992,10 +1011,22 @@ impl MiSlot {
         // closest to and it is cleanly bipolar. `ModDest::None` and unit
         // depth: routing and depth are the strip's own, applied per target in
         // `process_audio_strip`, so the LFO must hand over its raw value.
-        self.lfo1
-            .set_params(hz1, LfoWave::Triangle, LfoMode::Free, 1.0, ModDest::None, 0.0);
-        self.lfo2
-            .set_params(hz2, LfoWave::Triangle, LfoMode::Free, 1.0, ModDest::None, 0.25);
+        self.lfo1.set_params(
+            hz1,
+            LfoWave::Triangle,
+            LfoMode::Free,
+            1.0,
+            ModDest::None,
+            0.0,
+        );
+        self.lfo2.set_params(
+            hz2,
+            LfoWave::Triangle,
+            LfoMode::Free,
+            1.0,
+            ModDest::None,
+            0.25,
+        );
 
         // `ad_attack` and `ad_decay` are already seconds (0.001..1.0 and
         // 0.01..5.0). Stages took them as normalised segment parameters and

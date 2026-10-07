@@ -114,22 +114,26 @@ enum Command {
     /// 48× of gain and `drive = 0` is silence rather than clean — neither is
     /// visible in a number, and both are the difference between a kit that
     /// sounds like itself and one that does not.
-    /// A/B the ADAA waveshaper against the vendored Warps modulator.
     ///
-    /// Two files. The kit comparison is the musical question — does the
-    /// cheaper stage still sound like the instrument. The alias test is the
-    /// honest one: first-order ADAA *attenuates* aliasing rather than
-    /// removing it, and drums hide aliasing well, so the stage is also put
-    /// under a pitched sweep at full drive and full wet, which is where a
-    /// cheap antialiasing scheme fails audibly if it is going to.
-    Shaper {
-        /// Output path.
-        #[arg(short, long, default_value = "shaper-ab.wav")]
-        output: String,
-    },
+    /// The stage answering it now is `Shaper`, not Warps. The per-setting
+    /// labels on this sweep have been restated for it — see
+    /// `render_warps_drive_demo`.
     Warps {
         /// Output path.
         #[arg(short, long, default_value = "warps-drive.wav")]
+        output: String,
+    },
+    /// A/B the ADAA waveshaper against its own bypass.
+    ///
+    /// Two files. The kit comparison is the musical question — does the cheaper
+    /// stage still colour the kit, and by how much. The alias test is the
+    /// honest one: first-order ADAA *attenuates* aliasing rather than removing
+    /// it, and drums hide aliasing well, so the stage is also put under a
+    /// pitched sweep at full drive and full wet, which is where a cheap
+    /// antialiasing scheme fails audibly if it is going to.
+    Shaper {
+        /// Output path.
+        #[arg(short, long, default_value = "shaper-ab.wav")]
         output: String,
     },
     /// Render a retrigger/choke stress test to a WAV file.
@@ -2230,11 +2234,26 @@ fn print_gate_timeline(path: &str, samples: usize, timeline: &GateTimeline) {
 /// from the clean bypass to full destruction.
 ///
 /// Every setting gets the same eight hits at a steady tempo, so the only thing
-/// changing between them is Warps.
+/// changing between them is the shaping stage.
+///
+/// # The labels below are the shaper's, not Warps'
+///
+/// This function and its `warps` filename predate the substitution. Warps'
+/// `drive` was `0.5·drive` blended towards `24·drive⁵`, so its travel used to be
+/// described in pre-gain (0.4 / 1.0 / 3.4 / 9.7 / 24) and those numbers were
+/// printed here. `core::dsp::shaper` maps the macro onto the input gain of its
+/// cubic clipper instead — `1 + 7·macro`, so `1.0` to `8.0` — and the labels
+/// quote gain, because gain is what the code actually computes. The
+/// `WARP.DRV 0.00` row is unchanged and still the one that matters: it is the
+/// only bit-transparent point on the axis.
+///
+/// The *character* claims are still right, and are unchanged, because a cubic
+/// clipper flattens a sine, smears a click and drops the crest factor exactly
+/// as Warps' amplifier did.
 ///
 /// # Why a kick and not a tonal voice
 ///
-/// The source has to be *clean* for the drive to be legible. Warps is a
+/// The source has to be *clean* for the drive to be legible. The stage is a
 /// saturating waveshaper, so what you hear is the harmonic structure of
 /// whatever you feed it — and a six-operator FM voice is dense in partials from
 /// the first millisecond. Warping one produces something already complex, and
@@ -2260,11 +2279,14 @@ fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
     // (drive macro, what it should sound like)
     let entries: &[(f32, &str)] = &[
         (0.0, "BYPASS - bit transparent, kick uncoloured"),
-        (0.1, "light - Warps barely engaged, pre-gain ~0.4"),
-        (0.25, "unity - cleanest saturation point, pre-gain ~1.0"),
-        (0.5, "3x overdriven - the old default sat here"),
-        (0.75, "hard - pre-gain ~10, sine visibly flattening"),
-        (1.0, "destroyed - Warps at full drive, pre-gain 24"),
+        (0.1, "light - gain 1.7 into the cubic clipper"),
+        (0.25, "unity-ish - gain 2.75, the softest part of the knee"),
+        (
+            0.5,
+            "driven - gain 4.5, most of the kick is inside the clipper",
+        ),
+        (0.75, "hard - gain 6.25, sine visibly flattening"),
+        (1.0, "destroyed - gain 8.0, the clipper is all you hear"),
     ];
 
     let mut engine = mi_drum_engine::MiDrumEngine::new();
@@ -2566,9 +2588,22 @@ fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
 
     // Warps is gone; the comparison that remains is the stage against its own
     // bypass, which is the one that says whether it is doing anything.
+    //
+    // How much to expect from it, because the honest answer is "less than you
+    // might hope". `WARP.MIX` is 0.35 on the shipped kit, so a full-scale
+    // sample at the strip input moves at most 35% of the way to whatever the
+    // stage produced, and the difference between these two passes measures
+    // 9.4 dB below pass A — a colouration, not a transformation. Warps at the
+    // same macros measured 12.1 dB down, so the replacement is if anything the
+    // more present of the two. If you want to hear the stage rather than
+    // measure it, `Command::Shaper`'s second file puts it at `WARP.MIX = 1`,
+    // full drive, on a pitched sweep.
     let passes: &[(bool, &str)] = &[
         (true, "A - ADAA shaper, kit defaults"),
-        (false, "B - no shaping at all (WARP.DRV bypass), the reference"),
+        (
+            false,
+            "B - no shaping at all (WARP.DRV 0, bypass), the reference",
+        ),
     ];
 
     for (shaped, label) in passes {
@@ -2584,7 +2619,10 @@ fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
         engine.set_master_gain(0.5);
         if !*shaped {
             for t in 0..mi_drum_engine::TRACKS {
-                engine.tracks_mut()[t].set_macro(mi_drum_engine::SLOT_STRIP_HOLD, 0.0);
+                // `SLOT_WARPS_DRIVE`, not `SLOT_STRIP_HOLD`. Same slot index,
+                // but the printed label below says `WARP.DRV` and reaching for
+                // the generic name next to it reads like the bypass was missed.
+                engine.tracks_mut()[t].set_macro(mi_drum_engine::SLOT_WARPS_DRIVE, 0.0);
             }
         }
 
