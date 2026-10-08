@@ -311,6 +311,40 @@ fn note_name(note: u8) -> String {
     format!("{}{}", names[n], oct)
 }
 
+fn cc_name(cc: u8) -> &'static str {
+    match cc {
+        0 => "BankSelect",
+        1 => "ModWheel",
+        2 => "Breath",
+        4 => "Foot",
+        5 => "PortamentoTime",
+        6 => "DataEntryMSB",
+        7 => "Volume",
+        8 => "Balance",
+        10 => "Pan",
+        11 => "Expression",
+        12 => "Effect1",
+        13 => "Effect2",
+        16 => "GenPurpose1",
+        17 => "GenPurpose2",
+        18 => "GenPurpose3",
+        19 => "GenPurpose4",
+        64 => "Sustain",
+        65 => "Portamento",
+        66 => "Sostenuto",
+        67 => "SoftPedal",
+        68 => "Legato",
+        69 => "Hold2",
+        120 => "AllSoundOff",
+        123 => "AllNotesOff",
+        _ if (32..=63).contains(&cc) => "LSB",
+        _ if (64..=95).contains(&cc) => "Switch/Mode",
+        _ if (96..=101).contains(&cc) => "Data/Control",
+        _ if (102..=119).contains(&cc) => "Undefined",
+        _ => "",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,39 +409,5 @@ mod tests {
         assert_eq!(note_name(60), "C4");
         assert_eq!(note_name(36), "C2");
         assert_eq!(note_name(69), "A4");
-    }
-}
-
-fn cc_name(cc: u8) -> &'static str {
-    match cc {
-        0 => "BankSelect",
-        1 => "ModWheel",
-        2 => "Breath",
-        4 => "Foot",
-        5 => "PortamentoTime",
-        6 => "DataEntryMSB",
-        7 => "Volume",
-        8 => "Balance",
-        10 => "Pan",
-        11 => "Expression",
-        12 => "Effect1",
-        13 => "Effect2",
-        16 => "GenPurpose1",
-        17 => "GenPurpose2",
-        18 => "GenPurpose3",
-        19 => "GenPurpose4",
-        64 => "Sustain",
-        65 => "Portamento",
-        66 => "Sostenuto",
-        67 => "SoftPedal",
-        68 => "Legato",
-        69 => "Hold2",
-        120 => "AllSoundOff",
-        123 => "AllNotesOff",
-        _ if (32..=63).contains(&cc) => "LSB",
-        _ if (64..=95).contains(&cc) => "Switch/Mode",
-        _ if (96..=101).contains(&cc) => "Data/Control",
-        _ if (102..=119).contains(&cc) => "Undefined",
-        _ => "",
     }
 }

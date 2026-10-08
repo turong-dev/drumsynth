@@ -103,7 +103,11 @@ impl Report {
     /// are sent back to back, but USB MIDI packs several into a transfer and
     /// nothing guarantees the host hands them over together.
     fn complete(&self) -> bool {
-        self.pct.is_some() && self.proc_pct.is_some() && self.late.is_some() && self.underruns.is_some() && self.midi_rx.is_some()
+        self.pct.is_some()
+            && self.proc_pct.is_some()
+            && self.late.is_some()
+            && self.underruns.is_some()
+            && self.midi_rx.is_some()
     }
 }
 
@@ -260,7 +264,10 @@ pub fn run(
         (),
     )?;
 
-    println!("listening on '{name}' (channel {}, CC {CC_SLACK_PCT}/{CC_LATE_BLOCKS}/{CC_UNDERRUNS})", SLACK_CHANNEL + 1);
+    println!(
+        "listening on '{name}' (channel {}, CC {CC_SLACK_PCT}/{CC_LATE_BLOCKS}/{CC_UNDERRUNS})",
+        SLACK_CHANNEL + 1
+    );
     // Held for the duration; dropping it stops the driver thread.
     let _driver = match drive_hz {
         Some(hz) => {
@@ -339,7 +346,11 @@ pub fn run(
     println!(
         "\nworst over the run: {:.1}% of budget{}",
         100.0 * (worst_seen as u32 * CYCLES_PER_STEP) as f32 / BUDGET_CYCLES as f32,
-        if worst_seen >= 127 { " (scale capped — the real figure is higher)" } else { "" }
+        if worst_seen >= 127 {
+            " (scale capped — the real figure is higher)"
+        } else {
+            ""
+        }
     );
     Ok(())
 }

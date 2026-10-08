@@ -70,13 +70,19 @@ const WAVE_CAP_SECONDS: f32 = 0.1;
 
 /// The voice knobs worth checking: named, non-special controls. Excludes the
 /// machine selector, pan (spatial — mono-sum RMS reads it as flat), the send
-/// auxes (routing, not voice loudness), and reserved slots.
+/// auxes (routing, not voice loudness), the track strip, the LFOs (modulation
+/// routing, not the machine voice itself), and reserved slots.
 pub fn knob_slots(id: MachineId) -> impl Iterator<Item = (usize, &'static str)> {
     id.macros()
         .into_iter()
         .enumerate()
         .filter(|(_, m)| {
-            m.name != "RESV" && m.name != "MACH" && m.name != "PAN" && !m.name.starts_with("SEND.")
+            m.name != "RESV"
+                && m.name != "MACH"
+                && m.name != "PAN"
+                && !m.name.starts_with("SEND.")
+                && !m.name.starts_with("STRIP.")
+                && !m.name.starts_with("LFO")
         })
         .map(|(i, m)| (i, m.name))
 }
@@ -344,6 +350,14 @@ mod tests {
         assert!(!names.contains(&"PAN"));
         assert!(!names.contains(&"SEND.DLY"));
         assert!(!names.contains(&"SEND.RVB"));
+        assert!(
+            !names.contains(&"STRIP.CUT"),
+            "strip knobs are track routing"
+        );
+        assert!(
+            !names.contains(&"LFO1.RATE"),
+            "lfo knobs are modulation routing"
+        );
         assert!(names.contains(&"DEC"), "voice knobs stay: {names:?}");
     }
 
