@@ -44,16 +44,16 @@ const SWEEP_S: f32 = 8.0;
 /// margin without over-allocating.
 const MAX_FILE_S: f32 = 40.0;
 
-/// The strip's remap of the drive macro onto `Shaper::set_parameters`' own
-/// `drive` argument — `warps_drive_from_macro`, minus its bypass detent.
+/// The strip's remap of the drive param onto `Shaper::set_parameters`' own
+/// `drive` argument — `shaper_drive_from_param`, minus its bypass detent.
 ///
 /// `set_parameters` turns that into `1 + 7·m` of input gain, and the raw
 /// argument's bottom half is flat: everything at or below `drive = 0.5` is
 /// unity gain, because the formula is `((drive - 0.5) * 2).clamp(0, 1)`.
 /// Sweeping the raw argument from 0 would therefore spend half the file on a
-/// constant, which is why everything below is indexed by macro position and
+/// constant, which is why everything below is indexed by param position and
 /// remapped here.
-fn drive_from_macro_position(m: f32) -> f32 {
+fn drive_from_param_position(m: f32) -> f32 {
     0.5 + 0.5 * m
 }
 
@@ -226,7 +226,7 @@ impl SineProbe {
 /// # Why this file exists when `shaper-alias.wav` already sweeps algorithms
 ///
 /// The other two files under `Command::Shaper` both go through the whole
-/// mi-drum strip — master gain, `WARP.MIX`, the output limiter — and the
+/// mi-drum strip — master gain, `SHAPE.MIX`, the output limiter — and the
 /// alias test's source is a Plaits `String`, which is dense in partials from
 /// the first millisecond. Both are the right question for their own subject
 /// (does the stage colour the kit; does the antialiasing hold up), and neither
@@ -299,7 +299,7 @@ pub fn render_shaper_sine() -> (Vec<f32>, Vec<(f32, String)>) {
         (2.0 / 3.0, "diode ring"),
         (1.0, "digital ring"),
     ];
-    // Macro positions rather than `drive` values; `drive_from_macro_position`
+    // Param positions rather than `drive` values; `drive_from_param_position`
     // is the strip's remap, and `1 + 7·m` is the input gain each one lands on.
     let drives = [0.0f32, 1.0 / 3.0, 2.0 / 3.0, 1.0];
 
@@ -315,7 +315,7 @@ pub fn render_shaper_sine() -> (Vec<f32>, Vec<(f32, String)>) {
             ));
             probe
                 .shaper
-                .set_parameters(algo, TIMBRE, drive_from_macro_position(m));
+                .set_parameters(algo, TIMBRE, drive_from_param_position(m));
             probe.tone_section(&mut out, blocks(CELL_S));
             probe.gap(&mut out, GAP_S);
         }
@@ -331,7 +331,7 @@ pub fn render_shaper_sine() -> (Vec<f32>, Vec<(f32, String)>) {
         let a = b as f32 / (sweep_blocks - 1) as f32;
         probe
             .shaper
-            .set_parameters(a, TIMBRE, drive_from_macro_position(1.0));
+            .set_parameters(a, TIMBRE, drive_from_param_position(1.0));
         probe.tone(&mut out);
     }
     probe.cut(&mut out);
@@ -345,7 +345,7 @@ pub fn render_shaper_sine() -> (Vec<f32>, Vec<(f32, String)>) {
         let m = b as f32 / (sweep_blocks - 1) as f32;
         probe
             .shaper
-            .set_parameters(1.0 / 3.0, TIMBRE, drive_from_macro_position(m));
+            .set_parameters(1.0 / 3.0, TIMBRE, drive_from_param_position(m));
         probe.tone(&mut out);
     }
     probe.cut(&mut out);

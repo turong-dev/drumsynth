@@ -1,7 +1,7 @@
 //! Shared core for synth devices.
 //!
 //! This crate is `#![no_std]`, never allocates, and contains only the parts
-//! that are reusable across devices: DSP primitives, the macro/CC slot system,
+//! that are reusable across devices: DSP primitives, the param/CC slot system,
 //! a MIDI parser, and timing/event plumbing.
 //!
 //! Device-specific code — machine catalogs, engine structs, MIDI routing,
@@ -13,8 +13,8 @@
 
 pub mod dsp;
 pub mod engine;
-pub mod macros;
 pub mod midi;
+pub mod params;
 pub mod slot;
 pub mod sound;
 pub mod strip;
@@ -97,7 +97,7 @@ pub enum EngineEvent {
     NoteOn {
         /// MIDI channel, `0..=7` — selects the track in the device engine.
         channel: u8,
-        /// MIDI note number — sets the pitch (60 = macro pitch).
+        /// MIDI note number — sets the pitch (60 = param pitch).
         note: u8,
         /// Normalised velocity, `0.0..=1.0`.
         velocity: f32,

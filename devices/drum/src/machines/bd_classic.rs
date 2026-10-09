@@ -9,7 +9,7 @@
 //! tight, clicky attack over a sustained body; bring them closer together
 //! and it turns into a tom.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -31,7 +31,7 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
 
@@ -40,20 +40,20 @@ pub struct BdClassic {
     osc: SineOsc,
     amp_env: DecayEnv,
     pitch_env: DecayEnv,
-    // Cached from params so `tick` never reads the macro array.
+    // Cached from params so `tick` never reads the param array.
     start_hz: f32,
     end_hz: f32,
     sweep_range: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     drive: f32,
     level: f32,
 }
 
 impl BdClassic {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             osc: SineOsc::new(),
             amp_env: DecayEnv::new(0.0),
@@ -65,18 +65,18 @@ impl BdClassic {
             drive: 0.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 30.0 + 90.0 * macros[SLOT_MACH_0]; // TUNE 30..120 Hz
-        let pitch_ratio = 1.0 + 10.0 * macros[SLOT_MACH_1]; // SWEEP 1×..11×
-        let pitch_decay_s = 0.005 + 0.15 * macros[SLOT_MACH_2]; // SWP_T 5..155 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_MACH_5]; // DEC  50..1500 ms
-        let drive = 1.0 + 5.0 * macros[SLOT_MACH_7]; // DRIVE 1..6
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let end_hz = 30.0 + 90.0 * params[SLOT_MACH_0]; // TUNE 30..120 Hz
+        let pitch_ratio = 1.0 + 10.0 * params[SLOT_MACH_1]; // SWEEP 1×..11×
+        let pitch_decay_s = 0.005 + 0.15 * params[SLOT_MACH_2]; // SWP_T 5..155 ms
+        let amp_decay_s = 0.05 + 1.45 * params[SLOT_MACH_5]; // DEC  50..1500 ms
+        let drive = 1.0 + 5.0 * params[SLOT_MACH_7]; // DRIVE 1..6
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;
@@ -91,7 +91,7 @@ impl BdClassic {
         // All other slots are RESV and ignored — sine body, no transient.
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both sweep endpoints, so the whole pitch drop moves with the
     /// note rather than only the landing pitch. Absolute, not incremental:
@@ -149,8 +149,8 @@ mod tests {
 
     #[test]
     fn silent_until_struck() {
-        let macros = crate::machines::MachineId::BdClassic.default_macros();
-        let mut k = BdClassic::new(&macros);
+        let params = crate::machines::MachineId::BdClassic.default_params();
+        let mut k = BdClassic::new(&params);
         for _ in 0..1000 {
             assert_eq!(k.tick(), 0.0);
         }
@@ -158,9 +158,9 @@ mod tests {
 
     #[test]
     fn velocity_scales_output() {
-        let macros = crate::machines::MachineId::BdClassic.default_macros();
+        let params = crate::machines::MachineId::BdClassic.default_params();
         let peak_at = |vel: f32| {
-            let mut k = BdClassic::new(&macros);
+            let mut k = BdClassic::new(&params);
             k.trigger(vel);
             let mut peak = 0.0f32;
             for _ in 0..4800 {
@@ -176,8 +176,8 @@ mod tests {
     #[test]
     fn pitch_falls_over_time() {
         // Zero crossings early > late, since the sweep is downward.
-        let macros = crate::machines::MachineId::BdClassic.default_macros();
-        let mut k = BdClassic::new(&macros);
+        let params = crate::machines::MachineId::BdClassic.default_params();
+        let mut k = BdClassic::new(&params);
         k.trigger(1.0);
 
         let window = (0.01 * SAMPLE_RATE) as usize;
@@ -204,13 +204,13 @@ mod tests {
 
     #[test]
     fn retune_transposes_and_survives_recompute() {
-        let macros = crate::machines::MachineId::BdClassic.default_macros();
+        let params = crate::machines::MachineId::BdClassic.default_params();
         let window = (0.02 * SAMPLE_RATE) as usize;
         let crossings = |semis: f32, recompute: bool| {
-            let mut k = BdClassic::new(&macros);
+            let mut k = BdClassic::new(&params);
             k.retune(semis);
             if recompute {
-                k.set_macros(&macros);
+                k.set_params(&params);
             }
             k.trigger(1.0);
             let mut prev = k.tick();
@@ -230,7 +230,7 @@ mod tests {
         assert!(up > base, "octave-up should cross more: {base} vs {up}");
         assert!(
             i32::abs(up_recomputed - up) <= 1,
-            "set_macros dropped the retune: {up} vs {up_recomputed}"
+            "set_params dropped the retune: {up} vs {up_recomputed}"
         );
     }
 }

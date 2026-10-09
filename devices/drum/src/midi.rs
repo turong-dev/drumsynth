@@ -26,8 +26,8 @@
 //!
 //! * A `NoteOn` on channel `N` (wire `N-1`) plays track `N-1`
 //!   *chromatically* — the note number sets the pitch. Note 60 (middle C) is
-//!   the machine's macro pitch; each semitone away transposes the voice by
-//!   that many (track retune relative, so the macro pitch still maps the
+//!   the machine's param pitch; each semitone away transposes the voice by
+//!   that many (track retune relative, so the param pitch still maps the
 //!   same). Velocity 1..127 scales the voice output.
 //! * A `NoteOff` (or a `NoteOn` with zero velocity, which is the same thing on
 //!   the wire) closes the gate on track `N-1`. **Most machines ignore it**:
@@ -46,10 +46,10 @@
 //!
 //! `CC 7` (master gain) is global on any channel. Everything else is
 //! channel-scoped: a CC on channel `N` edits track `N-1`, matching the note
-//! routing. The CC map is the same flat macro index used everywhere —
-//! [`CC_TRACK_BASE`] = 20, `CC (20 + idx)` sets macro `idx`:
+//! routing. The CC map is the same flat param index used everywhere —
+//! [`CC_TRACK_BASE`] = 20, `CC (20 + idx)` sets param `idx`:
 //!
-//! | CC range  | bank     | macros     |
+//! | CC range  | bank     | params     |
 //! |-----------|----------|------------|
 //! | 20..=27   | PITCH    | 0..=7      |
 //! | 28..=35   | FILTER   | 8..=15     |
@@ -78,10 +78,10 @@
 //!
 //! # CC smoothing
 //!
-//! Track macros are set through [`Track::set_macro_target`](crate::Track::set_macro_target),
-//! not `set_macro`: the value ramps to its target at block rate (~7.5 ms
+//! Track params are set through [`Track::set_param_target`](crate::Track::set_param_target),
+//! not `set_param`: the value ramps to its target at block rate (~7.5 ms
 //! one-pole) inside the audio callback's control pass. A burst of CCs (a
-//! knob being spun) therefore costs one coefficient recompute per macro per
+//! knob being spun) therefore costs one coefficient recompute per param per
 //! block instead of one per message, which keeps `apply_cc` cheap enough for
 //! the main loop and keeps the `expf`-heavy recomputes off the audio hot
 //! path. The machine selector is exempt — it jumps instantly.
@@ -116,7 +116,7 @@ mod tests {
     /// Run enough control passes for the CC smoother on `track` to reach its
     /// targets. 200 blocks at k = 0.0851 leaves a residual below the 1e-4
     /// snap threshold, so this converges exactly.
-    fn converge_macros(e: &mut crate::DrumEngine, track: usize) {
+    fn converge_params(e: &mut crate::DrumEngine, track: usize) {
         for _ in 0..200 {
             e.tracks[track].control();
         }
@@ -142,7 +142,7 @@ mod tests {
     fn router_note_on_triggers_its_channel() {
         use crate::{DrumEngine, MachineId};
         // Channel 0 → track 0. Note 60 is the chromatic reference (no
-        // transpose), so the kick plays at its macro pitch.
+        // transpose), so the kick plays at its param pitch.
         let mut e = DrumEngine::new();
         handle_midi(
             &mut e,
@@ -175,9 +175,9 @@ mod tests {
         // One engine for the whole test — DrumEngine is ~260 KB, so a fresh
         // one per assertion would stack-overflow the 2 MB test thread.
         let mut e = DrumEngine::new();
-        let mac7_track1_before = e.tracks[1].base_macros[7];
+        let mac7_track1_before = e.tracks[1].base_params[7];
 
-        // CC 27 = 20 + 7 → macro 7. On channel 0 it edits track 0 only.
+        // CC 27 = 20 + 7 → param 7. On channel 0 it edits track 0 only.
         handle_midi(
             &mut e,
             MidiEvent::ControlChange {
@@ -186,15 +186,15 @@ mod tests {
                 value: 0.5,
             },
         );
-        // CCs ramp at block rate: the base macro must not jump yet.
+        // CCs ramp at block rate: the base param must not jump yet.
         assert!(
-            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            (e.tracks[0].base_params[7] - 0.5).abs() > 0.3,
             "CC should not apply instantly — it is block-rate smoothed"
         );
-        converge_macros(&mut e, 0);
-        assert_eq!(e.tracks[0].base_macros[7], 0.5, "macro 7 on track 0");
+        converge_params(&mut e, 0);
+        assert_eq!(e.tracks[0].base_params[7], 0.5, "param 7 on track 0");
         assert_eq!(
-            e.tracks[1].base_macros[7], mac7_track1_before,
+            e.tracks[1].base_params[7], mac7_track1_before,
             "channel 0 must not touch track 1"
         );
 
@@ -207,10 +207,10 @@ mod tests {
                 value: 0.25,
             },
         );
-        converge_macros(&mut e, 3);
-        assert_eq!(e.tracks[3].base_macros[7], 0.25, "macro 7 on track 3");
+        converge_params(&mut e, 3);
+        assert_eq!(e.tracks[3].base_params[7], 0.25, "param 7 on track 3");
         assert_eq!(
-            e.tracks[0].base_macros[7], 0.5,
+            e.tracks[0].base_params[7], 0.5,
             "channel 3 must not touch track 0"
         );
 
@@ -225,8 +225,8 @@ mod tests {
         );
         assert_eq!(e.master_gain, 0.25);
 
-        // Macro CC on a channel with no track is ignored.
-        let mac0_before = e.tracks[0].base_macros[0];
+        // Param CC on a channel with no track is ignored.
+        let mac0_before = e.tracks[0].base_params[0];
         handle_midi(
             &mut e,
             MidiEvent::ControlChange {
@@ -237,7 +237,7 @@ mod tests {
         );
         assert_eq!(e.master_gain, 0.25);
         assert_eq!(
-            e.tracks[0].base_macros[0], mac0_before,
+            e.tracks[0].base_params[0], mac0_before,
             "channel beyond the track count must be ignored"
         );
     }
@@ -264,7 +264,7 @@ mod tests {
             "CC 25 must swap the engine on the track's channel"
         );
 
-        // Channel-scoped, like every other track macro.
+        // Channel-scoped, like every other track param.
         handle_midi(
             &mut e,
             MidiEvent::ControlChange {
@@ -445,7 +445,7 @@ mod tests {
             0,
         );
         assert!(
-            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            (e.tracks[0].base_params[7] - 0.5).abs() > 0.3,
             "CC should be smoothed, not instant"
         );
 
@@ -479,7 +479,7 @@ mod tests {
     fn cc_value_ramps_to_its_target() {
         use crate::DrumEngine;
         let mut e = DrumEngine::new();
-        let before = e.tracks[0].base_macros[7];
+        let before = e.tracks[0].base_params[7];
 
         handle_midi(
             &mut e,
@@ -489,38 +489,38 @@ mod tests {
                 value: 0.5,
             },
         );
-        // The base macro must not have jumped; it is slewing.
+        // The base param must not have jumped; it is slewing.
         assert!(
-            (e.tracks[0].base_macros[7] - 0.5).abs() > 0.3,
+            (e.tracks[0].base_params[7] - 0.5).abs() > 0.3,
             "CC applied instantly"
         );
         assert_eq!(
-            e.tracks[0].base_macros[7], before,
+            e.tracks[0].base_params[7], before,
             "base should be untouched mid-ramp"
         );
 
         // One control pass nudges it partway toward the target.
         e.tracks[0].control();
         assert!(
-            e.tracks[0].base_macros[7] > before,
+            e.tracks[0].base_params[7] > before,
             "first block must move toward the target"
         );
 
         // Enough blocks converge to the exact target.
-        converge_macros(&mut e, 0);
-        assert_eq!(e.tracks[0].base_macros[7], 0.5);
+        converge_params(&mut e, 0);
+        assert_eq!(e.tracks[0].base_params[7], 0.5);
     }
 
     #[test]
-    fn direct_set_macro_cancels_a_pending_ramp() {
+    fn direct_set_param_cancels_a_pending_ramp() {
         use crate::DrumEngine;
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro_target(7, 1.0);
+        e.tracks[0].set_param_target(7, 1.0);
         // A programmatic set mid-ramp is authoritative: the ramp stops.
-        e.tracks[0].set_macro(7, 0.2);
-        converge_macros(&mut e, 0);
+        e.tracks[0].set_param(7, 0.2);
+        converge_params(&mut e, 0);
         assert_eq!(
-            e.tracks[0].base_macros[7], 0.2,
+            e.tracks[0].base_params[7], 0.2,
             "the pending ramp should have been cancelled"
         );
     }

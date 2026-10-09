@@ -38,7 +38,7 @@ pub use device_core::{
     MAX_TIMED_EVENTS, SAMPLE_RATE,
 };
 
-pub use device_core::macros::{
+pub use device_core::params::{
     SLOT_FILT_0, SLOT_FILT_1, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
     SLOT_STRIP_RESO,
 };
@@ -48,8 +48,8 @@ use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
 use device_core::dsp::svf::stability_ceiling_hz;
 use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
-use device_core::macros::{
-    macro_index, mi, MacroInfo, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO, NUM_MACROS, OUT_INFO,
+use device_core::params::{
+    mi, param_index, ParamInfo, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO, NUM_PARAMS, OUT_INFO,
     PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1,
     SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
     SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
@@ -59,7 +59,7 @@ use mi_dsp::peaks::{PeaksModel, PeaksVoice};
 use mi_dsp::plaits::{MiPlaitsModulations, MiPlaitsPatch, PlaitsVoice};
 use mi_dsp::warps::{OscShape, WarpsOscillator, MAX_BLOCK as WARPS_MAX_BLOCK};
 
-/// What feeds Warps' modulator input. See [`SLOT_WARPS_MOD_SRC`].
+/// What feeds Warps' modulator input. See [`SLOT_SHAPER_MOD_SRC`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ModSource {
     /// The voice's own output, in both of Warps' inputs.
@@ -67,7 +67,7 @@ pub enum ModSource {
     Self_,
     /// Plaits' aux output. Falls back to `Self_` on a Peaks voice.
     Aux,
-    /// The strip's own oscillator, shape from `WARP.OSC`.
+    /// The strip's own oscillator, shape from `SHAPE.OSC`.
     Oscillator,
 }
 
@@ -204,7 +204,7 @@ impl MiMachineId {
     pub const PLAITS_COUNT: usize = 24;
 
     /// All machines, in catalogue order. This order is stable ABI: the
-    /// `SLOT_MACHINE` macro quantises over it.
+    /// `SLOT_MACHINE` param quantises over it.
     pub const ALL: [Self; Self::COUNT] = [
         Self::VirtualAnalogVcf,
         Self::PhaseDistortion,
@@ -376,7 +376,7 @@ impl MiMachineId {
         self.index() as i32
     }
 
-    /// Machine-specific default macro values.
+    /// Machine-specific default param values.
     /// Whether this machine's aux output carries a *different* signal from
     /// its main output.
     ///
@@ -387,7 +387,7 @@ impl MiMachineId {
     /// indistinguishable from self-modulation. A Peaks voice has no aux at
     /// all.
     ///
-    /// This is what decides a machine's `WARP.IN` default: aux where there is
+    /// This is what decides a machine's `SHAPE.IN` default: aux where there is
     /// a real second signal, the strip's oscillator where there is not.
     /// `every_machine_has_a_real_modulator_by_default` is the guard, and it
     /// is what caught this — the first version of that default was a single
@@ -397,8 +397,8 @@ impl MiMachineId {
         !self.is_peaks() && !matches!(self, Self::SixOp1 | Self::SixOp2 | Self::SixOp3)
     }
 
-    /// Machine-specific default macro values.
-    pub fn default_macros(self) -> [f32; NUM_MACROS] {
+    /// Machine-specific default param values.
+    pub fn default_params(self) -> [f32; NUM_PARAMS] {
         // Default TUNE: drums sit lower, melodic models near middle C.
         let tune = match self {
             Self::BassDrum | Self::SnareDrum | Self::HiHat => 0.30,
@@ -409,7 +409,7 @@ impl MiMachineId {
             Self::BassDrum | Self::SnareDrum | Self::HiHat | Self::Modal | Self::String => 0.45,
             _ => 0.50,
         };
-        let mut m = [0.0f32; NUM_MACROS];
+        let mut m = [0.0f32; NUM_PARAMS];
         if self.is_peaks() {
             // A Peaks model's MACH 1..4 are its own parameters, not Plaits
             // patch fields, and the TUNE slot is unused because pitch comes
@@ -441,49 +441,49 @@ impl MiMachineId {
         m[SLOT_SEND_REVERB] = 0.0;
 
         // Phase 14 fixed strip defaults.
-        m[SLOT_WARPS_ALGO] = 0.0;
-        m[SLOT_WARPS_TIMBRE] = 0.5;
-        m[SLOT_WARPS_DRIVE] = 0.2; // light colour; 0.0 is a true bypass
+        m[SLOT_SHAPER_ALGO] = 0.0;
+        m[SLOT_SHAPER_TIMBRE] = 0.5;
+        m[SLOT_SHAPER_DRIVE] = 0.2; // light colour; 0.0 is a true bypass
 
         m[SLOT_RIPPLES_CUTOFF] = 1.0; // fully open — see RIPPLES_CUTOFF_INFO
         m[SLOT_RIPPLES_RESONANCE] = 0.01; // gentle Q
         m[SLOT_RIPPLES_FM] = 0.0;
         // Warps as a colour rather than a transform: a third wet by default,
         // its modulator fed from Plaits' aux, taking the main output.
-        m[SLOT_WARPS_MIX] = 0.35;
+        m[SLOT_SHAPER_MIX] = 0.35;
         // Per machine, because a single shared default leaves some voices
         // cross-modulating against themselves — the degenerate case this
         // whole arrangement exists to avoid. Aux where the machine has a
         // distinct one, the strip's oscillator where it does not. See
         // `has_distinct_aux`.
-        m[SLOT_WARPS_MOD_SRC] = if self.has_distinct_aux() { 0.5 } else { 1.0 };
-        m[SLOT_WARPS_OSC_SHAPE] = 0.0; // sine
-        m[SLOT_WARPS_OUT_TAP] = 0.0;
+        m[SLOT_SHAPER_MOD_SRC] = if self.has_distinct_aux() { 0.5 } else { 1.0 };
+        m[SLOT_SHAPER_OSC_SHAPE] = 0.0; // sine
+        m[SLOT_SHAPER_OUT_TAP] = 0.0;
 
         // Modulation defaults. The per-target depths are 0 so the sound is
-        // unchanged until a macro is moved; the LFO master is 1 so turning up
+        // unchanged until a param is moved; the LFO master is 1 so turning up
         // a per-target depth alone is enough to hear the route.
         m[SLOT_LFO_RATE] = 0.5;
         m[SLOT_LFO_DEPTH] = 1.0;
         m[SLOT_AD_ATTACK] = 0.05;
         m[SLOT_AD_DECAY] = 0.3;
         m[SLOT_LFO_FILTER_DEPTH] = 0.0;
-        m[SLOT_LFO_WARPS_DEPTH] = 0.0;
+        m[SLOT_LFO_SHAPER_DEPTH] = 0.0;
         m[SLOT_AD_FILTER_DEPTH] = 0.0;
-        m[SLOT_AD_WARPS_DEPTH] = 0.0;
+        m[SLOT_AD_SHAPER_DEPTH] = 0.0;
 
         m
     }
 
-    /// Per-macro metadata. All MI machines share the same layout.
-    pub fn macros(self) -> [MacroInfo; NUM_MACROS] {
+    /// Per-param metadata. All MI machines share the same layout.
+    pub fn params(self) -> [ParamInfo; NUM_PARAMS] {
         let _ = self;
-        MACROS
+        PARAMS
     }
 
-    /// Look up a macro's metadata by name. Case-insensitive, ASCII only.
-    pub fn macro_by_name(self, name: &str) -> Option<(usize, MacroInfo)> {
-        for (i, m) in self.macros().into_iter().enumerate() {
+    /// Look up a param's metadata by name. Case-insensitive, ASCII only.
+    pub fn param_by_name(self, name: &str) -> Option<(usize, ParamInfo)> {
+        for (i, m) in self.params().into_iter().enumerate() {
             if m.name.eq_ignore_ascii_case(name.trim()) {
                 return Some((i, m));
             }
@@ -492,7 +492,7 @@ impl MiMachineId {
     }
 }
 
-impl SlotId<NUM_MACROS> for MiMachineId {
+impl SlotId<NUM_PARAMS> for MiMachineId {
     fn index(self) -> usize {
         self.index()
     }
@@ -502,34 +502,34 @@ impl SlotId<NUM_MACROS> for MiMachineId {
     fn count() -> usize {
         Self::COUNT
     }
-    fn default_macros(self) -> [f32; NUM_MACROS] {
-        self.default_macros()
+    fn default_params(self) -> [f32; NUM_PARAMS] {
+        self.default_params()
     }
 }
 
-impl DeviceModel<NUM_MACROS> for MiMachineId {
-    fn macro_info(self) -> [MacroInfo; NUM_MACROS] {
-        self.macros()
+impl DeviceModel<NUM_PARAMS> for MiMachineId {
+    fn param_info(self) -> [ParamInfo; NUM_PARAMS] {
+        self.params()
     }
     fn label(self) -> &'static str {
         self.label()
     }
 }
 
-// Macro slot aliases for the Phase 14 fixed strip.
-const SLOT_WARPS_ALGO: usize = SLOT_FILT_0;
-const SLOT_WARPS_TIMBRE: usize = SLOT_FILT_1;
-/// FILT 6: shape of the strip's own oscillator, when `WARP.IN` selects it as
+// Param slot aliases for the Phase 14 fixed strip.
+const SLOT_SHAPER_ALGO: usize = SLOT_FILT_0;
+const SLOT_SHAPER_TIMBRE: usize = SLOT_FILT_1;
+/// FILT 6: shape of the strip's own oscillator, when `SHAPE.IN` selects it as
 /// Warps' modulator. Sine / triangle / saw / pulse / noise, pitched from the
 /// voice's note.
 ///
-/// This slot used to be `WARP.CAR`, which put the same oscillator on Warps'
+/// This slot used to be `SHAPE.CAR`, which put the same oscillator on Warps'
 /// *carrier* input. That was the wrong side: with an internal carrier the
 /// voice is demoted to a modulation index, which is why all 28 machines
 /// sounded like one sawtooth through it. On the modulator side the voice
 /// stays the carrier and keeps its identity, and the strip no longer needs
 /// Warps' `carrier_shape` at all — `Carrier::External` is now permanent.
-pub const SLOT_WARPS_OSC_SHAPE: usize = macro_index(BANK_FILT, 6);
+pub const SLOT_SHAPER_OSC_SHAPE: usize = param_index(BANK_FILT, 6);
 
 /// FILT 5: input drive into the shaping stage, and the bypass detent at 0.
 ///
@@ -537,8 +537,8 @@ pub const SLOT_WARPS_OSC_SHAPE: usize = macro_index(BANK_FILT, 6);
 /// spent the strip AHD's four slots on the fixed Warps -> Ripples strip and
 /// gave the generic names back to the generic names. Public because the host
 /// renderer reaches for "take the stage out" by name, and `SLOT_STRIP_HOLD`
-/// next to a printed `WARP.DRV 0` label reads like the bypass silently missed.
-pub const SLOT_WARPS_DRIVE: usize = SLOT_STRIP_HOLD;
+/// next to a printed `SHAPE.DRV 0` label reads like the bypass silently missed.
+pub const SLOT_SHAPER_DRIVE: usize = SLOT_STRIP_HOLD;
 
 const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
 const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
@@ -549,28 +549,28 @@ const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
 /// Warps has no mix control of its own — `Modulator::Process` is 100% wet,
 /// and `channel_drive` only feeds the input saturators — so the strip
 /// supplies one. 0 is the untouched voice, 1 is Warps alone. This is the
-/// control that makes Warps usable as a colour; `WARP.DRV` is then purely how
+/// control that makes Warps usable as a colour; `SHAPE.DRV` is then purely how
 /// hard the inputs are driven.
-pub const SLOT_WARPS_MIX: usize = macro_index(BANK_FILT, 7);
+pub const SLOT_SHAPER_MIX: usize = param_index(BANK_FILT, 7);
 
 /// TRACK 6: what feeds Warps' modulator input (input 2). Three positions.
 ///
 /// - **0 — self.** The voice's own output in both inputs. Degenerate, and
 ///   kept only because it is what the strip did before: a comparator fed two
 ///   identical signals has nothing to compare, and `ALGORITHM_XFADE` reduces
-///   to a gain, which makes `WARP.TIM` a trim rather than a timbre control.
+///   to a gain, which makes `SHAPE.TIM` a trim rather than a timbre control.
 /// - **1 — aux.** Plaits' second output, which the slot renders every block
 ///   and used to discard. Free, and the patch Warps is designed for. A Peaks
 ///   voice has no aux, so a Peaks track falls back to self.
 /// - **2 — oscillator.** The strip's own [`WarpsOscillator`], shape from
-///   `WARP.OSC`, pitched from the voice's note. The only source available to
+///   `SHAPE.OSC`, pitched from the voice's note. The only source available to
 ///   every voice type, which matters because four of the six default tracks
 ///   are Peaks and would otherwise be stuck on self.
 ///
 /// Stepped rather than a crossfade. The three are different *kinds* of
 /// signal, not points on an axis, and blending a pitched oscillator into an
 /// aux output is not a position anybody reaches for.
-pub const SLOT_WARPS_MOD_SRC: usize = macro_index(BANK_TRACK, 6);
+pub const SLOT_SHAPER_MOD_SRC: usize = param_index(BANK_TRACK, 6);
 
 /// TRACK 7: which Warps output the strip takes.
 ///
@@ -579,46 +579,46 @@ pub const SLOT_WARPS_MOD_SRC: usize = macro_index(BANK_TRACK, 6);
 /// a second cross-modulated voice (`modulator.cc:209`-`:222`) — so it is a
 /// drive-only tap, Warps as a saturator with the ring modulation taken out.
 /// Values in between crossfade.
-pub const SLOT_WARPS_OUT_TAP: usize = macro_index(BANK_TRACK, 7);
+pub const SLOT_SHAPER_OUT_TAP: usize = param_index(BANK_TRACK, 7);
 
 /// MOD 0: Stages LFO period, 0..1 = slow..fast. Shared by LFO 1 and LFO 2.
-pub const SLOT_LFO_RATE: usize = macro_index(BANK_MOD, 0);
+pub const SLOT_LFO_RATE: usize = param_index(BANK_MOD, 0);
 /// MOD 1: master LFO depth scalar applied before the per-target depths.
-pub const SLOT_LFO_DEPTH: usize = macro_index(BANK_MOD, 1);
+pub const SLOT_LFO_DEPTH: usize = param_index(BANK_MOD, 1);
 /// MOD 2: Stages AD envelope attack time, 0..1 mapped to 1 ms..1 s.
-pub const SLOT_AD_ATTACK: usize = macro_index(BANK_MOD, 2);
+pub const SLOT_AD_ATTACK: usize = param_index(BANK_MOD, 2);
 /// MOD 3: Stages AD envelope decay time, 0..1 mapped to 10 ms..5 s.
-pub const SLOT_AD_DECAY: usize = macro_index(BANK_MOD, 3);
+pub const SLOT_AD_DECAY: usize = param_index(BANK_MOD, 3);
 /// MOD 4: LFO depth into the Ripples cutoff, in octaves at full scale.
-pub const SLOT_LFO_FILTER_DEPTH: usize = macro_index(BANK_MOD, 4);
+pub const SLOT_LFO_FILTER_DEPTH: usize = param_index(BANK_MOD, 4);
 /// MOD 5: LFO 2 depth into the Warps timbre parameter.
-pub const SLOT_LFO_WARPS_DEPTH: usize = macro_index(BANK_MOD, 5);
+pub const SLOT_LFO_SHAPER_DEPTH: usize = param_index(BANK_MOD, 5);
 /// MOD 6: AD env 1 depth into the Ripples cutoff, in octaves at full scale.
 ///
 /// The AD envelopes are **unipolar**, so this route only ever *opens* the
 /// filter. With the default `RIP.CUT` now fully open there is nowhere to go,
-/// and the depth macro does nothing until `RIP.CUT` is pulled down. That is
+/// and the depth param does nothing until `RIP.CUT` is pulled down. That is
 /// the same failure mode as a dead modulation route and it is worth knowing
 /// about before reaching for the knob: close the filter, then set the depth.
 /// `AD.FIL` is not bipolar and is not meant to be — a filter envelope that
 /// darkens the voice before it opens it is not what a drum machine wants.
-pub const SLOT_AD_FILTER_DEPTH: usize = macro_index(BANK_MOD, 6);
+pub const SLOT_AD_FILTER_DEPTH: usize = param_index(BANK_MOD, 6);
 /// MOD 7: AD env 2 depth into the Warps timbre parameter.
-pub const SLOT_AD_WARPS_DEPTH: usize = macro_index(BANK_MOD, 7);
+pub const SLOT_AD_SHAPER_DEPTH: usize = param_index(BANK_MOD, 7);
 
-const WARPS_ALGO_INFO: MacroInfo = mi("WARP.ALG", "WAL", 0.0);
-const WARPS_TIMBRE_INFO: MacroInfo = mi("WARP.TIM", "WTM", 0.5);
-const WARPS_OSC_SHAPE_INFO: MacroInfo = mi("WARP.OSC", "WOS", 0.0);
+const SHAPER_ALGO_INFO: ParamInfo = mi("SHAPE.ALG", "SAL", 0.0);
+const SHAPER_TIMBRE_INFO: ParamInfo = mi("SHAPE.TIM", "STM", 0.5);
+const SHAPER_OSC_SHAPE_INFO: ParamInfo = mi("SHAPE.OSC", "SOS", 0.0);
 /// Input drive into the shaping stage, and the clean end of the strip.
 ///
 /// The stage is `core::dsp::shaper`, which takes an input gain rather than
-/// Warps' `drive` parameter, so the macro is remapped twice on the way in:
-/// [`warps_drive_from_macro`] rescales `0.0..1.0` onto `0.50..1.00` — Warps'
+/// Warps' `drive` parameter, so the param is remapped twice on the way in:
+/// [`shaper_drive_from_param`] rescales `0.0..1.0` onto `0.50..1.00` — Warps'
 /// usable span, kept so the knob means the same thing it used to — and
-/// `Shaper::set_parameters` maps that onto `1 + 7·macro` of input gain. The
+/// `Shaper::set_parameters` maps that onto `1 + 7·param` of input gain. The
 /// resulting travel:
 ///
-/// | `WARP.DRV` | stage `drive` | input gain | knee at | character |
+/// | `SHAPE.DRV` | stage `drive` | input gain | knee at | character |
 /// |---|---|---|---|---|
 /// | 0.00 | — | — | — | **bypass**: bit-transparent, no colour |
 /// | 0.01 | 0.505 | 1.07 | 0.93 | barely engaged |
@@ -629,7 +629,7 @@ const WARPS_OSC_SHAPE_INFO: MacroInfo = mi("WARP.OSC", "WOS", 0.0);
 ///
 /// "Knee at" is where the cubic clipper stops being linear, i.e. the strip-input
 /// level at which `clip3` starts compressing. It is *not* the stage's net gain:
-/// that also depends on `WARP.ALG` and `WARP.TIM`, which set the post-gain of
+/// that also depends on `SHAPE.ALG` and `SHAPE.TIM`, which set the post-gain of
 /// whichever algorithm the crossfade has landed on. The default
 /// (crossfade, timbre 0.5) is unity-summed at 0.707 per side.
 ///
@@ -649,9 +649,9 @@ const WARPS_OSC_SHAPE_INFO: MacroInfo = mi("WARP.OSC", "WOS", 0.0);
 ///
 /// `0.0` is a discrete detent onto the bypass and the rest of the knob is
 /// strictly monotonic, so there is no dead zone between them.
-const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.2);
+const SHAPER_DRIVE_INFO: ParamInfo = mi("SHAPE.DRV", "SDR", 0.2);
 
-/// Map the `WARP.DRV` macro onto the shaping stage's `drive` parameter.
+/// Map the `SHAPE.DRV` param onto the shaping stage's `drive` parameter.
 ///
 /// Returns `(bypassed, drive)`.
 ///
@@ -659,9 +659,9 @@ const WARPS_DRIVE_INFO: MacroInfo = mi("WARP.DRV", "WDR", 0.2);
 /// `0.0..1.0` onto `0.50..1.00`, so the knob is strictly monotonic and spends
 /// its whole travel on the part of Warps' curve that was usable.
 /// Resolving this at control rate keeps the per-chunk strip path to two calls
-/// with no arithmetic. See [`WARPS_DRIVE_INFO`].
-fn warps_drive_from_macro(macro_value: f32) -> (bool, f32) {
-    let m = macro_value.clamp(0.0, 1.0);
+/// with no arithmetic. See [`SHAPER_DRIVE_INFO`].
+fn shaper_drive_from_param(param_value: f32) -> (bool, f32) {
+    let m = param_value.clamp(0.0, 1.0);
     if m <= 0.0 {
         return (true, 0.0);
     }
@@ -669,7 +669,7 @@ fn warps_drive_from_macro(macro_value: f32) -> (bool, f32) {
 }
 /// Ripples cutoff. 1.0 = fully open, matching `core`'s own `STRIP_CUT_INFO`.
 ///
-/// This was 0.5, which the `20 * 1000^macro` mapping turns into a **632 Hz**
+/// This was 0.5, which the `20 * 1000^param` mapping turns into a **632 Hz**
 /// low-pass on every track. Measured on the rendered baseline, that put
 /// everything above 1 kHz at least 45 dB down — a telephone band, not a drum
 /// machine filter — and the comment here used to claim "~1 kHz", which was
@@ -681,33 +681,33 @@ fn warps_drive_from_macro(macro_value: f32) -> (bool, f32) {
 /// stability ceiling at 1.0 — ~6.4 kHz at the default `Q = 0.695`, and higher
 /// as resonance comes down. Mapping to a nominal 20 kHz instead left the top
 /// sixth of the knob flat and put modulation out of reach of the live region;
-/// see `MiSlot::ripples_cutoff_from_macro` and `core::dsp::svf`.
-const RIPPLES_CUTOFF_INFO: MacroInfo = mi("RIP.CUT", "RCT", 1.0);
-const RIPPLES_RESONANCE_INFO: MacroInfo = mi("RIP.RES", "RRS", 0.5);
+/// see `MiSlot::ripples_cutoff_from_param` and `core::dsp::svf`.
+const RIPPLES_CUTOFF_INFO: ParamInfo = mi("RIP.CUT", "RCT", 1.0);
+const RIPPLES_RESONANCE_INFO: ParamInfo = mi("RIP.RES", "RRS", 0.5);
 /// Ripples FM: audio-rate modulation of the filter cutoff by the signal
 /// entering the filter.
 ///
-/// This macro existed, had a label and a default, and was never read by
+/// This param existed, had a label and a default, and was never read by
 /// anything — `SLOT_RIPPLES_FM` appeared only in the table and in
-/// `default_macros`. It is wired now. The source is the post-Warps signal, so
+/// `default_params`. It is wired now. The source is the post-Warps signal, so
 /// it is self-FM: the classic growling filter rather than a tremolo, and
 /// distinct from the `LFO.FIL` and `AD.FIL` routes, which are control-rate.
 /// Full scale is +/-2 octaves of cutoff swing per unit of input.
-const RIPPLES_FM_INFO: MacroInfo = mi("RIP.FM", "RFM", 0.0);
-const WARPS_MIX_INFO: MacroInfo = mi("WARP.MIX", "WMX", 0.35);
-const WARPS_MOD_SRC_INFO: MacroInfo = mi("WARP.IN", "WIN", 0.5);
-const WARPS_OUT_TAP_INFO: MacroInfo = mi("WARP.OUT", "WOU", 0.0);
-const LFO_RATE_INFO: MacroInfo = mi("LFO.RATE", "LRT", 0.5);
-const LFO_DEPTH_INFO: MacroInfo = mi("LFO.DEPTH", "LDPT", 1.0);
-const AD_ATTACK_INFO: MacroInfo = mi("AD.ATK", "AAT", 0.05);
-const AD_DECAY_INFO: MacroInfo = mi("AD.DEC", "ADEC", 0.3);
-const LFO_FILTER_DEPTH_INFO: MacroInfo = mi("LFO.FIL", "LFI", 0.0);
-const LFO_WARPS_DEPTH_INFO: MacroInfo = mi("LFO.WRP", "LWR", 0.0);
-const AD_FILTER_DEPTH_INFO: MacroInfo = mi("AD.FIL", "AFI", 0.0);
-const AD_WARPS_DEPTH_INFO: MacroInfo = mi("AD.WRP", "AWR", 0.0);
+const RIPPLES_FM_INFO: ParamInfo = mi("RIP.FM", "RFM", 0.0);
+const SHAPER_MIX_INFO: ParamInfo = mi("SHAPE.MIX", "SMX", 0.35);
+const SHAPER_MOD_SRC_INFO: ParamInfo = mi("SHAPE.IN", "SIN", 0.5);
+const SHAPER_OUT_TAP_INFO: ParamInfo = mi("SHAPE.OUT", "SOU", 0.0);
+const LFO_RATE_INFO: ParamInfo = mi("LFO.RATE", "LRT", 0.5);
+const LFO_DEPTH_INFO: ParamInfo = mi("LFO.DEPTH", "LDPT", 1.0);
+const AD_ATTACK_INFO: ParamInfo = mi("AD.ATK", "AAT", 0.05);
+const AD_DECAY_INFO: ParamInfo = mi("AD.DEC", "ADEC", 0.3);
+const LFO_FILTER_DEPTH_INFO: ParamInfo = mi("LFO.FIL", "LFI", 0.0);
+const LFO_SHAPER_DEPTH_INFO: ParamInfo = mi("LFO.WRP", "LWR", 0.0);
+const AD_FILTER_DEPTH_INFO: ParamInfo = mi("AD.FIL", "AFI", 0.0);
+const AD_SHAPER_DEPTH_INFO: ParamInfo = mi("AD.WRP", "AWR", 0.0);
 
-/// Shared macro metadata table for all MI machines.
-static MACROS: [MacroInfo; NUM_MACROS] = [
+/// Shared param metadata table for all MI machines.
+static PARAMS: [ParamInfo; NUM_PARAMS] = [
     mi("TUNE", "TUN", 0.45),  // MACH 0
     mi("HARM", "HRM", 0.5),   // MACH 1
     mi("TIMBRE", "TIM", 0.5), // MACH 2
@@ -716,30 +716,30 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
     mi("TM.MOD", "TMM", 0.0), // MACH 5
     mi("MM.MOD", "MMM", 0.0), // MACH 6
     mi("DECAY", "DEC", 0.5),  // MACH 7
-    WARPS_ALGO_INFO,          // FILT 0 — Warps algorithm
-    WARPS_TIMBRE_INFO,        // FILT 1 — Warps timbre
+    SHAPER_ALGO_INFO,         // FILT 0 — Warps algorithm
+    SHAPER_TIMBRE_INFO,       // FILT 1 — Warps timbre
     RIPPLES_CUTOFF_INFO,      // FILT 2 — Ripples cutoff
     RIPPLES_RESONANCE_INFO,   // FILT 3 — Ripples resonance
     RIPPLES_FM_INFO,          // FILT 4 — Ripples FM amount
-    WARPS_DRIVE_INFO,         // FILT 5 — Warps input drive / VCA
-    WARPS_OSC_SHAPE_INFO,     // FILT 6 — strip oscillator shape
-    WARPS_MIX_INFO,           // FILT 7 — Warps dry/wet
+    SHAPER_DRIVE_INFO,        // FILT 5 — Warps input drive / VCA
+    SHAPER_OSC_SHAPE_INFO,    // FILT 6 — strip oscillator shape
+    SHAPER_MIX_INFO,          // FILT 7 — Warps dry/wet
     MACH_INFO,                // TRACK 0
     OUT_INFO,                 // TRACK 1
     PAN_INFO,                 // TRACK 2
     mi("LEVEL", "LVL", 0.85), // TRACK 3
     SEND_DLY_INFO,            // TRACK 4
     SEND_RVB_INFO,            // TRACK 5
-    WARPS_MOD_SRC_INFO,       // TRACK 6 — Warps modulator source
-    WARPS_OUT_TAP_INFO,       // TRACK 7 — Warps output tap
+    SHAPER_MOD_SRC_INFO,      // TRACK 6 — Warps modulator source
+    SHAPER_OUT_TAP_INFO,      // TRACK 7 — Warps output tap
     LFO_RATE_INFO,            // MOD 0
     LFO_DEPTH_INFO,           // MOD 1
     AD_ATTACK_INFO,           // MOD 2
     AD_DECAY_INFO,            // MOD 3
     LFO_FILTER_DEPTH_INFO,    // MOD 4
-    LFO_WARPS_DEPTH_INFO,     // MOD 5
+    LFO_SHAPER_DEPTH_INFO,    // MOD 5
     AD_FILTER_DEPTH_INFO,     // MOD 6
-    AD_WARPS_DEPTH_INFO,      // MOD 7
+    AD_SHAPER_DEPTH_INFO,     // MOD 7
 ];
 
 /// A block-buffered Plaits voice implementing the per-sample `Slot` trait.
@@ -815,7 +815,7 @@ pub struct MiSlot {
     gate_release_pending: bool,
     active: bool,
     silence_counter: u8,
-    tune_macro: f32,
+    tune_param: f32,
     retune_semitones: f32,
     // Phase 14 fixed-strip modules.
     /// The strip's shaping stage.
@@ -828,11 +828,11 @@ pub struct MiSlot {
     /// `docs/warps-vendoring.md` for the measurements and for what was given
     /// up with it.
     shaper: Shaper,
-    /// Shape of the strip's own oscillator, from `WARP.OSC`.
-    warps_osc_shape: OscShape,
+    /// Shape of the strip's own oscillator, from `SHAPE.OSC`.
+    shaper_osc_shape: OscShape,
     /// The strip's modulator oscillator. Not Warps' internal carrier: this
     /// one feeds input 2, so the voice keeps input 1 and stays the subject.
-    warps_osc: WarpsOscillator,
+    shaper_osc: WarpsOscillator,
     /// Peak follower on the voice, used to gate the oscillator.
     ///
     /// The oscillator free-runs, and the cross-modulation algorithms do not
@@ -868,25 +868,25 @@ pub struct MiSlot {
     lfo2_out: [f32; BLOCK],
     env1_out: [f32; BLOCK],
     env2_out: [f32; BLOCK],
-    // Cached strip parameters, derived from macros each block.
-    warps_algorithm: f32,
-    warps_timbre: f32,
-    /// Resolved Warps input drive, 0.5..=1.0. Already remapped from the macro
-    /// by [`warps_drive_from_macro`] at control rate.
-    warps_drive: f32,
-    /// Whether Warps is bypassed, i.e. `WARP.DRV` at 0.0.
-    warps_bypassed: bool,
+    // Cached strip parameters, derived from params each block.
+    shaper_algorithm: f32,
+    shaper_timbre: f32,
+    /// Resolved Warps input drive, 0.5..=1.0. Already remapped from the param
+    /// by [`shaper_drive_from_param`] at control rate.
+    shaper_drive: f32,
+    /// Whether Warps is bypassed, i.e. `SHAPE.DRV` at 0.0.
+    shaper_bypassed: bool,
     ripples_cutoff_hz: f32,
     ripples_reso_q: f32,
     /// `RIP.FM`: audio-rate cutoff modulation depth, in octaves per unit of
     /// input at full scale.
     ripples_fm: f32,
-    /// `WARP.MIX`: 0 = dry voice, 1 = Warps alone.
-    warps_mix: f32,
-    /// `WARP.IN`: which signal feeds Warps' modulator input.
-    warps_mod_src: ModSource,
-    /// `WARP.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
-    warps_out_tap: f32,
+    /// `SHAPE.MIX`: 0 = dry voice, 1 = Warps alone.
+    shaper_mix: f32,
+    /// `SHAPE.IN`: which signal feeds Warps' modulator input.
+    shaper_mod_src: ModSource,
+    /// `SHAPE.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
+    shaper_out_tap: f32,
     /// Plaits' aux output for the current segment, captured by `tick` in the
     /// same order the main output is consumed so the two stay aligned.
     ///
@@ -903,12 +903,12 @@ pub struct MiSlot {
     ad_attack: f32,
     ad_decay: f32,
     lfo_filter_depth: f32,
-    lfo_warps_depth: f32,
+    lfo_shaper_depth: f32,
     ad_filter_depth: f32,
-    ad_warps_depth: f32,
+    ad_shaper_depth: f32,
     env_trigger_pending: bool,
     // Peaks-only state. The 16-bit parameter block the model was configured
-    // with, kept so a macro edit can reconfigure without a voice restart.
+    // with, kept so a param edit can reconfigure without a voice restart.
     peaks_params: [f32; 4],
     /// Gate flag handed to the Peaks model on the sample a note starts. Plaits
     /// carries its trigger inside the patch; Peaks needs it per sample.
@@ -924,24 +924,24 @@ pub struct MiSlot {
 }
 
 impl MiSlot {
-    /// Map the TUNE macro (0..1) to a MIDI note number.
+    /// Map the TUNE param (0..1) to a MIDI note number.
     const fn tune_to_note(tune: f32) -> f32 {
         24.0 + tune * 72.0
     }
 
-    /// Recompute `patch.note` from stored tune macro and retune offset.
+    /// Recompute `patch.note` from stored tune param and retune offset.
     fn update_note(&mut self) {
-        self.patch.note = Self::tune_to_note(self.tune_macro) + self.retune_semitones;
+        self.patch.note = Self::tune_to_note(self.tune_param) + self.retune_semitones;
     }
 
-    /// Quantise the `WARP.CAR` macro onto the six Warps carrier sources.
+    /// Quantise the `SHAPE.CAR` param onto the six Warps carrier sources.
     ///
     /// Six positions across 0..1, with 0.0 selecting [`Carrier::External`] so an
-    /// untouched macro keeps the cross-modulator behaviour the strip had before
+    /// untouched param keeps the cross-modulator behaviour the strip had before
     /// this control existed. The remaining five select Warps' internal
     /// oscillators, which turn the same block into a small FM voice.
-    /// `WARP.OSC` to a shape for the strip's modulator oscillator.
-    fn osc_shape_from_macro(v: f32) -> OscShape {
+    /// `SHAPE.OSC` to a shape for the strip's modulator oscillator.
+    fn osc_shape_from_param(v: f32) -> OscShape {
         match (v * 5.0) as u32 {
             0 => OscShape::Sine,
             1 => OscShape::Triangle,
@@ -951,9 +951,9 @@ impl MiSlot {
         }
     }
 
-    /// `WARP.IN` to one of three modulator sources. See
-    /// [`SLOT_WARPS_MOD_SRC`].
-    fn mod_src_from_macro(v: f32) -> ModSource {
+    /// `SHAPE.IN` to one of three modulator sources. See
+    /// [`SLOT_SHAPER_MOD_SRC`].
+    fn mod_src_from_param(v: f32) -> ModSource {
         match (v * 3.0) as u32 {
             0 => ModSource::Self_,
             1 => ModSource::Aux,
@@ -1039,14 +1039,14 @@ impl MiSlot {
             .set_params(self.ad_attack * 0.8, 0.0, self.ad_decay * 1.2);
     }
 
-    /// Map the `RIP.CUT` macro onto a cutoff in Hz, `20 Hz` at 0 to the
+    /// Map the `RIP.CUT` param onto a cutoff in Hz, `20 Hz` at 0 to the
     /// filter's stability ceiling at 1.0.
     ///
-    /// The obvious mapping is `20 * 1000^macro`, i.e. 20 Hz to 20 kHz. It is
+    /// The obvious mapping is `20 * 1000^param`, i.e. 20 Hz to 20 kHz. It is
     /// wrong here, and silently: the Chamberlin SVF cannot run at 20 kHz at
     /// any usable Q, so `core::dsp::svf` clamps it — at the default
     /// `RIP.RESO` the ceiling is ~6.4 kHz, which is **1.6 octaves** below
-    /// where the knob claims to be. Everything above `macro ≈ 0.84` was one
+    /// where the knob claims to be. Everything above `param ≈ 0.84` was one
     /// setting, and the default of 1.0 sat in the middle of that dead zone.
     ///
     /// That is not just a cosmetic knob problem. Modulation is applied to the
@@ -1055,7 +1055,7 @@ impl MiSlot {
     /// full depth was *exactly* inaudible, not merely subtle, and the test
     /// that is supposed to catch a dead route measured a delta of zero.
     ///
-    /// Mapping the top of the macro onto the ceiling instead makes the knob
+    /// Mapping the top of the param onto the ceiling instead makes the knob
     /// monotonic over its whole travel and puts the default at the edge of the
     /// live region, where a downward modulation is immediately audible. The
     /// ceiling moves with Q, so lowering resonance really does buy top end —
@@ -1065,10 +1065,10 @@ impl MiSlot {
     /// `RIP.CUT = 1.0` the realised cutoff was already the ceiling, because
     /// the filter clamped it there. It changes what the rest of the knob does,
     /// and it makes the cutoff reachable by modulation.
-    fn ripples_cutoff_from_macro(macro_value: f32, q: f32) -> f32 {
+    fn ripples_cutoff_from_param(param_value: f32, q: f32) -> f32 {
         let ceiling = stability_ceiling_hz(q, SAMPLE_RATE);
-        // 20 Hz at macro 0, `ceiling` at macro 1, exponential in between.
-        20.0 * libm::powf(ceiling / 20.0, macro_value.clamp(0.0, 1.0))
+        // 20 Hz at param 0, `ceiling` at param 1, exponential in between.
+        20.0 * libm::powf(ceiling / 20.0, param_value.clamp(0.0, 1.0))
     }
 
     /// Render the next block if the buffer is exhausted, honouring any pending
@@ -1157,10 +1157,10 @@ impl MiSlot {
     }
 }
 
-impl Slot<NUM_MACROS> for MiSlot {
+impl Slot<NUM_PARAMS> for MiSlot {
     type Id = MiMachineId;
 
-    fn new(id: Self::Id, macros: &[f32; NUM_MACROS]) -> Self {
+    fn new(id: Self::Id, params: &[f32; NUM_PARAMS]) -> Self {
         let mut slot = Self {
             plaits: PlaitsVoice::new(),
             peaks: PeaksVoice::new(id.peaks_model().unwrap_or(PeaksModel::FmDrum)),
@@ -1204,11 +1204,11 @@ impl Slot<NUM_MACROS> for MiSlot {
             gate_release_pending: false,
             active: false,
             silence_counter: 0,
-            tune_macro: 0.45,
+            tune_param: 0.45,
             retune_semitones: 0.0,
             shaper: Shaper::new(SAMPLE_RATE),
-            warps_osc_shape: OscShape::Sine,
-            warps_osc: WarpsOscillator::new(SAMPLE_RATE),
+            shaper_osc_shape: OscShape::Sine,
+            shaper_osc: WarpsOscillator::new(SAMPLE_RATE),
             osc_env: 0.0,
             ripples: Svf::new(device_core::dsp::SvfMode::Lp),
             lfo1: Lfo::new(),
@@ -1222,16 +1222,16 @@ impl Slot<NUM_MACROS> for MiSlot {
             lfo2_out: [0.0f32; BLOCK],
             env1_out: [0.0f32; BLOCK],
             env2_out: [0.0f32; BLOCK],
-            warps_algorithm: 0.0,
-            warps_timbre: 0.0,
-            warps_drive: 0.0,
-            warps_bypassed: true,
+            shaper_algorithm: 0.0,
+            shaper_timbre: 0.0,
+            shaper_drive: 0.0,
+            shaper_bypassed: true,
             ripples_cutoff_hz: 1000.0,
             ripples_reso_q: 0.707,
             ripples_fm: 0.0,
-            warps_mix: 1.0,
-            warps_mod_src: ModSource::Self_,
-            warps_out_tap: 0.0,
+            shaper_mix: 1.0,
+            shaper_mod_src: ModSource::Self_,
+            shaper_out_tap: 0.0,
             aux_segment: [0.0f32; BLOCK],
             aux_filled: 0,
             lfo_rate: 0.5,
@@ -1239,13 +1239,13 @@ impl Slot<NUM_MACROS> for MiSlot {
             ad_attack: 0.01,
             ad_decay: 0.3,
             lfo_filter_depth: 0.0,
-            lfo_warps_depth: 0.0,
+            lfo_shaper_depth: 0.0,
             ad_filter_depth: 0.0,
-            ad_warps_depth: 0.0,
+            ad_shaper_depth: 0.0,
             env_trigger_pending: false,
         };
         slot.configure_stages();
-        slot.set_macros(macros);
+        slot.set_params(params);
         slot.ripples
             .recalc(slot.ripples_cutoff_hz, slot.ripples_reso_q, SAMPLE_RATE);
         slot
@@ -1264,15 +1264,15 @@ impl Slot<NUM_MACROS> for MiSlot {
     ///
     /// `ptr` must point to a slot previously built by `new_in_place`.
     #[allow(unsafe_code)]
-    unsafe fn load_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
+    unsafe fn load_in_place(id: Self::Id, params: &[f32; NUM_PARAMS], ptr: *mut Self) {
         unsafe {
             PlaitsVoice::free_in_place(core::ptr::addr_of_mut!((*ptr).plaits));
-            Self::new_in_place(id, macros, ptr);
+            Self::new_in_place(id, params, ptr);
         }
     }
 
     #[allow(unsafe_code)]
-    unsafe fn new_in_place(id: Self::Id, macros: &[f32; NUM_MACROS], ptr: *mut Self) {
+    unsafe fn new_in_place(id: Self::Id, params: &[f32; NUM_PARAMS], ptr: *mut Self) {
         unsafe {
             PlaitsVoice::new_in_place(core::ptr::addr_of_mut!((*ptr).plaits));
             core::ptr::addr_of_mut!((*ptr).peaks).write(PeaksVoice::new(
@@ -1318,11 +1318,11 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).gate_release_pending).write(false);
             core::ptr::addr_of_mut!((*ptr).active).write(false);
             core::ptr::addr_of_mut!((*ptr).silence_counter).write(0);
-            core::ptr::addr_of_mut!((*ptr).tune_macro).write(0.45);
+            core::ptr::addr_of_mut!((*ptr).tune_param).write(0.45);
             core::ptr::addr_of_mut!((*ptr).retune_semitones).write(0.0);
             core::ptr::addr_of_mut!((*ptr).shaper).write(Shaper::new(SAMPLE_RATE));
-            core::ptr::addr_of_mut!((*ptr).warps_osc_shape).write(OscShape::Sine);
-            core::ptr::addr_of_mut!((*ptr).warps_osc).write(WarpsOscillator::new(SAMPLE_RATE));
+            core::ptr::addr_of_mut!((*ptr).shaper_osc_shape).write(OscShape::Sine);
+            core::ptr::addr_of_mut!((*ptr).shaper_osc).write(WarpsOscillator::new(SAMPLE_RATE));
             core::ptr::addr_of_mut!((*ptr).osc_env).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ripples).write(Svf::new(device_core::dsp::SvfMode::Lp));
             core::ptr::addr_of_mut!((*ptr).lfo1).write(Lfo::new());
@@ -1336,16 +1336,16 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).lfo2_out).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).env1_out).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).env2_out).write([0.0f32; BLOCK]);
-            core::ptr::addr_of_mut!((*ptr).warps_algorithm).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).warps_timbre).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).warps_drive).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).warps_bypassed).write(true);
+            core::ptr::addr_of_mut!((*ptr).shaper_algorithm).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).shaper_timbre).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).shaper_drive).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).shaper_bypassed).write(true);
             core::ptr::addr_of_mut!((*ptr).ripples_cutoff_hz).write(1000.0);
             core::ptr::addr_of_mut!((*ptr).ripples_reso_q).write(0.707);
             core::ptr::addr_of_mut!((*ptr).ripples_fm).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).warps_mix).write(1.0);
-            core::ptr::addr_of_mut!((*ptr).warps_mod_src).write(ModSource::Self_);
-            core::ptr::addr_of_mut!((*ptr).warps_out_tap).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).shaper_mix).write(1.0);
+            core::ptr::addr_of_mut!((*ptr).shaper_mod_src).write(ModSource::Self_);
+            core::ptr::addr_of_mut!((*ptr).shaper_out_tap).write(0.0);
             core::ptr::addr_of_mut!((*ptr).aux_segment).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).aux_filled).write(0);
             core::ptr::addr_of_mut!((*ptr).lfo_rate).write(0.5);
@@ -1353,12 +1353,12 @@ impl Slot<NUM_MACROS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).ad_attack).write(0.01);
             core::ptr::addr_of_mut!((*ptr).ad_decay).write(0.3);
             core::ptr::addr_of_mut!((*ptr).lfo_filter_depth).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).lfo_warps_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).lfo_shaper_depth).write(0.0);
             core::ptr::addr_of_mut!((*ptr).ad_filter_depth).write(0.0);
-            core::ptr::addr_of_mut!((*ptr).ad_warps_depth).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).ad_shaper_depth).write(0.0);
             core::ptr::addr_of_mut!((*ptr).env_trigger_pending).write(false);
             (*ptr).configure_stages();
-            (*ptr).set_macros(macros);
+            (*ptr).set_params(params);
             (*ptr)
                 .ripples
                 .recalc((*ptr).ripples_cutoff_hz, (*ptr).ripples_reso_q, SAMPLE_RATE);
@@ -1374,59 +1374,59 @@ impl Slot<NUM_MACROS> for MiSlot {
         }
     }
 
-    fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
+    fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
         if self.is_peaks {
             // A Peaks track reads the MACH bank as its own four parameters
             // rather than as Plaits patch fields. MACH 0 is the machine
             // selector (handled by `Track::load_machine`, not here), so the
             // model takes MACH 1..4 and TUNE is unused -- a Peaks model's
-            // pitch comes from the MIDI note, not a macro.
+            // pitch comes from the MIDI note, not a param.
             self.peaks_params = [
-                macros[SLOT_MACH_1],
-                macros[SLOT_MACH_2],
-                macros[SLOT_MACH_3],
-                macros[SLOT_MACH_4],
+                params[SLOT_MACH_1],
+                params[SLOT_MACH_2],
+                params[SLOT_MACH_3],
+                params[SLOT_MACH_4],
             ];
             self.peaks.configure(self.peaks_params);
         } else {
-            self.tune_macro = macros[SLOT_MACH_0];
+            self.tune_param = params[SLOT_MACH_0];
             self.update_note();
-            self.patch.harmonics = macros[SLOT_MACH_1];
-            self.patch.timbre = macros[SLOT_MACH_2];
-            self.patch.morph = macros[SLOT_MACH_3];
-            self.patch.frequency_modulation_amount = macros[SLOT_MACH_4];
-            self.patch.timbre_modulation_amount = macros[SLOT_MACH_5];
-            self.patch.morph_modulation_amount = macros[SLOT_MACH_6];
-            self.patch.decay = macros[SLOT_MACH_7];
+            self.patch.harmonics = params[SLOT_MACH_1];
+            self.patch.timbre = params[SLOT_MACH_2];
+            self.patch.morph = params[SLOT_MACH_3];
+            self.patch.frequency_modulation_amount = params[SLOT_MACH_4];
+            self.patch.timbre_modulation_amount = params[SLOT_MACH_5];
+            self.patch.morph_modulation_amount = params[SLOT_MACH_6];
+            self.patch.decay = params[SLOT_MACH_7];
         }
 
-        self.warps_algorithm = macros[SLOT_WARPS_ALGO];
-        self.warps_timbre = macros[SLOT_WARPS_TIMBRE];
+        self.shaper_algorithm = params[SLOT_SHAPER_ALGO];
+        self.shaper_timbre = params[SLOT_SHAPER_TIMBRE];
         // Resolve the drive remap once, at control rate, so the per-chunk path
-        // stays two FFI calls with no arithmetic. See `warps_drive_from_macro`.
-        let (bypass, drive) = warps_drive_from_macro(macros[SLOT_WARPS_DRIVE]);
-        self.warps_bypassed = bypass;
-        self.warps_drive = drive;
-        self.warps_osc_shape = Self::osc_shape_from_macro(macros[SLOT_WARPS_OSC_SHAPE]);
+        // stays two FFI calls with no arithmetic. See `shaper_drive_from_param`.
+        let (bypass, drive) = shaper_drive_from_param(params[SLOT_SHAPER_DRIVE]);
+        self.shaper_bypassed = bypass;
+        self.shaper_drive = drive;
+        self.shaper_osc_shape = Self::osc_shape_from_param(params[SLOT_SHAPER_OSC_SHAPE]);
         // Resonance first: it sets the filter's stability ceiling, and the
-        // cutoff macro is mapped onto that ceiling rather than onto a fixed
-        // 20 kHz. See `ripples_cutoff_from_macro`.
-        self.ripples_reso_q = 0.5 + 19.5 * macros[SLOT_RIPPLES_RESONANCE];
+        // cutoff param is mapped onto that ceiling rather than onto a fixed
+        // 20 kHz. See `ripples_cutoff_from_param`.
+        self.ripples_reso_q = 0.5 + 19.5 * params[SLOT_RIPPLES_RESONANCE];
         self.ripples_cutoff_hz =
-            Self::ripples_cutoff_from_macro(macros[SLOT_RIPPLES_CUTOFF], self.ripples_reso_q);
+            Self::ripples_cutoff_from_param(params[SLOT_RIPPLES_CUTOFF], self.ripples_reso_q);
         self.ripples
             .recalc(self.ripples_cutoff_hz, self.ripples_reso_q, SAMPLE_RATE);
-        self.ripples_fm = macros[SLOT_RIPPLES_FM];
-        self.warps_mix = macros[SLOT_WARPS_MIX].clamp(0.0, 1.0);
-        self.warps_mod_src = Self::mod_src_from_macro(macros[SLOT_WARPS_MOD_SRC]);
-        self.warps_out_tap = macros[SLOT_WARPS_OUT_TAP].clamp(0.0, 1.0);
+        self.ripples_fm = params[SLOT_RIPPLES_FM];
+        self.shaper_mix = params[SLOT_SHAPER_MIX].clamp(0.0, 1.0);
+        self.shaper_mod_src = Self::mod_src_from_param(params[SLOT_SHAPER_MOD_SRC]);
+        self.shaper_out_tap = params[SLOT_SHAPER_OUT_TAP].clamp(0.0, 1.0);
 
-        self.lfo_rate = macros[SLOT_LFO_RATE];
-        self.lfo_depth = macros[SLOT_LFO_DEPTH];
+        self.lfo_rate = params[SLOT_LFO_RATE];
+        self.lfo_depth = params[SLOT_LFO_DEPTH];
         // Exponential, not linear, now that these are real seconds.
         //
         // Stages took them as normalised segment parameters and applied its
-        // own curve, so the linear `0.001 + 0.999 * macro` they used to go
+        // own curve, so the linear `0.001 + 0.999 * param` they used to go
         // through was never a time map — it was a parameter passthrough. Fed
         // straight to `AhdEnv` it is a bad knob: the whole useful range for a
         // drum's modulation attack is under 10 ms, which linear buries in the
@@ -1435,12 +1435,12 @@ impl Slot<NUM_MACROS> for MiSlot {
         //
         // 0.5 ms .. 1 s puts the default at ~0.7 ms and spaces the knob the
         // way a time control is expected to feel.
-        self.ad_attack = 0.0005 * dsp::fast::exp2_approx(11.0 * macros[SLOT_AD_ATTACK]);
-        self.ad_decay = 0.01 + 4.99 * macros[SLOT_AD_DECAY];
-        self.lfo_filter_depth = macros[SLOT_LFO_FILTER_DEPTH];
-        self.lfo_warps_depth = macros[SLOT_LFO_WARPS_DEPTH];
-        self.ad_filter_depth = macros[SLOT_AD_FILTER_DEPTH];
-        self.ad_warps_depth = macros[SLOT_AD_WARPS_DEPTH];
+        self.ad_attack = 0.0005 * dsp::fast::exp2_approx(11.0 * params[SLOT_AD_ATTACK]);
+        self.ad_decay = 0.01 + 4.99 * params[SLOT_AD_DECAY];
+        self.lfo_filter_depth = params[SLOT_LFO_FILTER_DEPTH];
+        self.lfo_shaper_depth = params[SLOT_LFO_SHAPER_DEPTH];
+        self.ad_filter_depth = params[SLOT_AD_FILTER_DEPTH];
+        self.ad_shaper_depth = params[SLOT_AD_SHAPER_DEPTH];
 
         self.apply_mod_params();
     }
@@ -1563,11 +1563,11 @@ impl Slot<NUM_MACROS> for MiSlot {
         // parameters internally over the chunk). Ripples cutoff is updated per
         // sample because tick() is cheap. `lfo_depth` is the master LFO scalar
         // applied on top of each per-target depth, so the whole LFO bus can be
-        // scaled without touching four separate macros.
+        // scaled without touching four separate params.
         let lfo_master = self.lfo_depth;
-        let lfo_warps_scale = self.lfo_warps_depth * lfo_master;
-        let ad_warps_scale = self.ad_warps_depth;
-        let base_warps_timbre = self.warps_timbre;
+        let lfo_shaper_scale = self.lfo_shaper_depth * lfo_master;
+        let ad_shaper_scale = self.ad_shaper_depth;
+        let base_shaper_timbre = self.shaper_timbre;
 
         for (chunk_idx, chunk) in buf.chunks_mut(WARPS_MAX_BLOCK).enumerate() {
             let chunk_start = chunk_idx * WARPS_MAX_BLOCK;
@@ -1577,24 +1577,24 @@ impl Slot<NUM_MACROS> for MiSlot {
             // between calls, so this is already smooth, and averaging a 32-sample
             // window against a ~1.4 Hz LFO would cancel most of the sweep and
             // leave the route silent.
-            let modulated_timbre = (base_warps_timbre
-                + self.lfo2_out[chunk_start] * lfo_warps_scale
-                + self.env2_out[chunk_start] * ad_warps_scale)
+            let modulated_timbre = (base_shaper_timbre
+                + self.lfo2_out[chunk_start] * lfo_shaper_scale
+                + self.env2_out[chunk_start] * ad_shaper_scale)
                 .clamp(0.0, 1.0);
 
-            // Drive 0 is a real bypass, not silence — see `WARPS_DRIVE_INFO` for
+            // Drive 0 is a real bypass, not silence — see `SHAPER_DRIVE_INFO` for
             // why the knob is remapped rather than passed straight through.
-            // Both flags were resolved at control rate in `set_macros`.
-            self.shaper.set_bypass(self.warps_bypassed);
+            // Both flags were resolved at control rate in `set_params`.
+            self.shaper.set_bypass(self.shaper_bypassed);
             self.shaper
-                .set_parameters(self.warps_algorithm, modulated_timbre, self.warps_drive);
+                .set_parameters(self.shaper_algorithm, modulated_timbre, self.shaper_drive);
             // `Carrier::External` always: the strip supplies its own
             // oscillator on the modulator side, so Warps' internal-carrier
             // path — which replaces the voice rather than modulating it — is
             // never used, and `note` goes unread as a result.
 
             let len = chunk.len();
-            // The dry signal, kept so `WARP.MIX` has something to blend back
+            // The dry signal, kept so `SHAPE.MIX` has something to blend back
             // towards. Warps itself is always 100% wet.
             let mut dry = [0.0f32; WARPS_MAX_BLOCK];
             dry[..len].copy_from_slice(chunk);
@@ -1605,7 +1605,7 @@ impl Slot<NUM_MACROS> for MiSlot {
             // second signal comes from.
             let mut modulator = [0.0f32; WARPS_MAX_BLOCK];
             let aux_available = !self.is_peaks && self.aux_filled >= chunk_start + len;
-            match self.warps_mod_src {
+            match self.shaper_mod_src {
                 ModSource::Aux if aux_available => {
                     modulator[..len]
                         .copy_from_slice(&self.aux_segment[chunk_start..chunk_start + len]);
@@ -1616,8 +1616,8 @@ impl Slot<NUM_MACROS> for MiSlot {
                     // voice smears. `Duck` passes the noise shape through
                     // untouched when its external input is silent.
                     let silence = [0.0f32; WARPS_MAX_BLOCK];
-                    self.warps_osc.render(
-                        self.warps_osc_shape,
+                    self.shaper_osc.render(
+                        self.shaper_osc_shape,
                         self.patch.note,
                         &silence[..len],
                         &mut modulator[..len],
@@ -1646,16 +1646,16 @@ impl Slot<NUM_MACROS> for MiSlot {
                 _ => modulator[..len].copy_from_slice(&dry[..len]),
             }
 
-            let mut warps_aux = [0.0f32; WARPS_MAX_BLOCK];
+            let mut shaper_aux = [0.0f32; WARPS_MAX_BLOCK];
             self.shaper
-                .process_dual(chunk, &modulator[..len], &mut warps_aux[..len]);
+                .process_dual(chunk, &modulator[..len], &mut shaper_aux[..len]);
 
-            // `WARP.OUT` picks the tap, then `WARP.MIX` decides how much of
+            // `SHAPE.OUT` picks the tap, then `SHAPE.MIX` decides how much of
             // the result replaces the voice.
-            let tap = self.warps_out_tap;
-            let mix = self.warps_mix;
+            let tap = self.shaper_out_tap;
+            let mix = self.shaper_mix;
             for i in 0..len {
-                let wet = chunk[i] + tap * (warps_aux[i] - chunk[i]);
+                let wet = chunk[i] + tap * (shaper_aux[i] - chunk[i]);
                 chunk[i] = dry[i] + mix * (wet - dry[i]);
             }
         }
@@ -1752,9 +1752,9 @@ impl MiSlot {
 }
 
 /// One channel of the mi-drum kit.
-pub type Track = device_core::track::Track<MiSlot, NUM_MACROS>;
-/// A complete mi-drum sound: machine + macros + strip.
-pub type Sound = device_core::sound::Sound<MiSlot, NUM_MACROS>;
+pub type Track = device_core::track::Track<MiSlot, NUM_PARAMS>;
+/// A complete mi-drum sound: machine + params + strip.
+pub type Sound = device_core::sound::Sound<MiSlot, NUM_PARAMS>;
 
 /// Default kit: drum-focused Plaits engines on the first tracks, melodic on
 /// the later tracks. Limited to six tracks so the engine still fits in the
@@ -1781,11 +1781,11 @@ pub const DEFAULT_KIT: [MiMachineId; TRACKS] = [
 
 /// The mi-drum engine: a [`DeviceEngine`] pre-configured for the kit.
 pub struct MiDrumEngine {
-    inner: Engine<MiSlot, NUM_MACROS, TRACKS>,
+    inner: Engine<MiSlot, NUM_PARAMS, TRACKS>,
 }
 
 impl core::ops::Deref for MiDrumEngine {
-    type Target = Engine<MiSlot, NUM_MACROS, TRACKS>;
+    type Target = Engine<MiSlot, NUM_PARAMS, TRACKS>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -1797,7 +1797,7 @@ impl core::ops::DerefMut for MiDrumEngine {
     }
 }
 
-impl DeviceEngine<NUM_MACROS> for MiDrumEngine {
+impl DeviceEngine<NUM_PARAMS> for MiDrumEngine {
     type Slot = MiSlot;
 
     fn tracks(&self) -> &[Track] {
@@ -1888,7 +1888,7 @@ impl DeviceEngine<NUM_MACROS> for MiDrumEngine {
         self.inner.send_fx.drive = value
     }
 
-    fn load_kit(&mut self, kit: &[<MiSlot as Slot<NUM_MACROS>>::Id]) {
+    fn load_kit(&mut self, kit: &[<MiSlot as Slot<NUM_PARAMS>>::Id]) {
         self.inner
             .load_kit(kit.try_into().expect("kit length must match track count"))
     }
@@ -2129,7 +2129,7 @@ mod tests {
     fn render_depth(slot: usize, depth: f32) -> [f32; MOD_CAPTURE] {
         let mut e = engine_box();
         for t in e.tracks.iter_mut() {
-            t.set_macro(slot, depth);
+            t.set_param(slot, depth);
             // The AD envelopes are unipolar, so `AD.FIL` can only open the
             // filter. With the default `RIP.CUT` fully open there is no
             // headroom above it and the route is *correctly* silent — so close
@@ -2137,7 +2137,7 @@ mod tests {
             // for a filter-envelope amount. Testing the route at the default
             // would be testing the default, not the route.
             if slot == SLOT_AD_FILTER_DEPTH {
-                t.set_macro(SLOT_STRIP_CUT, 0.4);
+                t.set_param(SLOT_STRIP_CUT, 0.4);
             }
         }
         e.trigger(0, 1.0);
@@ -2191,7 +2191,7 @@ mod tests {
             let mut e = engine_box();
             // A tonal oscillator, so crossings track the fundamental.
             e.tracks_mut()[0].load_machine(MiMachineId::VirtualAnalog);
-            e.tracks_mut()[0].set_macro(SLOT_MACH_7, 0.95); // sustain
+            e.tracks_mut()[0].set_param(SLOT_MACH_7, 0.95); // sustain
             assert_eq!(e.trigger_channel(0, note, 1.0), Some(0));
             source_crossings(&mut e, SAMPLES)
         };
@@ -2215,9 +2215,9 @@ mod tests {
     fn every_modulation_route_changes_the_sound() {
         for route in [
             SLOT_LFO_FILTER_DEPTH,
-            SLOT_LFO_WARPS_DEPTH,
+            SLOT_LFO_SHAPER_DEPTH,
             SLOT_AD_FILTER_DEPTH,
-            SLOT_AD_WARPS_DEPTH,
+            SLOT_AD_SHAPER_DEPTH,
         ] {
             let dry = render_depth(route, 0.0);
             let wet = render_depth(route, 0.8);
@@ -2233,12 +2233,12 @@ mod tests {
         }
     }
 
-    /// Render track 0 for a fixed window with a set of macro overrides.
-    fn render_with_macros(id: MiMachineId, overrides: &[(usize, f32)]) -> [f32; MOD_CAPTURE] {
+    /// Render track 0 for a fixed window with a set of param overrides.
+    fn render_with_params(id: MiMachineId, overrides: &[(usize, f32)]) -> [f32; MOD_CAPTURE] {
         let mut e = engine_box();
         e.tracks_mut()[0].load_machine(id);
         for &(slot, v) in overrides {
-            e.tracks_mut()[0].set_macro(slot, v);
+            e.tracks_mut()[0].set_param(slot, v);
         }
         e.trigger_channel(0, 60, 1.0);
         let mut l = [0.0f32; BLOCK];
@@ -2263,90 +2263,90 @@ mod tests {
             .fold(0.0f32, f32::max)
     }
 
-    /// `WARP.MIX` at 0 must be the voice, exactly.
+    /// `SHAPE.MIX` at 0 must be the voice, exactly.
     ///
     /// Not "close to": the blend is `dry + mix * (wet - dry)`, so at mix 0 the
     /// wet path cannot contribute a single bit. This is the setting that makes
     /// Warps optional without reaching for the bypass detent, and a strip that
     /// leaked any wet signal here would be a strip you could not turn off.
     #[test]
-    fn warps_mix_at_zero_is_the_dry_voice() {
-        let dry = render_with_macros(
+    fn shaper_mix_at_zero_is_the_dry_voice() {
+        let dry = render_with_params(
             MiMachineId::VirtualAnalog,
-            &[(SLOT_WARPS_MIX, 0.0), (SLOT_WARPS_DRIVE, 0.8)],
+            &[(SLOT_SHAPER_MIX, 0.0), (SLOT_SHAPER_DRIVE, 0.8)],
         );
         // Same again with the drive somewhere else entirely: if mix 0 is
         // really dry, the drive cannot matter.
-        let dry_other = render_with_macros(
+        let dry_other = render_with_params(
             MiMachineId::VirtualAnalog,
-            &[(SLOT_WARPS_MIX, 0.0), (SLOT_WARPS_DRIVE, 0.2)],
+            &[(SLOT_SHAPER_MIX, 0.0), (SLOT_SHAPER_DRIVE, 0.2)],
         );
         assert_eq!(
             max_delta(&dry, &dry_other),
             0.0,
-            "WARP.DRV changed the output at WARP.MIX 0 — the wet path is leaking"
+            "SHAPE.DRV changed the output at SHAPE.MIX 0 — the wet path is leaking"
         );
 
-        let wet = render_with_macros(
+        let wet = render_with_params(
             MiMachineId::VirtualAnalog,
-            &[(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.8)],
+            &[(SLOT_SHAPER_MIX, 1.0), (SLOT_SHAPER_DRIVE, 0.8)],
         );
         assert!(
             max_delta(&dry, &wet) > 1.0e-3,
-            "WARP.MIX did nothing between 0 and 1"
+            "SHAPE.MIX did nothing between 0 and 1"
         );
     }
 
     /// Plaits' aux output as the modulator is a different patch, and must
-    /// sound like one. This is the whole point of `WARP.IN`.
+    /// sound like one. This is the whole point of `SHAPE.IN`.
     #[test]
-    fn warps_modulator_source_changes_the_sound_on_plaits() {
-        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.5)];
+    fn shaper_modulator_source_changes_the_sound_on_plaits() {
+        let base = [(SLOT_SHAPER_MIX, 1.0), (SLOT_SHAPER_DRIVE, 0.5)];
         let mut selfmod = base.to_vec();
-        selfmod.push((SLOT_WARPS_MOD_SRC, 0.0)); // self
+        selfmod.push((SLOT_SHAPER_MOD_SRC, 0.0)); // self
         let mut auxmod = base.to_vec();
-        auxmod.push((SLOT_WARPS_MOD_SRC, 0.5)); // aux
+        auxmod.push((SLOT_SHAPER_MOD_SRC, 0.5)); // aux
 
-        let a = render_with_macros(MiMachineId::VirtualAnalog, &selfmod);
-        let b = render_with_macros(MiMachineId::VirtualAnalog, &auxmod);
+        let a = render_with_params(MiMachineId::VirtualAnalog, &selfmod);
+        let b = render_with_params(MiMachineId::VirtualAnalog, &auxmod);
         assert!(
             max_delta(&a, &b) > 1.0e-3,
-            "WARP.IN is inert — the aux output is not reaching the modulator"
+            "SHAPE.IN is inert — the aux output is not reaching the modulator"
         );
     }
 
     /// Warps' aux tap is the saturated input sum, not the cross-modulation, so
     /// selecting it has to produce a different signal.
     #[test]
-    fn warps_output_tap_selects_a_different_signal() {
-        let base = [(SLOT_WARPS_MIX, 1.0), (SLOT_WARPS_DRIVE, 0.6)];
+    fn shaper_output_tap_selects_a_different_signal() {
+        let base = [(SLOT_SHAPER_MIX, 1.0), (SLOT_SHAPER_DRIVE, 0.6)];
         let mut main = base.to_vec();
-        main.push((SLOT_WARPS_OUT_TAP, 0.0));
+        main.push((SLOT_SHAPER_OUT_TAP, 0.0));
         let mut aux = base.to_vec();
-        aux.push((SLOT_WARPS_OUT_TAP, 1.0));
+        aux.push((SLOT_SHAPER_OUT_TAP, 1.0));
 
-        let a = render_with_macros(MiMachineId::VirtualAnalog, &main);
-        let b = render_with_macros(MiMachineId::VirtualAnalog, &aux);
+        let a = render_with_params(MiMachineId::VirtualAnalog, &main);
+        let b = render_with_params(MiMachineId::VirtualAnalog, &aux);
         assert!(
             max_delta(&a, &b) > 1.0e-3,
-            "WARP.OUT is inert — both taps return the same buffer"
+            "SHAPE.OUT is inert — both taps return the same buffer"
         );
     }
 
-    /// `RIP.FM` was a labelled, defaulted macro that nothing read. It is wired
+    /// `RIP.FM` was a labelled, defaulted param that nothing read. It is wired
     /// now, and this is the guard that keeps it wired.
     #[test]
     fn ripples_fm_is_live() {
         // The filter has to be somewhere it can be pushed from, and the strip
         // has to be audible, or this measures the default rather than the knob.
-        let base = [(SLOT_WARPS_MIX, 0.0), (SLOT_STRIP_CUT, 0.4)];
+        let base = [(SLOT_SHAPER_MIX, 0.0), (SLOT_STRIP_CUT, 0.4)];
         let mut off = base.to_vec();
         off.push((SLOT_RIPPLES_FM, 0.0));
         let mut on = base.to_vec();
         on.push((SLOT_RIPPLES_FM, 0.9));
 
-        let a = render_with_macros(MiMachineId::VirtualAnalog, &off);
-        let b = render_with_macros(MiMachineId::VirtualAnalog, &on);
+        let a = render_with_params(MiMachineId::VirtualAnalog, &off);
+        let b = render_with_params(MiMachineId::VirtualAnalog, &on);
         assert!(
             max_delta(&a, &b) > 1.0e-4,
             "RIP.FM is dead again (max delta {})",
@@ -2358,7 +2358,7 @@ mod tests {
         }
     }
 
-    /// `WARP.TIM` has to change the *shape* of the sound, not just its level.
+    /// `SHAPE.TIM` has to change the *shape* of the sound, not just its level.
     ///
     /// With the same signal in both Warps inputs, `ALGORITHM_XFADE` reduces to
     /// `x * (fade_in + fade_out)` — a scalar in the timbre parameter and
@@ -2370,17 +2370,17 @@ mod tests {
     /// Measured by normalising both renders to the same RMS first: whatever
     /// survives that is shape rather than level.
     #[test]
-    fn warps_timbre_is_a_timbre_control_once_aux_feeds_the_modulator() {
+    fn shaper_timbre_is_a_timbre_control_once_aux_feeds_the_modulator() {
         let shape_delta = |mod_src: f32| {
             let render = |tim: f32| {
-                let mut out = render_with_macros(
+                let mut out = render_with_params(
                     MiMachineId::VirtualAnalog,
                     &[
-                        (SLOT_WARPS_MIX, 1.0),
-                        (SLOT_WARPS_DRIVE, 0.3),
-                        (SLOT_WARPS_ALGO, 0.0),
-                        (SLOT_WARPS_MOD_SRC, mod_src),
-                        (SLOT_WARPS_TIMBRE, tim),
+                        (SLOT_SHAPER_MIX, 1.0),
+                        (SLOT_SHAPER_DRIVE, 0.3),
+                        (SLOT_SHAPER_ALGO, 0.0),
+                        (SLOT_SHAPER_MOD_SRC, mod_src),
+                        (SLOT_SHAPER_TIMBRE, tim),
                     ],
                 );
                 // Normalise to unit RMS so a pure gain difference cancels.
@@ -2424,8 +2424,8 @@ mod tests {
             let dry = {
                 let mut e = engine_box();
                 for t in e.tracks.iter_mut() {
-                    t.set_macro(SLOT_AD_FILTER_DEPTH, 0.0);
-                    t.set_macro(SLOT_STRIP_CUT, cut);
+                    t.set_param(SLOT_AD_FILTER_DEPTH, 0.0);
+                    t.set_param(SLOT_STRIP_CUT, cut);
                 }
                 e.trigger(0, 1.0);
                 let mut l = [0.0f32; BLOCK];
@@ -2442,8 +2442,8 @@ mod tests {
             let wet = {
                 let mut e = engine_box();
                 for t in e.tracks.iter_mut() {
-                    t.set_macro(SLOT_AD_FILTER_DEPTH, 0.8);
-                    t.set_macro(SLOT_STRIP_CUT, cut);
+                    t.set_param(SLOT_AD_FILTER_DEPTH, 0.8);
+                    t.set_param(SLOT_STRIP_CUT, cut);
                 }
                 e.trigger(0, 1.0);
                 let mut l = [0.0f32; BLOCK];
@@ -2483,13 +2483,13 @@ mod tests {
     #[test]
     fn the_strip_is_neutral_by_default() {
         // Asserted against the cutoff the filter actually runs at, not the
-        // one the macro nominally asks for. Those were different numbers
-        // while the macro mapped to 20 kHz: the SVF clamped it to its
+        // one the param nominally asks for. Those were different numbers
+        // while the param mapped to 20 kHz: the SVF clamped it to its
         // stability ceiling and the knob's claim was 1.6 octaves optimistic.
         for id in MiMachineId::ALL {
-            let m = id.default_macros();
+            let m = id.default_params();
             let q = 0.5 + 19.5 * m[SLOT_RIPPLES_RESONANCE];
-            let cut = MiSlot::ripples_cutoff_from_macro(m[SLOT_RIPPLES_CUTOFF], q);
+            let cut = MiSlot::ripples_cutoff_from_param(m[SLOT_RIPPLES_CUTOFF], q);
             assert!(
                 cut > 4_000.0,
                 "{id:?} default RIP.CUT resolves to {cut} Hz — the strip is closed again"
@@ -2510,7 +2510,7 @@ mod tests {
         const TOL: f32 = 4.0 * 1.19e-7;
         let mut e = engine_box();
         for t in e.tracks.iter_mut() {
-            t.set_macro(SLOT_RIPPLES_CUTOFF, 1.0);
+            t.set_param(SLOT_RIPPLES_CUTOFF, 1.0);
         }
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
@@ -2529,33 +2529,33 @@ mod tests {
             }
         }
     }
-    /// The drive remap, which is the whole reason `WARP.DRV` is not passed
+    /// The drive remap, which is the whole reason `SHAPE.DRV` is not passed
     /// straight to Warps. Pinned because getting it wrong is silent: a drive
     /// of 0 mutes the track, and a curve that is still linear at the top wastes
     /// half the knob.
     #[test]
-    fn warps_drive_macro_maps_clean_to_destroyed() {
+    fn shaper_drive_param_maps_clean_to_destroyed() {
         // 0.0 is a bypass, and *not* a zero drive — that would be silence.
-        let (bypass, drive) = warps_drive_from_macro(0.0);
-        assert!(bypass, "WARP.DRV 0 must bypass Warps, not mute it");
+        let (bypass, drive) = shaper_drive_from_param(0.0);
+        assert!(bypass, "SHAPE.DRV 0 must bypass Warps, not mute it");
         assert_eq!(drive, 0.0);
 
         // Monotonic and bounded above the floor.
         let mut prev = -1.0;
         for i in 1..=100 {
             let m = i as f32 / 100.0;
-            let (bypass, d) = warps_drive_from_macro(m);
-            assert!(!bypass, "WARP.DRV {m} should not bypass");
+            let (bypass, d) = shaper_drive_from_param(m);
+            assert!(!bypass, "SHAPE.DRV {m} should not bypass");
             assert!(d > prev, "drive must increase with the knob: {d} <= {prev}");
             assert!(
                 (0.50..=1.00).contains(&d),
-                "drive {d} out of range at macro {m}"
+                "drive {d} out of range at param {m}"
             );
             prev = d;
         }
 
         // The knob floor is the quietest unity point: Warps pre-gain 0.39.
-        let (_, floor) = warps_drive_from_macro(f32::MIN_POSITIVE);
+        let (_, floor) = shaper_drive_from_param(f32::MIN_POSITIVE);
         assert!(
             (floor - 0.50).abs() < 1e-3,
             "the bottom of the knob maps to {floor}, not 0.50"
@@ -2563,23 +2563,23 @@ mod tests {
 
         // The top of the knob is Warps at full drive — the destructive end has
         // to be reachable, not something shy of it.
-        let (_, top) = warps_drive_from_macro(1.0);
+        let (_, top) = shaper_drive_from_param(1.0);
         assert!((top - 1.00).abs() < 1e-6, "top maps to {top}");
 
-        // Out-of-range macro values are clamped, not trusted.
-        assert_eq!(warps_drive_from_macro(-1.0), (true, 0.0));
-        assert_eq!(warps_drive_from_macro(2.0).1, 1.0);
+        // Out-of-range param values are clamped, not trusted.
+        assert_eq!(shaper_drive_from_param(-1.0), (true, 0.0));
+        assert_eq!(shaper_drive_from_param(2.0).1, 1.0);
     }
 
     /// A bypassed strip must be audibly transparent, and a driven one must not
     /// be. Without this, "clean" and "silent" are indistinguishable in a render
     /// and the knob could quietly regress to either.
     #[test]
-    fn warps_bypass_is_a_real_setting() {
+    fn shaper_bypass_is_a_real_setting() {
         let peak_at = |drive: f32| {
             let mut e = engine_box();
             e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
-            e.tracks_mut()[0].set_macro(SLOT_WARPS_DRIVE, drive);
+            e.tracks_mut()[0].set_param(SLOT_SHAPER_DRIVE, drive);
             e.trigger(0, 1.0);
             let mut l = [0.0f32; BLOCK];
             let mut r = [0.0f32; BLOCK];
@@ -2596,13 +2596,13 @@ mod tests {
         let clean = peak_at(0.0);
         assert!(
             clean > 1.0e-3,
-            "WARP.DRV 0 is silent ({clean}) — the bypass is not working, or \
+            "SHAPE.DRV 0 is silent ({clean}) — the bypass is not working, or \
              Warps is still being handed a zero drive"
         );
 
         // The default has to be off the bypass, or the shipped kit never
         // touches Warps at all.
-        let default_peak = peak_at(MiMachineId::SixOp1.default_macros()[SLOT_WARPS_DRIVE]);
+        let default_peak = peak_at(MiMachineId::SixOp1.default_params()[SLOT_SHAPER_DRIVE]);
         assert!(
             default_peak > clean * 0.5,
             "the default drive is inaudible: {default_peak} vs clean {clean}"
@@ -2610,26 +2610,26 @@ mod tests {
 
         // And the destructive end must actually reach the instrument.
         let hot = peak_at(1.0);
-        assert!(hot > 1.0e-3, "WARP.DRV 1.0 is silent: {hot}");
+        assert!(hot > 1.0e-3, "SHAPE.DRV 1.0 is silent: {hot}");
     }
 
     #[test]
-    fn extreme_modulation_macros_stay_finite() {
+    fn extreme_modulation_params_stay_finite() {
         let slots = [
             SLOT_LFO_RATE,
             SLOT_LFO_DEPTH,
             SLOT_AD_ATTACK,
             SLOT_AD_DECAY,
             SLOT_LFO_FILTER_DEPTH,
-            SLOT_LFO_WARPS_DEPTH,
+            SLOT_LFO_SHAPER_DEPTH,
             SLOT_AD_FILTER_DEPTH,
-            SLOT_AD_WARPS_DEPTH,
+            SLOT_AD_SHAPER_DEPTH,
         ];
         for &slot in &slots {
             for &v in &[0.0f32, 1.0] {
                 let mut e = engine_box();
                 for t in e.tracks.iter_mut() {
-                    t.set_macro(slot, v);
+                    t.set_param(slot, v);
                 }
                 e.trigger(0, 1.0);
                 let mut l = [0.0f32; BLOCK];
@@ -2648,23 +2648,23 @@ mod tests {
     }
 
     /// Every oscillator shape must be reachable and must change the sound,
-    /// with `WARP.IN` on the oscillator.
+    /// with `SHAPE.IN` on the oscillator.
     ///
-    /// Replaces `every_warps_carrier_is_live`. The same five shapes used to
+    /// Replaces `every_shaper_carrier_is_live`. The same five shapes used to
     /// sit on Warps' *carrier* input, where they replaced the voice; they are
     /// on the modulator input now, where they cross-modulate it.
     #[test]
-    fn every_warps_oscillator_shape_is_live() {
+    fn every_shaper_oscillator_shape_is_live() {
         let base = [
-            (SLOT_WARPS_MIX, 1.0f32),
-            (SLOT_WARPS_DRIVE, 0.5),
-            (SLOT_WARPS_ALGO, 0.25), // ring mod, so the modulator is audible
-            (SLOT_WARPS_MOD_SRC, 1.0), // oscillator
+            (SLOT_SHAPER_MIX, 1.0f32),
+            (SLOT_SHAPER_DRIVE, 0.5),
+            (SLOT_SHAPER_ALGO, 0.25), // ring mod, so the modulator is audible
+            (SLOT_SHAPER_MOD_SRC, 1.0), // oscillator
         ];
         let render_shape = |shape: f32| {
             let mut m = base.to_vec();
-            m.push((SLOT_WARPS_OSC_SHAPE, shape));
-            render_with_macros(MiMachineId::VirtualAnalog, &m)
+            m.push((SLOT_SHAPER_OSC_SHAPE, shape));
+            render_with_params(MiMachineId::VirtualAnalog, &m)
         };
 
         let mut rendered = std::vec::Vec::new();
@@ -2673,7 +2673,7 @@ mod tests {
             let peak = out.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
             assert!(
                 peak > 0.01,
-                "shape {i} (macro {v}) was silent (peak {peak})"
+                "shape {i} (param {v}) was silent (peak {peak})"
             );
             for &s in out.iter() {
                 assert!(s.is_finite(), "shape {i} produced {s}");
@@ -2700,14 +2700,14 @@ mod tests {
     #[test]
     fn a_peaks_track_can_reach_a_real_modulator() {
         let base = [
-            (SLOT_WARPS_MIX, 1.0f32),
-            (SLOT_WARPS_DRIVE, 0.5),
-            (SLOT_WARPS_ALGO, 0.25),
+            (SLOT_SHAPER_MIX, 1.0f32),
+            (SLOT_SHAPER_DRIVE, 0.5),
+            (SLOT_SHAPER_ALGO, 0.25),
         ];
         let with_src = |src: f32| {
             let mut m = base.to_vec();
-            m.push((SLOT_WARPS_MOD_SRC, src));
-            render_with_macros(MiMachineId::PeaksBassDrum, &m)
+            m.push((SLOT_SHAPER_MOD_SRC, src));
+            render_with_params(MiMachineId::PeaksBassDrum, &m)
         };
 
         let selfmod = with_src(0.0);
@@ -2726,7 +2726,7 @@ mod tests {
         assert_eq!(
             delta(&selfmod, &aux),
             0.0,
-            "WARP.IN aux moved a Peaks track, which has no aux to move to"
+            "SHAPE.IN aux moved a Peaks track, which has no aux to move to"
         );
         assert!(
             delta(&selfmod, &osc) > 1.0e-3,
@@ -3061,7 +3061,7 @@ mod tests {
         let mut wet = engine_box();
         wet.tracks_mut()[0].load_machine(MiMachineId::PeaksBassDrum);
         // MACH 3 is the bass drum's decay; push it long.
-        wet.tracks_mut()[0].set_macro(SLOT_MACH_3, 0.95);
+        wet.tracks_mut()[0].set_param(SLOT_MACH_3, 0.95);
         wet.trigger(0, 1.0);
         let mut b = [0.0f32; BLOCK * BLOCKS];
         for i in 0..BLOCK * BLOCKS {

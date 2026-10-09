@@ -2,9 +2,9 @@
 //!
 //! The 808 cowbell: two square-ish oscillators at a fixed ratio (the
 //! classic 540/800 Hz pair), summed and bandpassed. Short decay, bright
-//! and boxy. The Syntakt CB Classic adds a detune macro; we do the same.
+//! and boxy. The Syntakt CB Classic adds a detune param; we do the same.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -24,7 +24,7 @@
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
-use crate::machines::{NUM_MACROS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5};
+use crate::machines::{NUM_PARAMS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5};
 use crate::SAMPLE_RATE;
 
 /// CB Classic machine.
@@ -37,14 +37,14 @@ pub struct CbClassic {
     hp: OnePoleHp,
     lp: OnePoleLp,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl CbClassic {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             phase_a: 0.0,
             phase_b: 0.0,
@@ -56,17 +56,17 @@ impl CbClassic {
             freq_scale: 1.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 300.0 + 700.0 * macros[SLOT_MACH_0]; // TUNE 300..1000 Hz
-        let decay_s = 0.03 + 0.37 * macros[SLOT_MACH_5]; // DEC 30..400 ms
-        let detune = 1.0 + 0.5 * macros[SLOT_MACH_1]; // DET 1.0..1.5
-        let bpf_hz = 300.0 + 3700.0 * macros[SLOT_FILT_0]; // BPF 300..4000 Hz
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let base_hz = 300.0 + 700.0 * params[SLOT_MACH_0]; // TUNE 300..1000 Hz
+        let decay_s = 0.03 + 0.37 * params[SLOT_MACH_5]; // DEC 30..400 ms
+        let detune = 1.0 + 0.5 * params[SLOT_MACH_1]; // DET 1.0..1.5
+        let bpf_hz = 300.0 + 3700.0 * params[SLOT_FILT_0]; // BPF 300..4000 Hz
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.freq_a = base_hz * self.freq_scale;
         self.freq_b = base_hz * detune * self.freq_scale;
@@ -76,7 +76,7 @@ impl CbClassic {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both oscillators, preserving the fixed ratio between them.
     /// Absolute, not incremental.
@@ -159,16 +159,16 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::CbClassic;
-        let macros = id.default_macros();
-        let mut s = CbClassic::new(&macros);
+        let params = id.default_params();
+        let mut s = CbClassic::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn produces_sound() {
         let id = MachineId::CbClassic;
-        let macros = id.default_macros();
-        let mut s = CbClassic::new(&macros);
+        let params = id.default_params();
+        let mut s = CbClassic::new(&params);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 1200) > 0.05, "cowbell too quiet");
     }
@@ -176,8 +176,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::CbClassic;
-        let macros = id.default_macros();
-        let mut s = CbClassic::new(&macros);
+        let params = id.default_params();
+        let mut s = CbClassic::new(&params);
         s.trigger(1.0);
         for _ in 0..(2.0 * SAMPLE_RATE) as usize {
             s.tick();
@@ -188,8 +188,8 @@ mod tests {
     #[test]
     fn output_is_bounded() {
         let id = MachineId::CbClassic;
-        let macros = id.default_macros();
-        let mut s = CbClassic::new(&macros);
+        let params = id.default_params();
+        let mut s = CbClassic::new(&params);
         for _ in 0..100 {
             s.trigger(1.0);
             for _ in 0..512 {

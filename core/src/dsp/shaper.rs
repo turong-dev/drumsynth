@@ -51,7 +51,7 @@
 //! samples are equal and loses precision when they are merely close, so under
 //! [`ADAA_EPS`] it falls back to evaluating `f` at the midpoint. And it is
 //! *first* order: it does not remove aliasing, it attenuates it. For
-//! percussion through a stage mixed at `WARP.MIX = 0.35` that is a different
+//! percussion through a stage mixed at `SHAPE.MIX = 0.35` that is a different
 //! trade than for a sustained tone, which is the trade this stage is for.
 //!
 //! # Choosing nonlinearities that are cheap to integrate
@@ -229,15 +229,15 @@ fn diode_int(x: f32) -> f32 {
 /// # This does not line up with Warps, and that matters for A/B
 ///
 /// Warps dispatches on `min(algorithm * 8, 5.999)` across **six** table
-/// entries; this sweeps **three**. So the same `WARP.ALG` value selects
+/// entries; this sweeps **three**. So the same `SHAPE.ALG` value selects
 /// different things in the two stages — at 0.5, Warps is running
 /// `XOR + COMPARATOR` while this is running the sine fold. Any comparison
-/// made by setting one macro and swapping the stage underneath is therefore
+/// made by setting one param and swapping the stage underneath is therefore
 /// comparing two *different effects*, not two implementations of one, and a
-/// render A/B at a fixed macro value will mislead you in whichever direction
+/// render A/B at a fixed param value will mislead you in whichever direction
 /// the algorithms happen to differ.
 ///
-/// Matching them needs a per-stage macro value, or a common algorithm map
+/// Matching them needs a per-stage param value, or a common algorithm map
 /// both stages are driven from. Until that exists, compare at `algorithm =
 /// 0.0`, where both are at the crossfade end of their tables and the stages
 /// are doing the nearest thing to the same job.
@@ -321,7 +321,7 @@ impl Shaper {
     /// Control-rate parameters, mirroring the Warps call this replaces.
     ///
     /// `drive` arrives already remapped by the strip onto `0.50..1.00` (see
-    /// `warps_drive_from_macro`), so the usable span is the top half; it maps
+    /// `shaper_drive_from_param`), so the usable span is the top half; it maps
     /// linearly onto an input gain of `1.0..`[`MAX_DRIVE_GAIN`]. Warps' own
     /// `carrier_shape` and `note` arguments have no analogue here: the strip
     /// pinned `Carrier::External` permanently, which left `note` unread.
@@ -375,7 +375,7 @@ impl Shaper {
         // Linear would be cheaper still and is wrong twice over. It dips ~3 dB
         // in the middle for two uncorrelated signals, which is audible as a
         // hole as the knob sweeps; and at `timbre = 0.5` it collapses to
-        // `(c + m) / 2`, which is bit-for-bit the aux tap — making `WARP.OUT`
+        // `(c + m) / 2`, which is bit-for-bit the aux tap — making `SHAPE.OUT`
         // inert at the shipped default. Warps uses `lut_xfade_in`/`out` for
         // the same reason. `timbre` is per-chunk, so the two lookups cost
         // nothing per sample.
@@ -405,8 +405,8 @@ impl Shaper {
             // leaves full scale whatever goes in, while `clip3` tops out at
             // 2/3 — without this the fold position is ~3.5 dB louder than the
             // crossfade either side of it and the algorithm knob is a volume
-            // control. Measured against Warps at `WARP.DRV` 0.9 and
-            // `WARP.MIX` 1.0, the untrimmed version clipped at full scale
+            // control. Measured against Warps at `SHAPE.DRV` 0.9 and
+            // `SHAPE.MIX` 1.0, the untrimmed version clipped at full scale
             // where Warps peaked at 0.21.
             let folded = self.folder.tick(c * fold_depth, fold, fold_int) * (2.0 / 3.0);
 

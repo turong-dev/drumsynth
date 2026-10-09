@@ -19,7 +19,7 @@
 //! `c1² + 2·c1·k < 4`. That is *not* the same as staying below Nyquist: with
 //! the default strip resonance (`Q = 0.695`, `k = 1.44`) that boundary is
 //! 8.2 kHz and the ceiling actually enforced — the boundary less
-//! [`STABILITY_MARGIN`] — is **6.4 kHz**, against a cutoff macro at 1.0 that
+//! [`STABILITY_MARGIN`] — is **6.4 kHz**, against a cutoff param at 1.0 that
 //! asks for 20 kHz. Past the boundary the
 //! integrators pump, the output diverges to `inf` and then `NaN`, and it
 //! arrives at the master clipper as a non-finite sample rather than as
@@ -98,7 +98,7 @@ pub enum SvfMode {
 /// Coefficients `c1 = 2·sin(π·fc/fs)` (integration rate) and `k = 1/Q`
 /// (damping) are precomputed and never touched in the per-sample path.
 /// Cutoff and resonance are taken as user-facing values
-/// ([`recalc`](Self::recalc)) so callers can map from macros once at
+/// ([`recalc`](Self::recalc)) so callers can map from params once at
 /// control rate.
 #[derive(Clone, Copy)]
 pub struct Svf {
@@ -323,7 +323,7 @@ mod tests {
     }
 
     /// The regression this clamp exists for. At the default strip resonance
-    /// (`Q = 0.695`) the stability ceiling is ~6.4 kHz, and a cutoff macro at
+    /// (`Q = 0.695`) the stability ceiling is ~6.4 kHz, and a cutoff param at
     /// 1.0 is 20 kHz — so `recalc` used to push the integrators outside the
     /// unit circle and the filter diverged to `NaN`. It reached the master
     /// clipper as a non-finite sample, which is a much harder failure to

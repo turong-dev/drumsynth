@@ -190,7 +190,7 @@ fn daw_note_on_triggers_the_engine() {
 }
 
 #[test]
-fn daw_cc_reaches_the_track_macro_grid() {
+fn daw_cc_reaches_the_track_param_grid() {
     let port_name = port_name("cc");
     let (_in_conn, mut consumer) = spawn_device_input(&port_name);
 
@@ -202,7 +202,7 @@ fn daw_cc_reaches_the_track_macro_grid() {
         .unwrap();
     let mut conn = out.connect(&port, "drumkit-engine-test-sender").unwrap();
 
-    // CC 20 + 3 → track 0, macro 3 (SWEEP). Value 64 → 0.5.
+    // CC 20 + 3 → track 0, param 3 (SWEEP). Value 64 → 0.5.
     conn.send(&[0xB0, 23, 64]).unwrap();
 
     let ev = pop_timeout(&mut consumer, Duration::from_secs(2)).expect("CC never reached the ring");
@@ -217,17 +217,17 @@ fn daw_cc_reaches_the_track_macro_grid() {
 
     let mut engine = DrumEngine::new();
     handle_midi(&mut engine, ev);
-    // Track macros are block-rate smoothed (see the midi module docs): the
-    // base macro must not jump to the target instantly, so converge the
+    // Track params are block-rate smoothed (see the midi module docs): the
+    // base param must not jump to the target instantly, so converge the
     // smoother before asserting the final value.
     assert!(
-        (engine.tracks[0].base_macros[3] - value).abs() > 0.3,
+        (engine.tracks[0].base_params[3] - value).abs() > 0.3,
         "CC should not apply instantly — it is block-rate smoothed"
     );
     for _ in 0..200 {
         engine.tracks[0].control();
     }
-    assert_eq!(engine.tracks[0].base_macros[3], value);
+    assert_eq!(engine.tracks[0].base_params[3], value);
 
     // Same CC on channel 3 edits track 3 only — channel scoping over the wire.
     conn.send(&[0xB3, 23, 32]).unwrap();
@@ -241,9 +241,9 @@ fn daw_cc_reaches_the_track_macro_grid() {
     for _ in 0..200 {
         engine.tracks[3].control();
     }
-    assert_eq!(engine.tracks[3].base_macros[3], value);
+    assert_eq!(engine.tracks[3].base_params[3], value);
     assert_eq!(
-        engine.tracks[0].base_macros[3],
+        engine.tracks[0].base_params[3],
         64.0 / 127.0,
         "channel 3 must not touch track 0"
     );

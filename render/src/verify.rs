@@ -1,6 +1,6 @@
 //! The monotonicity harness (Phase 10).
 //!
-//! The design rule — "macros are tuned paths, not renamed params: no dead
+//! The design rule — "params are tuned paths, not renamed params: no dead
 //! zones, monotonic, loudness-compensated" — is an assertion about *every*
 //! knob on *every* machine. This sweeps a machine's voice knobs 0..1,
 //! measures each step, and flags:
@@ -73,7 +73,7 @@ const WAVE_CAP_SECONDS: f32 = 0.1;
 /// auxes (routing, not voice loudness), the track strip, the LFOs (modulation
 /// routing, not the machine voice itself), and reserved slots.
 pub fn knob_slots(id: MachineId) -> impl Iterator<Item = (usize, &'static str)> {
-    id.macros()
+    id.params()
         .into_iter()
         .enumerate()
         .filter(|(_, m)| {
@@ -102,7 +102,7 @@ enum Family {
     Behavioral,
 }
 
-/// Classify a macro by what its travel is supposed to change.
+/// Classify a param by what its travel is supposed to change.
 fn family(name: &str) -> Family {
     match name {
         "LEVEL" | "NLEV" | "STICK" | "DRIVE" => Family::Gain,
@@ -124,7 +124,7 @@ struct Step {
 /// Sweep one knob across `steps` values and check the travel.
 struct KnobReport {
     machine: MachineId,
-    macro_name: &'static str,
+    param_name: &'static str,
     rms_min: f32,
     rms_max: f32,
     decay_min: f32,
@@ -163,7 +163,7 @@ fn sweep_knob(id: MachineId, slot: usize, steps: usize) -> KnobReport {
         let t = i as f32 / (steps - 1) as f32;
         let mut engine = DrumEngine::new();
         engine.tracks[0].load_machine(id);
-        engine.tracks[0].set_macro(slot, t);
+        engine.tracks[0].set_param(slot, t);
         let hit =
             crate::measure::measure_oneshot(&mut engine, 0, MAX_SECONDS, false, WAVE_CAP_SECONDS);
         steps_out.push(Step {
@@ -174,7 +174,7 @@ fn sweep_knob(id: MachineId, slot: usize, steps: usize) -> KnobReport {
         });
     }
 
-    let name = id.macros()[slot].name;
+    let name = id.params()[slot].name;
     let fam = family(name);
 
     // Gain knobs must get louder as the value rises. Pairs where both steps
@@ -248,7 +248,7 @@ fn sweep_knob(id: MachineId, slot: usize, steps: usize) -> KnobReport {
 
     KnobReport {
         machine: id,
-        macro_name: name,
+        param_name: name,
         rms_min,
         rms_max,
         decay_min,
@@ -264,7 +264,7 @@ fn sweep_knob(id: MachineId, slot: usize, steps: usize) -> KnobReport {
 /// decay, and length actually move across the travel, so a failure in
 /// [`run`] can be seen (and a curve tuned) rather than just counted.
 pub fn dump_knob(id: MachineId, slot: usize, steps: usize) {
-    let name = id.macros()[slot].name;
+    let name = id.params()[slot].name;
     println!("# {} {}", id.name(), name);
     println!(
         "{:>6}  {:>8}  {:>8}  {:>8}",
@@ -275,7 +275,7 @@ pub fn dump_knob(id: MachineId, slot: usize, steps: usize) {
         let t = i as f32 / (steps - 1) as f32;
         let mut engine = DrumEngine::new();
         engine.tracks[0].load_machine(id);
-        engine.tracks[0].set_macro(slot, t);
+        engine.tracks[0].set_param(slot, t);
         let hit =
             crate::measure::measure_oneshot(&mut engine, 0, MAX_SECONDS, false, WAVE_CAP_SECONDS);
         println!(
@@ -293,7 +293,7 @@ pub fn dump_knob(id: MachineId, slot: usize, steps: usize) {
 pub fn run(ids: &[MachineId], steps: usize) -> Totals {
     println!(
         "{:<12} {:<9} {:>7} {:>7} {:>9} {:>9} {:>9}  verdict",
-        "machine", "macro", "rmsmin", "rmsmax", "decmin", "decmax", "lenmax"
+        "machine", "param", "rmsmin", "rmsmax", "decmin", "decmax", "lenmax"
     );
     println!("{}", "-".repeat(82));
 
@@ -324,7 +324,7 @@ pub fn run(ids: &[MachineId], steps: usize) -> Totals {
             println!(
                 "{:<12} {:<9} {:>7.1} {:>7.1} {:>9.0} {:>9.0} {:>9.0}  {}",
                 r.machine.name(),
-                r.macro_name,
+                r.param_name,
                 r.rms_min,
                 r.rms_max,
                 r.decay_min,
@@ -342,7 +342,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn knob_slots_excludes_special_macros() {
+    fn knob_slots_excludes_special_params() {
         let id = MachineId::BdClassic;
         let names: Vec<&str> = knob_slots(id).map(|(_, n)| n).collect();
         assert!(!names.contains(&"RESV"));

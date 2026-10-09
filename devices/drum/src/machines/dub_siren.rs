@@ -39,7 +39,7 @@
 //! turns the LFO's bipolar output × depth-in-octaves into a per-sample
 //! pitch multiplier — same family as [`fast::semitone_ratio`].
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -70,7 +70,7 @@
 
 use crate::dsp::{fast, AhdEnv, HoldMode, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
 };
 
 /// Watchdog on the gated hold, in seconds.
@@ -88,10 +88,10 @@ const GATED_MAX_HOLD_S: f32 = 10.0;
 /// Attack time, in seconds, at the bottom of the DEC range.
 ///
 /// The attack is what makes a siren swell rather than appear, so it is scaled
-/// from the same macro as the release and stays short relative to it.
+/// from the same param as the release and stays short relative to it.
 const ATTACK_S: f32 = 0.05;
 
-/// Internal LFO waveform, selected by the SHAPE macro.
+/// Internal LFO waveform, selected by the SHAPE param.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SirenShape {
     /// Smooth sinusoidal pitch bend — the round "whoop" shape.
@@ -103,10 +103,10 @@ enum SirenShape {
 }
 
 impl SirenShape {
-    /// Quantise a 0..1 macro value to one of three waveforms in equal
-    /// thirds. The default macro (0.5) lands in the middle band →
+    /// Quantise a 0..1 param value to one of three waveforms in equal
+    /// thirds. The default param (0.5) lands in the middle band →
     /// [`Triangle`], the most identifiable siren shape.
-    const fn from_macro(v: f32) -> Self {
+    const fn from_param(v: f32) -> Self {
         if v < 1.0 / 3.0 {
             Self::Sine
         } else if v < 2.0 / 3.0 {
@@ -131,19 +131,19 @@ pub struct DubSiren {
     lfo_phase: f32,
     /// LFO phase increment per sample = `rate / SAMPLE_RATE`.
     lfo_inc: f32,
-    /// LFO waveform, set by the SHAPE macro.
+    /// LFO waveform, set by the SHAPE param.
     shape: SirenShape,
     /// Per-machine output level, 0..1.
     level: f32,
     /// Semitone multiplier applied to `base_hz`. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the
+    /// re-applied by `set_params` so a later param recompute keeps the
     /// note.
     freq_scale: f32,
 }
 
 impl DubSiren {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             osc: SineOsc::new(),
             env: AhdEnv::new(),
@@ -155,18 +155,18 @@ impl DubSiren {
             level: 0.0,
             freq_scale: 1.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 100.0 + 900.0 * macros[SLOT_MACH_0]; // TUNE 100..1000 Hz
-        let depth_oct = 3.0 * macros[SLOT_MACH_1]; // DEPTH 0..3 oct
-        let rate_hz = 0.1 + 7.9 * macros[SLOT_MACH_2]; // RATE 0.1..8 Hz
-        let release_s = 0.05 + 0.55 * macros[SLOT_MACH_5]; // DEC 0.05..0.6 s
-        let shape = SirenShape::from_macro(macros[SLOT_MACH_7]);
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let base_hz = 100.0 + 900.0 * params[SLOT_MACH_0]; // TUNE 100..1000 Hz
+        let depth_oct = 3.0 * params[SLOT_MACH_1]; // DEPTH 0..3 oct
+        let rate_hz = 0.1 + 7.9 * params[SLOT_MACH_2]; // RATE 0.1..8 Hz
+        let release_s = 0.05 + 0.55 * params[SLOT_MACH_5]; // DEC 0.05..0.6 s
+        let shape = SirenShape::from_param(params[SLOT_MACH_7]);
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.base_hz = base_hz * self.freq_scale;
         self.depth_oct = depth_oct;
@@ -182,7 +182,7 @@ impl DubSiren {
         self.env.set_params(ATTACK_S, 0.0, release_s);
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales the carrier base frequency. The LFO depth is in octaves
     /// relative to `base_hz`, so it travels with the note. Absolute,
@@ -285,8 +285,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
         assert!(!s.is_active());
     }
@@ -294,9 +294,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut s = DubSiren::new(&macros);
+            let mut s = DubSiren::new(&params);
             s.trigger(vel);
             peak_over(&mut s, 4800)
         };
@@ -308,8 +308,8 @@ mod tests {
     #[test]
     fn decays_to_silence_after_release() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
         s.trigger(1.0);
         s.release();
         // DEC tops out at 0.6 s; allow 7 s to settle.
@@ -327,8 +327,8 @@ mod tests {
     #[test]
     fn sustained_gesture_stays_active_past_one_second() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
         s.trigger(1.0);
         for _ in 0..(1.0 * SAMPLE_RATE) as usize {
             s.tick();
@@ -348,8 +348,8 @@ mod tests {
     #[test]
     fn watchdog_ends_a_note_that_is_never_released() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
         s.trigger(1.0);
         // GATED_MAX_HOLD_S plus the release decay plus settle.
         for _ in 0..((GATED_MAX_HOLD_S + 2.0) * SAMPLE_RATE) as usize {
@@ -363,8 +363,8 @@ mod tests {
     #[test]
     fn note_off_ends_the_note_early() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
 
         s.trigger(1.0);
         let held = (2.0 * SAMPLE_RATE) as usize;
@@ -387,8 +387,8 @@ mod tests {
     #[test]
     fn release_fades_without_a_step() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
         s.trigger(1.0);
         for _ in 0..(0.2 * SAMPLE_RATE) as usize {
             s.tick();
@@ -416,8 +416,8 @@ mod tests {
     #[test]
     fn stray_releases_are_inert() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
-        let mut s = DubSiren::new(&macros);
+        let params = id.default_params();
+        let mut s = DubSiren::new(&params);
 
         // Never triggered.
         s.release();
@@ -444,19 +444,19 @@ mod tests {
     }
 
     #[test]
-    fn rate_macro_changes_pitch_speed() {
+    fn rate_param_changes_pitch_speed() {
         // A fast LFO RATE produces clearly more zero-crossings per
-        // window than a slow one — direct macro→lfo_inc check.
+        // window than a slow one — direct param→lfo_inc check.
         let id = MachineId::DubSiren;
-        let mut slow = id.default_macros();
+        let mut slow = id.default_params();
         slow[SLOT_MACH_2] = 0.0; // 0.1 Hz
         slow[SLOT_MACH_1] = 0.5; // 1.5 oct depth — audible sweep
-        let mut fast_macros = id.default_macros();
-        fast_macros[SLOT_MACH_2] = 1.0; // 8 Hz
-        fast_macros[SLOT_MACH_1] = 0.5;
+        let mut fast_params = id.default_params();
+        fast_params[SLOT_MACH_2] = 1.0; // 8 Hz
+        fast_params[SLOT_MACH_1] = 0.5;
 
-        let crossings_in_500ms = |macros: &[f32; NUM_MACROS]| {
-            let mut s = DubSiren::new(macros);
+        let crossings_in_500ms = |params: &[f32; NUM_PARAMS]| {
+            let mut s = DubSiren::new(params);
             s.trigger(1.0);
             let n = (0.5 * SAMPLE_RATE) as usize;
             let mut prev = s.tick();
@@ -472,31 +472,31 @@ mod tests {
         };
 
         let lo = crossings_in_500ms(&slow);
-        let hi = crossings_in_500ms(&fast_macros);
+        let hi = crossings_in_500ms(&fast_params);
         // 0.1 Hz LFO barely moves pitch over 500 ms; 8 Hz LFO sweeps
         // the carrier dramatically, crossing far more often.
         assert!(
             hi > lo * 2,
-            "RATE macro should change pitch speed: low={lo}, high={hi}"
+            "RATE param should change pitch speed: low={lo}, high={hi}"
         );
     }
 
     #[test]
     fn retune_transposes_and_survives_recompute() {
         let id = MachineId::DubSiren;
-        let macros = id.default_macros();
+        let params = id.default_params();
         // Use a low RATE so the carrier pitch is roughly static over
         // the measurement window — the retune check needs a stable
         // pitch to count crossings against.
-        let mut base_macros = macros;
-        base_macros[SLOT_MACH_2] = 0.0; // 0.1 Hz
-        base_macros[SLOT_MACH_1] = 0.0; // no depth — pure carrier
+        let mut base_params = params;
+        base_params[SLOT_MACH_2] = 0.0; // 0.1 Hz
+        base_params[SLOT_MACH_1] = 0.0; // no depth — pure carrier
         let window = (0.05 * SAMPLE_RATE) as usize;
         let crossings = |semis: f32, recompute: bool| {
-            let mut s = DubSiren::new(&base_macros);
+            let mut s = DubSiren::new(&base_params);
             s.retune(semis);
             if recompute {
-                s.set_macros(&base_macros);
+                s.set_params(&base_params);
             }
             s.trigger(1.0);
             let mut prev = s.tick();
@@ -516,24 +516,24 @@ mod tests {
         assert!(up > base, "octave-up should cross more: {base} vs {up}");
         assert!(
             i32::abs(up_recomputed - up) <= 1,
-            "set_macros dropped the retune: {up} vs {up_recomputed}"
+            "set_params dropped the retune: {up} vs {up_recomputed}"
         );
     }
 
     #[test]
-    fn extreme_macros_do_not_produce_nans() {
+    fn extreme_params_do_not_produce_nans() {
         let id = MachineId::DubSiren;
-        let base = id.default_macros();
+        let base = id.default_params();
         for &v in &[0.0f32, 1.0f32] {
-            let mut macros = base;
-            for m in macros.iter_mut() {
+            let mut params = base;
+            for m in params.iter_mut() {
                 *m = v;
             }
-            let mut s = DubSiren::new(&macros);
+            let mut s = DubSiren::new(&params);
             s.trigger(1.0);
             for _ in 0..(3.0 * SAMPLE_RATE) as usize {
                 let v = s.tick();
-                assert!(v.is_finite(), "non-finite output at macro={v}: {v}");
+                assert!(v.is_finite(), "non-finite output at param={v}: {v}");
             }
         }
     }

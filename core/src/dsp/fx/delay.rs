@@ -42,7 +42,7 @@ pub struct Delay {
     /// knob is ever worth the cycles.
     delay_samples: usize,
     /// Linear feedback gain, 0..0.98. Clamped on set so even a runaway
-    /// macro cannot make the line self-oscillate hard enough to blow up.
+    /// param cannot make the line self-oscillate hard enough to blow up.
     fb: f32,
     /// Wet/dry mix, 0 (dry only) .. 1 (wet only). Linear crossfade.
     mix: f32,

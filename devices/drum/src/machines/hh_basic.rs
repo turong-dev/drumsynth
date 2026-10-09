@@ -10,7 +10,7 @@
 //! we take the sign of the sine rather than a true square, which keeps
 //! the table reuse and sounds close enough for a one-shot hat).
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -33,7 +33,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, OnePoleHp, OnePoleLp};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
+    NUM_PARAMS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
     SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -60,14 +60,14 @@ pub struct HhBasic {
     /// Whether to reset oscillator phases on trigger.
     reset_on_trig: bool,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl HhBasic {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut h = Self {
             phases: [0.0; NUM_OSCS],
             freqs: [0.0; NUM_OSCS],
@@ -79,19 +79,19 @@ impl HhBasic {
             freq_scale: 1.0,
             level: 0.0,
         };
-        h.set_macros(macros);
+        h.set_params(params);
         h
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 200.0 + 800.0 * macros[SLOT_MACH_0]; // TUNE 200..1000 Hz
-        let tone_spread = 0.01 + 0.15 * macros[SLOT_MACH_1]; // TONE detune spread
-        let transient_decay_s = 0.005 + 0.075 * macros[SLOT_MACH_6]; // TDEC 5..80 ms
-        let main_decay_s = 0.01 + 0.5 * macros[SLOT_MACH_5]; // DEC 10..510 ms
-        let reset_on_trig = macros[SLOT_MACH_7] > 0.5; // RST threshold
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
-        let bpf_hz = 2000.0 + 10000.0 * macros[SLOT_FILT_0]; // BPF 2..12 kHz
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let base_hz = 200.0 + 800.0 * params[SLOT_MACH_0]; // TUNE 200..1000 Hz
+        let tone_spread = 0.01 + 0.15 * params[SLOT_MACH_1]; // TONE detune spread
+        let transient_decay_s = 0.005 + 0.075 * params[SLOT_MACH_6]; // TDEC 5..80 ms
+        let main_decay_s = 0.01 + 0.5 * params[SLOT_MACH_5]; // DEC 10..510 ms
+        let reset_on_trig = params[SLOT_MACH_7] > 0.5; // RST threshold
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
+        let bpf_hz = 2000.0 + 10000.0 * params[SLOT_FILT_0]; // BPF 2..12 kHz
 
         // Build the frequency bank: base ratios with bipolar detune spread.
         // Even-indexed oscs go sharp, odd-indexed go flat (or vice versa).
@@ -110,7 +110,7 @@ impl HhBasic {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales the whole osc bank, preserving the ratios and detune between
     /// the six oscillators. Absolute, not incremental.
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::HhBasic;
-        let macros = id.default_macros();
-        let mut h = HhBasic::new(&macros);
+        let params = id.default_params();
+        let mut h = HhBasic::new(&params);
         for _ in 0..1000 {
             assert_eq!(h.tick(), 0.0);
         }
@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::HhBasic;
-        let macros = id.default_macros();
-        let mut h = HhBasic::new(&macros);
+        let params = id.default_params();
+        let mut h = HhBasic::new(&params);
         h.trigger(1.0);
         for _ in 0..(1.0 * SAMPLE_RATE) as usize {
             h.tick();
@@ -213,8 +213,8 @@ mod tests {
     #[test]
     fn output_is_bounded() {
         let id = MachineId::HhBasic;
-        let macros = id.default_macros();
-        let mut h = HhBasic::new(&macros);
+        let params = id.default_params();
+        let mut h = HhBasic::new(&params);
         for _ in 0..100 {
             h.trigger(1.0);
             for _ in 0..512 {
@@ -227,9 +227,9 @@ mod tests {
     #[test]
     fn reset_on_trig_zeroes_phases() {
         let id = MachineId::HhBasic;
-        let mut macros = id.default_macros();
-        macros[SLOT_MACH_7] = 1.0; // RST = reset
-        let mut h = HhBasic::new(&macros);
+        let mut params = id.default_params();
+        params[SLOT_MACH_7] = 1.0; // RST = reset
+        let mut h = HhBasic::new(&params);
         // Run a bit to advance phases.
         h.trigger(1.0);
         for _ in 0..100 {

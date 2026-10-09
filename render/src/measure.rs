@@ -1,6 +1,6 @@
 //! Measurement for the tuning workflow (Phase 10).
 //!
-//! The engine is deterministic — same machine + macros renders the same
+//! The engine is deterministic — same machine + params renders the same
 //! samples on any host — so a measurement taken here is a stable number you
 //! can compare across edits, not a spot reading. That is the entire point:
 //! the trim pass and the monotonicity checks below all reduce a rendered hit
@@ -9,12 +9,12 @@
 //! Two loudness measures:
 //!
 //! - **RMS (dBFS)**: the integrated energy of the whole hit. Cheap, exact,
-//!   and the right thing to trim drum macros against — a macro's "travel" is
+//!   and the right thing to trim drum params against — a param's "travel" is
 //!   mostly about energy and tail, and dBFS is what a trim pass can act on
 //!   directly.
 //! - **LUFS**: K-weighted loudness (ITU-R BS.1770-4) over the whole hit,
 //!   closer to perceived level than plain RMS. Optional — it costs two
-//!   biquads per sample — and useful when a macro moves a *spectral* knob
+//!   biquads per sample — and useful when a param moves a *spectral* knob
 //!   (filter cutoff) where raw energy understates how loud it gets.
 
 use drum_engine::{DrumEngine, BLOCK, SAMPLE_RATE};
@@ -365,7 +365,7 @@ mod tests {
         let full = measure_oneshot(&mut e, 0, 4.0, false, 1.0);
         let mut e2 = DrumEngine::new();
         e2.tracks[0].load_machine(drum_engine::machines::MachineId::BdClassic);
-        e2.tracks[0].set_macro(drum_engine::machines::SLOT_LEVEL, 0.3);
+        e2.tracks[0].set_param(drum_engine::machines::SLOT_LEVEL, 0.3);
         let quiet = measure_oneshot(&mut e2, 0, 4.0, false, 1.0);
         let spread = (full.m.decay_ms() - quiet.m.decay_ms()).abs();
         assert!(

@@ -16,11 +16,11 @@
 //!
 //! The grid is generic over any [`DeviceEngine`](crate::engine::DeviceEngine);
 //! the only device-specific surface it needs is [`DeviceModel`] on the slot
-//! identifier, which vends per-machine macro metadata.
+//! identifier, which vends per-machine param metadata.
 
 use crate::engine::DeviceEngine;
-use crate::macros::{
-    MacroInfo, SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
+use crate::params::{
+    ParamInfo, SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
     SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
     SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
     SLOT_STRIP_RESO,
@@ -196,8 +196,8 @@ pub enum WidgetKind {
 /// What a widget edits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ParamTarget {
-    /// One of the normalised macros, indexed by slot.
-    Macro(usize),
+    /// One of the normalised params, indexed by slot.
+    Param(usize),
     /// The active track's choke mask (`StripParams::choke_mask`).
     ChokeMask,
 }
@@ -507,7 +507,7 @@ impl Grid {
             let track = x as usize;
             let value = vertical_fader_value(y);
             let vel = value as f32 / 127.0;
-            engine.tracks_mut()[track].set_macro(SLOT_LEVEL, vel);
+            engine.tracks_mut()[track].set_param(SLOT_LEVEL, vel);
             return;
         }
 
@@ -608,7 +608,7 @@ impl Grid {
                 let value = (base as u16 + offset as u16).min(127) as u8;
                 let track = held.x as usize;
                 if track < engine.tracks().len() {
-                    engine.tracks_mut()[track].set_macro(SLOT_LEVEL, value as f32 / 127.0);
+                    engine.tracks_mut()[track].set_param(SLOT_LEVEL, value as f32 / 127.0);
                 }
             }
             Screen::Parameter => {
@@ -648,7 +648,7 @@ where
     S: Slot<N>,
 {
     match target {
-        ParamTarget::Macro(idx) => (track.base_macros[*idx].clamp(0.0, 1.0) * 127.0 + 0.5) as u8,
+        ParamTarget::Param(idx) => (track.base_params[*idx].clamp(0.0, 1.0) * 127.0 + 0.5) as u8,
         ParamTarget::ChokeMask => track.strip.choke_mask,
     }
 }
@@ -659,10 +659,10 @@ where
 {
     let v = value.min(127);
     match target {
-        ParamTarget::Macro(idx) => {
+        ParamTarget::Param(idx) => {
             // Discrete selectors should snap instantly; continuous faders use
             // the same immediate set for responsive UI feedback.
-            track.set_macro(*idx, v as f32 / 127.0);
+            track.set_param(*idx, v as f32 / 127.0);
         }
         ParamTarget::ChokeMask => {
             let mut strip = track.strip;
@@ -692,27 +692,27 @@ fn mixer_page_widget(row: usize) -> Option<Widget> {
         0 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "LVL",
-            target: ParamTarget::Macro(SLOT_LEVEL),
+            target: ParamTarget::Param(SLOT_LEVEL),
         },
         1 => Widget {
             kind: WidgetKind::BipolarPan,
             label: "PAN",
-            target: ParamTarget::Macro(SLOT_PAN),
+            target: ParamTarget::Param(SLOT_PAN),
         },
         2 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "DLY",
-            target: ParamTarget::Macro(SLOT_SEND_DELAY),
+            target: ParamTarget::Param(SLOT_SEND_DELAY),
         },
         3 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "RVB",
-            target: ParamTarget::Macro(SLOT_SEND_REVERB),
+            target: ParamTarget::Param(SLOT_SEND_REVERB),
         },
         4 => Widget {
             kind: WidgetKind::EnumSelector { count: 4 },
             label: "OUT",
-            target: ParamTarget::Macro(SLOT_OUT),
+            target: ParamTarget::Param(SLOT_OUT),
         },
         5 => Widget {
             kind: WidgetKind::BitmaskToggle,
@@ -728,27 +728,27 @@ fn strip_page_widget(row: usize) -> Option<Widget> {
         0 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "CUT",
-            target: ParamTarget::Macro(SLOT_STRIP_CUT),
+            target: ParamTarget::Param(SLOT_STRIP_CUT),
         },
         1 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "RES",
-            target: ParamTarget::Macro(SLOT_STRIP_RESO),
+            target: ParamTarget::Param(SLOT_STRIP_RESO),
         },
         2 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "ATK",
-            target: ParamTarget::Macro(SLOT_STRIP_ATK),
+            target: ParamTarget::Param(SLOT_STRIP_ATK),
         },
         3 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "HLD",
-            target: ParamTarget::Macro(SLOT_STRIP_HOLD),
+            target: ParamTarget::Param(SLOT_STRIP_HOLD),
         },
         4 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "DEC",
-            target: ParamTarget::Macro(SLOT_STRIP_DEC),
+            target: ParamTarget::Param(SLOT_STRIP_DEC),
         },
         _ => return None,
     })
@@ -759,32 +759,32 @@ fn lfo_page_widget(row: usize) -> Option<Widget> {
         0 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "L1R",
-            target: ParamTarget::Macro(SLOT_LFO1_RATE),
+            target: ParamTarget::Param(SLOT_LFO1_RATE),
         },
         1 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "L1D",
-            target: ParamTarget::Macro(SLOT_LFO1_DEPTH),
+            target: ParamTarget::Param(SLOT_LFO1_DEPTH),
         },
         2 => Widget {
             kind: WidgetKind::EnumSelector { count: 16 },
             label: "L1S",
-            target: ParamTarget::Macro(SLOT_LFO1_DEST),
+            target: ParamTarget::Param(SLOT_LFO1_DEST),
         },
         3 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "L2R",
-            target: ParamTarget::Macro(SLOT_LFO2_RATE),
+            target: ParamTarget::Param(SLOT_LFO2_RATE),
         },
         4 => Widget {
             kind: WidgetKind::UnipolarFader,
             label: "L2D",
-            target: ParamTarget::Macro(SLOT_LFO2_DEPTH),
+            target: ParamTarget::Param(SLOT_LFO2_DEPTH),
         },
         5 => Widget {
             kind: WidgetKind::EnumSelector { count: 16 },
             label: "L2S",
-            target: ParamTarget::Macro(SLOT_LFO2_DEST),
+            target: ParamTarget::Param(SLOT_LFO2_DEST),
         },
         _ => return None,
     })
@@ -794,30 +794,30 @@ fn machine_page_widget<const N: usize, Id: DeviceModel<N>>(
     row: usize,
     machine: Id,
 ) -> Option<Widget> {
-    let info: &[MacroInfo; N] = &machine.macro_info();
+    let info: &[ParamInfo; N] = &machine.param_info();
     let count = Id::count() as u8;
 
     if row == 0 {
         return Some(Widget {
             kind: WidgetKind::EnumSelector { count },
             label: "MCH",
-            target: ParamTarget::Macro(SLOT_MACHINE),
+            target: ParamTarget::Param(SLOT_MACHINE),
         });
     }
 
-    // Fill rows 1..=5 with the first non-RESV machine-internal macros in
+    // Fill rows 1..=5 with the first non-RESV machine-internal params in
     // slots 0..=9 (MACH bank + FILT 0/1, excluding track-routed strip slots).
     let mut found = 0;
-    for (slot, macro_info) in info.iter().enumerate().take(10) {
-        if macro_info.name == "RESV" {
+    for (slot, param_info) in info.iter().enumerate().take(10) {
+        if param_info.name == "RESV" {
             continue;
         }
         found += 1;
         if found == row {
             return Some(Widget {
                 kind: WidgetKind::UnipolarFader,
-                label: macro_info.abbrev,
-                target: ParamTarget::Macro(slot),
+                label: param_info.abbrev,
+                target: ParamTarget::Param(slot),
             });
         }
     }
@@ -844,7 +844,7 @@ where
 
     // Left half: up to 8 vertical level faders.
     for track in 0..n_tracks.min(8) {
-        let value = read_target(&ParamTarget::Macro(SLOT_LEVEL), &engine.tracks()[track]);
+        let value = read_target(&ParamTarget::Param(SLOT_LEVEL), &engine.tracks()[track]);
         render_vertical_fader(track, value, next);
     }
 
@@ -907,7 +907,7 @@ where
             let n_tracks = engine.tracks().len();
             if (held.x as usize) < n_tracks {
                 let current = read_target(
-                    &ParamTarget::Macro(SLOT_LEVEL),
+                    &ParamTarget::Param(SLOT_LEVEL),
                     &engine.tracks()[held.x as usize],
                 );
                 let offset = (current as i16 - base as i16).clamp(0, 15) as u8;
@@ -915,7 +915,7 @@ where
                 // Dim the fader columns to keep context.
                 for track in 0..n_tracks.min(8) {
                     let value =
-                        read_target(&ParamTarget::Macro(SLOT_LEVEL), &engine.tracks()[track]);
+                        read_target(&ParamTarget::Param(SLOT_LEVEL), &engine.tracks()[track]);
                     render_vertical_fader(track, value, next);
                     for y in 0..HEIGHT as u8 {
                         if y != held.y {
@@ -1136,11 +1136,11 @@ fn enum_option_for_col(count: u8, x: u8) -> u8 {
 mod tests {
     use super::*;
     use crate::engine::Engine;
-    use crate::macros::MacroInfo;
+    use crate::params::ParamInfo;
     use crate::slot::{Slot, SlotId};
 
     /// Dummy slot for testing the generic grid without pulling in the drum
-    /// catalogue. Uses the full 32-macro layout so the grid's hard-coded slot
+    /// catalogue. Uses the full 32-param layout so the grid's hard-coded slot
     /// constants are in range.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct DummyId(usize);
@@ -1159,24 +1159,24 @@ mod tests {
         fn count() -> usize {
             2
         }
-        fn default_macros(self) -> [f32; 32] {
+        fn default_params(self) -> [f32; 32] {
             [0.0; 32]
         }
     }
 
     impl DeviceModel<32> for DummyId {
-        fn macro_info(self) -> [MacroInfo; 32] {
-            let mut info = [MacroInfo {
+        fn param_info(self) -> [ParamInfo; 32] {
+            let mut info = [ParamInfo {
                 name: "RESV",
                 abbrev: "RESV",
                 default: 0.0,
             }; 32];
-            info[0] = MacroInfo {
+            info[0] = ParamInfo {
                 name: "TUNE",
                 abbrev: "TUN",
                 default: 0.5,
             };
-            info[1] = MacroInfo {
+            info[1] = ParamInfo {
                 name: "DEC",
                 abbrev: "DEC",
                 default: 0.5,
@@ -1193,22 +1193,22 @@ mod tests {
 
     struct DummySlot {
         active: bool,
-        macros: [f32; 32],
+        params: [f32; 32],
     }
 
     impl Slot<32> for DummySlot {
         type Id = DummyId;
-        fn new(_id: Self::Id, macros: &[f32; 32]) -> Self {
+        fn new(_id: Self::Id, params: &[f32; 32]) -> Self {
             Self {
                 active: false,
-                macros: *macros,
+                params: *params,
             }
         }
         fn id(&self) -> Self::Id {
             DummyId(0)
         }
-        fn set_macros(&mut self, macros: &[f32; 32]) {
-            self.macros = *macros;
+        fn set_params(&mut self, params: &[f32; 32]) {
+            self.params = *params;
         }
         fn trigger(&mut self, _velocity: f32) {
             self.active = true;
@@ -1299,9 +1299,9 @@ mod tests {
 
         let expected = 112.0 / 127.0;
         assert!(
-            (engine.tracks[0].base_macros[SLOT_LEVEL] - expected).abs() < 1e-6,
+            (engine.tracks[0].base_params[SLOT_LEVEL] - expected).abs() < 1e-6,
             "level should jump to 112/127, got {}",
-            engine.tracks[0].base_macros[SLOT_LEVEL]
+            engine.tracks[0].base_params[SLOT_LEVEL]
         );
     }
 
@@ -1375,9 +1375,9 @@ mod tests {
         // Base = 5*8 = 40. Row 3 offset = 7-3 = 4. Total = 44.
         let expected = 44.0 / 127.0;
         assert!(
-            (engine.tracks[0].base_macros[SLOT_STRIP_CUT] - expected).abs() < 1e-6,
+            (engine.tracks[0].base_params[SLOT_STRIP_CUT] - expected).abs() < 1e-6,
             "cutoff should be 44/127, got {}",
-            engine.tracks[0].base_macros[SLOT_STRIP_CUT]
+            engine.tracks[0].base_params[SLOT_STRIP_CUT]
         );
     }
 
@@ -1395,9 +1395,9 @@ mod tests {
         // Base = (7-4)*16 = 48. Offset = 10. Total = 58.
         let expected = 58.0 / 127.0;
         assert!(
-            (engine.tracks[0].base_macros[SLOT_LEVEL] - expected).abs() < 1e-6,
+            (engine.tracks[0].base_params[SLOT_LEVEL] - expected).abs() < 1e-6,
             "level should be 58/127, got {}",
-            engine.tracks[0].base_macros[SLOT_LEVEL]
+            engine.tracks[0].base_params[SLOT_LEVEL]
         );
     }
 

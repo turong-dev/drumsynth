@@ -9,7 +9,7 @@
 //! phase as a separate machine (HH Basic / HH Lab) rather than growing this
 //! one.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -29,7 +29,7 @@
 
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, OnePoleLp};
-use crate::machines::{NUM_MACROS, SLOT_FILT_0, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_5};
+use crate::machines::{NUM_PARAMS, SLOT_FILT_0, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_5};
 use crate::SAMPLE_RATE;
 
 /// Hat Classic machine.
@@ -42,8 +42,8 @@ pub struct HatClassic {
 }
 
 impl HatClassic {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut h = Self {
             // A different seed from the snare, so the two do not correlate
             // when they land on the same step.
@@ -53,16 +53,16 @@ impl HatClassic {
             lp: OnePoleLp::new(0.0),
             level: 0.0,
         };
-        h.set_macros(macros);
+        h.set_params(params);
         h
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let decay_s = 0.01 + 0.5 * macros[SLOT_MACH_5]; // DEC 10..510 ms
-        let hp_hz = 2000.0 + 9000.0 * macros[SLOT_FILT_0]; // HPF 2..11 kHz
-        let lp_hz = 4000.0 + 12000.0 * macros[SLOT_FILT_1]; // LPF 4..16 kHz
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let decay_s = 0.01 + 0.5 * params[SLOT_MACH_5]; // DEC 10..510 ms
+        let hp_hz = 2000.0 + 9000.0 * params[SLOT_FILT_0]; // HPF 2..11 kHz
+        let lp_hz = 4000.0 + 12000.0 * params[SLOT_FILT_1]; // LPF 4..16 kHz
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.env.set_coeff(decay_coeff(decay_s, SAMPLE_RATE));
         self.hp.set_coeff(cutoff_coeff(hp_hz, SAMPLE_RATE));
@@ -112,8 +112,8 @@ mod tests {
 
     #[test]
     fn silent_until_struck() {
-        let macros = MachineId::HatClassic.default_macros();
-        let mut h = HatClassic::new(&macros);
+        let params = MachineId::HatClassic.default_params();
+        let mut h = HatClassic::new(&params);
         for _ in 0..1000 {
             assert_eq!(h.tick(), 0.0);
         }
@@ -121,8 +121,8 @@ mod tests {
 
     #[test]
     fn decays_quickly() {
-        let macros = MachineId::HatClassic.default_macros();
-        let mut h = HatClassic::new(&macros);
+        let params = MachineId::HatClassic.default_params();
+        let mut h = HatClassic::new(&params);
         h.trigger(1.0);
         for _ in 0..(0.5 * SAMPLE_RATE) as usize {
             h.tick();
@@ -132,8 +132,8 @@ mod tests {
 
     #[test]
     fn output_is_bounded() {
-        let macros = MachineId::HatClassic.default_macros();
-        let mut h = HatClassic::new(&macros);
+        let params = MachineId::HatClassic.default_params();
+        let mut h = HatClassic::new(&params);
         for _ in 0..200 {
             h.trigger(1.0);
             for _ in 0..512 {

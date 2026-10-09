@@ -46,14 +46,14 @@
 //! 4 sounding     tracks 0-3 = the four Peaks drums of DEFAULT_KIT, so
 //!                `6 - 4` is the two Plaits voices and `(4 - idle) / 4`
 //!                is one Peaks voice with the strip on it
-//! 6 no SHAPE     WARP.DRV = 0 is a bypass detent, so
+//! 6 no SHAPE     SHAPE.DRV = 0 is a bypass detent, so
 //!                `6 sounding - 6 no SHAPE` is the shaping stage's cost
 //! ```
 //!
 //! **What is still not reachable from here.** The four Stages generators
 //! (2 LFO + 2 AD) run unconditionally in `MiSlot`, every block, every track,
 //! whatever the route depths are — see `lib.rs`'s
-//! `process_free_running`/`process` calls. No macro gates them, so no
+//! `process_free_running`/`process` calls. No param gates them, so no
 //! scenario here can subtract them, and their cost stays folded into
 //! `6 sounding`.
 //!
@@ -116,8 +116,8 @@ use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
 use mi_drum_engine::{
-    DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH, SLOT_FILT_0,
-    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_HOLD, BLOCK, SAMPLE_RATE, TRACKS,
+    DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0,
+    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH, SLOT_STRIP_HOLD, BLOCK, SAMPLE_RATE, TRACKS,
 };
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -310,12 +310,12 @@ fn main() -> ! {
         let peaks_only = measure(engine, &mut left, &mut right, 4);
         report("4 sounding", peaks_only, &mut poller, &mut pit);
 
-        // The shaping stage, subtracted. `WARP.DRV = 0` is a discrete bypass
-        // detent rather than a gain of zero: `warps_drive_from_macro` returns
+        // The shaping stage, subtracted. `SHAPE.DRV = 0` is a discrete bypass
+        // detent rather than a gain of zero: `shaper_drive_from_param` returns
         // `(true, 0.0)` and `Shaper::process_dual` copies its input and
         // returns. So `6 sounding - 6 no SHAPE` is the stage's whole cost,
         // with the strip's own scaffolding -- the dry copy, the modulator
-        // source, the `WARP.MIX` blend -- left exactly where it was.
+        // source, the `SHAPE.MIX` blend -- left exactly where it was.
         //
         // This is the number that retired Warps. Measured the same way,
         // `warps::Modulator` cost 79,855 cycles per track; Phase 14 had
@@ -343,7 +343,7 @@ fn main() -> ! {
         // is whether a cheaper algorithm is worth reaching for -- and how much
         // of Warps' cost an algorithm choice can reach at all, given the
         // oversampling underneath it is the same whichever entry is selected.
-        for &(label, value) in &WARPS_ALGO_SWEEP {
+        for &(label, value) in &SHAPER_ALGO_SWEEP {
             let s = measure_with_stage(engine, &mut left, &mut right, value);
             report(label, s, &mut poller, &mut pit);
         }
@@ -413,7 +413,7 @@ struct Stats {
 /// `eff_send_*` caches via `set_strip`.
 ///
 /// Writing `strip.send_*` directly is not enough: `process_dry_wet` reads the
-/// cached values, which only `set_strip` (or the macro path) re-derives.
+/// cached values, which only `set_strip` (or the param path) re-derives.
 fn set_send(engine: &mut MiDrumEngine, track: usize, delay: f32, reverb: f32) {
     let tracks = engine.tracks_mut();
     tracks[track].strip.send_delay = delay;
@@ -451,7 +451,7 @@ fn measure(
     // ratio of 1.95x against 1.10-1.28x everywhere else, which is what a
     // scenario inheriting five ringing voices looks like.
     //
-    // `panic()` resets every track and the send-FX tanks. Macros, strip
+    // `panic()` resets every track and the send-FX tanks. Params, strip
     // params and `eff_send_*` all survive it (`Track::reset` touches voice
     // state only), so the scenarios that set those before calling in here are
     // unaffected -- see `measure_fx_only`, which already relied on that.
@@ -517,18 +517,18 @@ fn measure_with_fx(
 
 /// The restore value for `SLOT_FILT_0` — also the shipped default, and (see
 /// below) the most expensive entry in the table.
-const WARPS_ALGO_NONE: f32 = 0.0;
+const SHAPER_ALGO_NONE: f32 = 0.0;
 
-/// One macro value per entry of the shaper's algorithm table.
+/// One param value per entry of the shaper's algorithm table.
 ///
-/// `Shaper::set_parameters` scales the macro across `ALGORITHM_COUNT` and
+/// `Shaper::set_parameters` scales the param across `ALGORITHM_COUNT` and
 /// blends adjacent entries, so `i / (COUNT - 1)` lands on entry `i`.
 ///
 /// These used to be six points named after Warps' `xmod_table_` pairs, which
 /// stopped meaning anything twice over: 14.2 had already repointed
 /// `SLOT_FILT_0` from the spike stage selector at the algorithm, and the
 /// stage is no longer Warps. Four entries now, named for what they are.
-const WARPS_ALGO_SWEEP: [(&str, f32); 4] = [
+const SHAPER_ALGO_SWEEP: [(&str, f32); 4] = [
     ("ALG0 xfade ", 0.0),       // equal-power blend of the two inputs
     ("ALG1 fold  ", 1.0 / 3.0), // ADAA sine folder
     ("ALG2 diode ", 2.0 / 3.0), // ADAA diode ring, Warps' analog model
@@ -547,13 +547,13 @@ fn measure_with_stage(
     stage: f32,
 ) -> Stats {
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_macro(SLOT_FILT_0, stage);
+        engine.tracks_mut()[t].set_param(SLOT_FILT_0, stage);
     }
 
     let stats = measure(engine, left, right, TRACKS);
 
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_macro(SLOT_FILT_0, WARPS_ALGO_NONE);
+        engine.tracks_mut()[t].set_param(SLOT_FILT_0, SHAPER_ALGO_NONE);
     }
 
     stats
@@ -561,12 +561,12 @@ fn measure_with_stage(
 
 /// Worst case with the shaping stage bypassed on every track.
 ///
-/// `SLOT_STRIP_HOLD` is `WARP.DRV` on this device -- the alias
-/// `SLOT_WARPS_DRIVE` is private to `mi-drum-engine`, the same reason the
+/// `SLOT_STRIP_HOLD` is `SHAPE.DRV` on this device -- the alias
+/// `SLOT_SHAPER_DRIVE` is private to `mi-drum-engine`, the same reason the
 /// algorithm scenarios above reach for `SLOT_FILT_0` rather than
-/// `SLOT_WARPS_ALGO`.
+/// `SLOT_SHAPER_ALGO`.
 ///
-/// Restores the default drive (0.2, `WARPS_DRIVE_INFO`) on the way out, so a
+/// Restores the default drive (0.2, `SHAPER_DRIVE_INFO`) on the way out, so a
 /// later scenario in the same loop iteration does not silently measure a
 /// bypassed strip -- the discipline `measure_with_stage` applies to its
 /// algorithm and `measure_with_fx` to its sends.
@@ -576,21 +576,21 @@ fn measure_without_shaper(
     right: &mut [f32; BLOCK],
 ) -> Stats {
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_macro(SLOT_STRIP_HOLD, WARPS_DRIVE_BYPASS);
+        engine.tracks_mut()[t].set_param(SLOT_STRIP_HOLD, SHAPER_DRIVE_BYPASS);
     }
 
     let stats = measure(engine, left, right, TRACKS);
 
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_macro(SLOT_STRIP_HOLD, WARPS_DRIVE_DEFAULT);
+        engine.tracks_mut()[t].set_param(SLOT_STRIP_HOLD, SHAPER_DRIVE_DEFAULT);
     }
 
     stats
 }
 
-/// `WARP.DRV` values: the bypass detent, and the shipped default.
-const WARPS_DRIVE_BYPASS: f32 = 0.0;
-const WARPS_DRIVE_DEFAULT: f32 = 0.2;
+/// `SHAPE.DRV` values: the bypass detent, and the shipped default.
+const SHAPER_DRIVE_BYPASS: f32 = 0.0;
+const SHAPER_DRIVE_DEFAULT: f32 = 0.2;
 
 /// Worst case with the Stages modulation bus driven at `depth` on every track.
 ///
@@ -606,13 +606,13 @@ fn measure_modulation(
 ) -> Stats {
     const ROUTES: [usize; 4] = [
         SLOT_LFO_FILTER_DEPTH,
-        SLOT_LFO_WARPS_DEPTH,
+        SLOT_LFO_SHAPER_DEPTH,
         SLOT_AD_FILTER_DEPTH,
-        SLOT_AD_WARPS_DEPTH,
+        SLOT_AD_SHAPER_DEPTH,
     ];
     for t in 0..TRACKS {
         for &slot in &ROUTES {
-            engine.tracks_mut()[t].set_macro(slot, depth);
+            engine.tracks_mut()[t].set_param(slot, depth);
         }
     }
 
@@ -620,7 +620,7 @@ fn measure_modulation(
 
     for t in 0..TRACKS {
         for &slot in &ROUTES {
-            engine.tracks_mut()[t].set_macro(slot, 0.0);
+            engine.tracks_mut()[t].set_param(slot, 0.0);
         }
     }
 

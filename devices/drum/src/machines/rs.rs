@@ -5,7 +5,7 @@
 //! sine. Two oscillators detuned a few cents give it thickness without
 //! "chorus"; the noise tick adds the physical "crack" at the start.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -28,7 +28,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
+    NUM_PARAMS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
     SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -43,14 +43,14 @@ pub struct Rs {
     hp: OnePoleHp,
     noise_level: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl Rs {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut s = Self {
             osc_a: SineOsc::new(),
             osc_b: SineOsc::new(),
@@ -62,19 +62,19 @@ impl Rs {
             freq_scale: 1.0,
             level: 0.0,
         };
-        s.set_macros(macros);
+        s.set_params(params);
         s
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 200.0 + 600.0 * macros[SLOT_MACH_0]; // TUNE 200..800 Hz
-        let detune = 1.0 + 0.08 * macros[SLOT_MACH_1]; // DET up to ~8%
-        let body_decay_s = 0.015 + 0.135 * macros[SLOT_MACH_5]; // DEC 15..150 ms
-        let noise_decay_s = 0.005 + 0.055 * macros[SLOT_MACH_6]; // NDEC 5..60 ms
-        let noise_level = macros[SLOT_MACH_7]; // NLEV 0..1
-        let hp_hz = 1000.0 + 5000.0 * macros[SLOT_FILT_0]; // HPF 1..6 kHz
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let body_hz = 200.0 + 600.0 * params[SLOT_MACH_0]; // TUNE 200..800 Hz
+        let detune = 1.0 + 0.08 * params[SLOT_MACH_1]; // DET up to ~8%
+        let body_decay_s = 0.015 + 0.135 * params[SLOT_MACH_5]; // DEC 15..150 ms
+        let noise_decay_s = 0.005 + 0.055 * params[SLOT_MACH_6]; // NDEC 5..60 ms
+        let noise_level = params[SLOT_MACH_7]; // NLEV 0..1
+        let hp_hz = 1000.0 + 5000.0 * params[SLOT_FILT_0]; // HPF 1..6 kHz
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(body_hz * self.freq_scale);
         self.osc_b.set_freq(body_hz * detune * self.freq_scale);
@@ -87,7 +87,7 @@ impl Rs {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both oscillators, preserving the detune between them. The
     /// noise tick is pitchless and untouched. Absolute, not incremental.
@@ -168,16 +168,16 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::Rs;
-        let macros = id.default_macros();
-        let mut s = Rs::new(&macros);
+        let params = id.default_params();
+        let mut s = Rs::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn decays_quickly() {
         let id = MachineId::Rs;
-        let macros = id.default_macros();
-        let mut s = Rs::new(&macros);
+        let params = id.default_params();
+        let mut s = Rs::new(&params);
         s.trigger(1.0);
         for _ in 0..(0.5 * SAMPLE_RATE) as usize {
             s.tick();
@@ -188,8 +188,8 @@ mod tests {
     #[test]
     fn produces_sound() {
         let id = MachineId::Rs;
-        let macros = id.default_macros();
-        let mut s = Rs::new(&macros);
+        let params = id.default_params();
+        let mut s = Rs::new(&params);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 2400) > 0.1, "rimshot too quiet");
     }
@@ -198,7 +198,7 @@ mod tests {
     fn noise_and_body_both_contribute() {
         let id = MachineId::Rs;
         // Pure noise
-        let mut m = id.default_macros();
+        let mut m = id.default_params();
         m[SLOT_MACH_7] = 0.0;
         let mut s = Rs::new(&m);
         s.trigger(1.0);
@@ -206,7 +206,7 @@ mod tests {
         // Pure body — body still sounds at NLEV=0 (noise contributes nothing)
         let body_peak = body_only;
 
-        let mut m2 = id.default_macros();
+        let mut m2 = id.default_params();
         m2[SLOT_MACH_7] = 1.0;
         let mut s2 = Rs::new(&m2);
         s2.trigger(1.0);

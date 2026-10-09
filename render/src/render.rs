@@ -59,7 +59,7 @@ pub(crate) fn render_one_shot(engine: &mut DrumEngine, track: usize, seconds: f3
 /// than of the modulation map.
 ///
 /// The last field is the shape of the strip's modulator oscillator, which
-/// only sounds when a track's `WARP.IN` selects it. The kit leaves `WARP.IN`
+/// only sounds when a track's `SHAPE.IN` selects it. The kit leaves `SHAPE.IN`
 /// at its default, so these are inert here; the oscillator gets a dedicated
 /// pass instead.
 ///
@@ -138,37 +138,37 @@ const MI_KIT_PATTERN: [[bool; 16]; mi_drum_engine::TRACKS] = BACKBEAT_PATTERN;
 
 /// Apply [`MI_KIT_STRIPS`] to the engine's tracks.
 ///
-/// `drive_override` replaces every track's `WARP.DRV`. `Some(0.0)` is the
+/// `drive_override` replaces every track's `SHAPE.DRV`. `Some(0.0)` is the
 /// detent that takes Warps out of the path via `Modulator::set_bypass`, which
 /// is what the baseline's reference bar uses.
 fn apply_mi_kit_strips(
     engine: &mut MiDrumEngine,
-    warps_algorithm: f32,
+    shaper_algorithm: f32,
     drive_override: Option<f32>,
 ) {
     use mi_drum_engine::{
-        DeviceEngine, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH, SLOT_AD_WARPS_DEPTH,
+        DeviceEngine, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH,
         SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE,
-        SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
-        SLOT_WARPS_OSC_SHAPE,
+        SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_OSC_SHAPE, SLOT_STRIP_CUT, SLOT_STRIP_HOLD,
+        SLOT_STRIP_RESO,
     };
 
     for (idx, &spec) in MI_KIT_STRIPS.iter().enumerate() {
         let track = &mut engine.tracks_mut()[idx];
-        track.set_macro(SLOT_FILT_0, warps_algorithm);
-        track.set_macro(SLOT_FILT_1, spec.0);
-        track.set_macro(SLOT_STRIP_CUT, spec.1);
-        track.set_macro(SLOT_STRIP_RESO, spec.2);
-        track.set_macro(SLOT_STRIP_HOLD, drive_override.unwrap_or(spec.3));
-        track.set_macro(SLOT_LFO_RATE, spec.4);
-        track.set_macro(SLOT_LFO_DEPTH, spec.5);
-        track.set_macro(SLOT_LFO_FILTER_DEPTH, spec.6);
-        track.set_macro(SLOT_LFO_WARPS_DEPTH, spec.7);
-        track.set_macro(SLOT_AD_ATTACK, spec.8);
-        track.set_macro(SLOT_AD_DECAY, spec.9);
-        track.set_macro(SLOT_AD_FILTER_DEPTH, spec.10);
-        track.set_macro(SLOT_AD_WARPS_DEPTH, spec.11);
-        track.set_macro(SLOT_WARPS_OSC_SHAPE, spec.12);
+        track.set_param(SLOT_FILT_0, shaper_algorithm);
+        track.set_param(SLOT_FILT_1, spec.0);
+        track.set_param(SLOT_STRIP_CUT, spec.1);
+        track.set_param(SLOT_STRIP_RESO, spec.2);
+        track.set_param(SLOT_STRIP_HOLD, drive_override.unwrap_or(spec.3));
+        track.set_param(SLOT_LFO_RATE, spec.4);
+        track.set_param(SLOT_LFO_DEPTH, spec.5);
+        track.set_param(SLOT_LFO_FILTER_DEPTH, spec.6);
+        track.set_param(SLOT_LFO_SHAPER_DEPTH, spec.7);
+        track.set_param(SLOT_AD_ATTACK, spec.8);
+        track.set_param(SLOT_AD_DECAY, spec.9);
+        track.set_param(SLOT_AD_FILTER_DEPTH, spec.10);
+        track.set_param(SLOT_AD_SHAPER_DEPTH, spec.11);
+        track.set_param(SLOT_SHAPER_OSC_SHAPE, spec.12);
     }
 }
 
@@ -215,12 +215,12 @@ fn play_mi_kit_pattern(engine: &mut MiDrumEngine, out: &mut Vec<f32>, bars: usiz
 /// The marks exist so the Warps A/B inside the render is findable: it sits
 /// 21 seconds in, behind the machine sweep, and a reference you have to hunt
 /// for is a reference nobody uses.
-pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static str)>) {
+pub(crate) fn render_mi_drum_marked(shaper_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static str)>) {
     use mi_drum_engine::{
         DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
-        SLOT_AD_WARPS_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
-        SLOT_LFO_RATE, SLOT_LFO_WARPS_DEPTH, SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
-        SLOT_WARPS_MOD_SRC, SLOT_WARPS_OSC_SHAPE,
+        SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
+        SLOT_LFO_RATE, SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_MOD_SRC, SLOT_SHAPER_OSC_SHAPE,
+        SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -246,20 +246,20 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
     let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
     for &id in MiMachineId::ALL.iter() {
         engine.tracks_mut()[0].load_machine(id);
-        engine.tracks_mut()[0].set_macro(SLOT_FILT_0, warps_algorithm);
-        engine.tracks_mut()[0].set_macro(SLOT_FILT_1, 0.5);
-        engine.tracks_mut()[0].set_macro(SLOT_STRIP_CUT, 0.5);
-        engine.tracks_mut()[0].set_macro(SLOT_STRIP_RESO, 0.25);
-        engine.tracks_mut()[0].set_macro(SLOT_STRIP_HOLD, 0.7);
+        engine.tracks_mut()[0].set_param(SLOT_FILT_0, shaper_algorithm);
+        engine.tracks_mut()[0].set_param(SLOT_FILT_1, 0.5);
+        engine.tracks_mut()[0].set_param(SLOT_STRIP_CUT, 0.5);
+        engine.tracks_mut()[0].set_param(SLOT_STRIP_RESO, 0.25);
+        engine.tracks_mut()[0].set_param(SLOT_STRIP_HOLD, 0.7);
         // Modulation live, so the Stages path is inside the hash.
-        engine.tracks_mut()[0].set_macro(SLOT_LFO_RATE, 0.45);
-        engine.tracks_mut()[0].set_macro(SLOT_LFO_DEPTH, 0.8);
-        engine.tracks_mut()[0].set_macro(SLOT_AD_ATTACK, 0.05);
-        engine.tracks_mut()[0].set_macro(SLOT_AD_DECAY, 0.35);
-        engine.tracks_mut()[0].set_macro(SLOT_LFO_FILTER_DEPTH, 0.30);
-        engine.tracks_mut()[0].set_macro(SLOT_LFO_WARPS_DEPTH, 0.20);
-        engine.tracks_mut()[0].set_macro(SLOT_AD_FILTER_DEPTH, 0.25);
-        engine.tracks_mut()[0].set_macro(SLOT_AD_WARPS_DEPTH, 0.20);
+        engine.tracks_mut()[0].set_param(SLOT_LFO_RATE, 0.45);
+        engine.tracks_mut()[0].set_param(SLOT_LFO_DEPTH, 0.8);
+        engine.tracks_mut()[0].set_param(SLOT_AD_ATTACK, 0.05);
+        engine.tracks_mut()[0].set_param(SLOT_AD_DECAY, 0.35);
+        engine.tracks_mut()[0].set_param(SLOT_LFO_FILTER_DEPTH, 0.30);
+        engine.tracks_mut()[0].set_param(SLOT_LFO_SHAPER_DEPTH, 0.20);
+        engine.tracks_mut()[0].set_param(SLOT_AD_FILTER_DEPTH, 0.25);
+        engine.tracks_mut()[0].set_param(SLOT_AD_SHAPER_DEPTH, 0.20);
         engine.trigger(0, 1.0);
         // Release at two-thirds so a sustained engine's release is in the
         // hash and the window still ends in silence. A one-shot model ignores
@@ -282,22 +282,22 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
     // reference for what the strip is doing. The settings themselves are
     // documented on `MI_KIT_STRIPS`.
     //
-    // `WARP.DRV = 0` is a detent onto `Modulator::set_bypass`, not a quiet
+    // `SHAPE.DRV = 0` is a detent onto `Modulator::set_bypass`, not a quiet
     // drive setting. It is not the only uncoloured setting any more —
-    // `WARP.MIX = 0` is too — but it is the one that takes the whole stage out
+    // `SHAPE.MIX = 0` is too — but it is the one that takes the whole stage out
     // rather than mixing it away, which is what makes it the right reference.
     // One bar bypassed and then the same bar as the kit is actually set makes
     // the difference audible instead of a claim in a comment, and if the two
     // bars ever sound the same the strip has stopped working.
-    mark!("kit, WARPS BYPASSED (WARP.DRV 0) — the reference");
-    apply_mi_kit_strips(&mut engine, warps_algorithm, Some(0.0));
+    mark!("kit, WARPS BYPASSED (SHAPE.DRV 0) — the reference");
+    apply_mi_kit_strips(&mut engine, shaper_algorithm, Some(0.0));
     play_mi_kit_pattern(&mut engine, &mut out, 1, 0.75);
 
-    // Half two-b: the same bars with each track's own `WARP.DRV`, which the
+    // Half two-b: the same bars with each track's own `SHAPE.DRV`, which the
     // kit sets between 0.50 and 0.80 — Warps drive 0.75 to 0.90, three to ten
     // times overdriven.
-    mark!("kit, WARPS ENGAGED (WARP.DRV 0.50-0.80) — same bars");
-    apply_mi_kit_strips(&mut engine, warps_algorithm, None);
+    mark!("kit, WARPS ENGAGED (SHAPE.DRV 0.50-0.80) — same bars");
+    apply_mi_kit_strips(&mut engine, shaper_algorithm, None);
     play_mi_kit_pattern(&mut engine, &mut out, 2, 2.0);
 
     mark!("gate — held notes and their releases");
@@ -330,7 +330,7 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
     // Half four: the strip's own oscillator on Warps' modulator input, one
     // shape per hit, on the kick.
     //
-    // This pass used to sweep `WARP.CAR`, which put the same five shapes on
+    // This pass used to sweep `SHAPE.CAR`, which put the same five shapes on
     // Warps' *carrier* input — where they replaced the voice rather than
     // modulating it, so the kick became a drone for the length of its own
     // decay and the machine was only an FM index. On the modulator side the
@@ -338,11 +338,11 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
     // thing worth auditioning. A ring-mod algorithm, because that is where a
     // modulator is most plainly audible.
     engine.tracks_mut()[0].load_machine(mi_drum_engine::MiMachineId::PeaksBassDrum);
-    engine.tracks_mut()[0].set_macro(SLOT_WARPS_MOD_SRC, 1.0); // oscillator
-    engine.tracks_mut()[0].set_macro(SLOT_FILT_0, 0.25); // analog ring mod
-    engine.tracks_mut()[0].set_macro(SLOT_STRIP_HOLD, 0.4);
+    engine.tracks_mut()[0].set_param(SLOT_SHAPER_MOD_SRC, 1.0); // oscillator
+    engine.tracks_mut()[0].set_param(SLOT_FILT_0, 0.25); // analog ring mod
+    engine.tracks_mut()[0].set_param(SLOT_STRIP_HOLD, 0.4);
     for step in 0..5 {
-        engine.tracks_mut()[0].set_macro(SLOT_WARPS_OSC_SHAPE, step as f32 / 5.0 + 0.05);
+        engine.tracks_mut()[0].set_param(SLOT_SHAPER_OSC_SHAPE, step as f32 / 5.0 + 0.05);
         engine.trigger(0, 1.0);
         for b in 0..blocks_per_hit {
             if b == blocks_per_hit * 2 / 3 {
@@ -352,7 +352,7 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
             append_block(&mut out, &l, &r);
         }
     }
-    engine.tracks_mut()[0].set_macro(SLOT_WARPS_OSC_SHAPE, 0.0);
+    engine.tracks_mut()[0].set_param(SLOT_SHAPER_OSC_SHAPE, 0.0);
 
     (out, marks)
 }
@@ -362,7 +362,7 @@ pub(crate) fn render_mi_drum_marked(warps_algorithm: f32) -> (Vec<f32>, Vec<(f32
 pub(crate) struct Pattern {
     pub(crate) tracks: [[bool; 16]; TRACKS],
     /// Per-step semitone offsets, applied via `Track::retune` before each
-    /// trigger. 0 = the track's macro pitch; anything else transposes that
+    /// trigger. 0 = the track's param pitch; anything else transposes that
     /// hit. All-zero (the default) is the pitchless kit. Row `i` only means
     /// anything when `tracks[i][s]` is `true`.
     pub(crate) notes: [[i8; 16]; TRACKS],
@@ -485,7 +485,7 @@ pub(crate) fn render_pattern(pattern: &Pattern, bpm: f32, bars: usize) -> Vec<f3
                     // Melodic lane: transpose the track to the step's note
                     // *before* the trigger so the hit lands in pitch.
                     // Absolute, and applied on every hit — `retune` is
-                    // sticky, so `0` ("the track's macro pitch") has to be
+                    // sticky, so `0` ("the track's param pitch") has to be
                     // re-applied too, or the previous hit's transposition
                     // would carry over.
                     engine.tracks[i].retune(pattern.notes[i][s] as f32);
@@ -548,7 +548,7 @@ pub(crate) fn render_stress(seconds: f32) -> Vec<f32> {
 }
 
 /// Configure per-track strip settings (pan, level, filter, drive) and a few
-/// macro tweaks so the kit sounds balanced across the stereo field rather
+/// param tweaks so the kit sounds balanced across the stereo field rather
 /// than all-centre, all-equal. Preserves the choke/layer masks already set
 /// by `DrumEngine::new` (open-hat ↔ closed-hat relation).
 pub(crate) fn setup_kit_mix(engine: &mut DrumEngine) {
@@ -584,29 +584,29 @@ pub(crate) fn setup_kit_mix(engine: &mut DrumEngine) {
         engine.tracks[track].set_strip(&strip);
     }
 
-    // Macro tweaks — a few beyond the defaults to get more musical results:
+    // Param tweaks — a few beyond the defaults to get more musical results:
 
     // Kick: Driven with decay
-    engine.tracks[0].set_macro(SLOT_MACH_5, 0.75); // DEC
-    engine.tracks[0].set_macro(SLOT_MACH_7, 0.5); // DRIVE
+    engine.tracks[0].set_param(SLOT_MACH_5, 0.75); // DEC
+    engine.tracks[0].set_param(SLOT_MACH_7, 0.5); // DRIVE
 
     // Clap: slightly more body, less pure noise (BAL default 0.80 noise-heavy)
-    engine.tracks[4].set_macro(SLOT_MACH_7, 0.65); // BAL
+    engine.tracks[4].set_param(SLOT_MACH_7, 0.65); // BAL
 
     // Tom: tune lower (~132 Hz, a mid tom) and add a bit more stick
-    engine.tracks[5].set_macro(SLOT_MACH_0, 0.50); // TUNE → ~132 Hz
-    engine.tracks[5].set_macro(SLOT_MACH_7, 0.40); // STICK
+    engine.tracks[5].set_param(SLOT_MACH_0, 0.50); // TUNE → ~132 Hz
+    engine.tracks[5].set_param(SLOT_MACH_7, 0.40); // STICK
 
     // Cowbell: classic 808 tuning — ~540 Hz base, wider detune, short decay
-    engine.tracks[6].set_macro(SLOT_MACH_0, 0.34); // TUNE → ~538 Hz
-    engine.tracks[6].set_macro(SLOT_MACH_1, 0.86); // DET → ~1.43 ratio (the classic 540/800 pair)
-    engine.tracks[6].set_macro(SLOT_MACH_5, 0.15); // DEC → ~85ms
+    engine.tracks[6].set_param(SLOT_MACH_0, 0.34); // TUNE → ~538 Hz
+    engine.tracks[6].set_param(SLOT_MACH_1, 0.86); // DET → ~1.43 ratio (the classic 540/800 pair)
+    engine.tracks[6].set_param(SLOT_MACH_5, 0.15); // DEC → ~85ms
 
     // SY Tone: pitch it as a bassline — low note, moderate FM
-    engine.tracks[7].set_macro(SLOT_MACH_0, 0.20); // TUNE → ~132 Hz (bass range)
-    engine.tracks[7].set_macro(SLOT_MACH_3, 0.50); // MOD.AMT
-    engine.tracks[7].set_macro(SLOT_MACH_2, 0.30); // FDBK
-    engine.tracks[7].set_macro(SLOT_MACH_5, 0.40); // DEC → ~830ms (rings a bit)
+    engine.tracks[7].set_param(SLOT_MACH_0, 0.20); // TUNE → ~132 Hz (bass range)
+    engine.tracks[7].set_param(SLOT_MACH_3, 0.50); // MOD.AMT
+    engine.tracks[7].set_param(SLOT_MACH_2, 0.30); // FDBK
+    engine.tracks[7].set_param(SLOT_MACH_5, 0.40); // DEC → ~830ms (rings a bit)
 
     // --- LFO modulation demo ---
     // Snare (track 1): slow sine LFO on a LP filter, adds movement.
@@ -958,7 +958,7 @@ pub(crate) fn render_warps_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
             // Tracks 0-3 are the Peaks drums in the default kit, 4-5 the Plaits
             // voices. 0.0 is a true bypass, not a zero drive.
             for t in 0..4usize {
-                engine.tracks_mut()[t].set_macro(WARP_DRV_SLOT, 0.0);
+                engine.tracks_mut()[t].set_param(WARP_DRV_SLOT, 0.0);
             }
         }
 
@@ -990,7 +990,7 @@ pub(crate) fn print_gate_timeline(path: &str, samples: usize, timeline: &GateTim
     }
 }
 
-/// Render the Warps drive sweep: the kick at each point on the `WARP.DRV` axis,
+/// Render the Warps drive sweep: the kick at each point on the `SHAPE.DRV` axis,
 /// from the clean bypass to full destruction.
 ///
 /// Every setting gets the same eight hits at a steady tempo, so the only thing
@@ -1001,10 +1001,10 @@ pub(crate) fn print_gate_timeline(path: &str, samples: usize, timeline: &GateTim
 /// This function and its `warps` filename predate the substitution. Warps'
 /// `drive` was `0.5·drive` blended towards `24·drive⁵`, so its travel used to be
 /// described in pre-gain (0.4 / 1.0 / 3.4 / 9.7 / 24) and those numbers were
-/// printed here. `core::dsp::shaper` maps the macro onto the input gain of its
-/// cubic clipper instead — `1 + 7·macro`, so `1.0` to `8.0` — and the labels
+/// printed here. `core::dsp::shaper` maps the param onto the input gain of its
+/// cubic clipper instead — `1 + 7·param`, so `1.0` to `8.0` — and the labels
 /// quote gain, because gain is what the code actually computes. The
-/// `WARP.DRV 0.00` row is unchanged and still the one that matters: it is the
+/// `SHAPE.DRV 0.00` row is unchanged and still the one that matters: it is the
 /// only bit-transparent point on the axis.
 ///
 /// The *character* claims are still right, and are unchanged, because a cubic
@@ -1036,7 +1036,7 @@ pub(crate) fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
     let gap_s = 0.45f32;
     let per_setting = hits as f32 * step_s + gap_s;
 
-    // (drive macro, what it should sound like)
+    // (drive param, what it should sound like)
     let entries: &[(f32, &str)] = &[
         (0.0, "BYPASS - bit transparent, kick uncoloured"),
         (0.1, "light - gain 1.7 into the cubic clipper"),
@@ -1054,7 +1054,7 @@ pub(crate) fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
     // the drive, not the limiter.
     engine.set_master_gain(0.3);
 
-    // FILT 5 is `WARP.DRV` on mi-drum. Re-exported from `drum_engine` only so
+    // FILT 5 is `SHAPE.DRV` on mi-drum. Re-exported from `drum_engine` only so
     // this reads next to `SLOT_LEVEL`, which is genuinely per-device.
     {
         let track = &mut engine.tracks_mut()[0];
@@ -1062,7 +1062,7 @@ pub(crate) fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
         // The Peaks kick peaks at full scale by design (see
         // docs/peaks-vendoring.md), which would slam Warps' input and hide the
         // transfer curve. Back it off so Warps has somewhere to go.
-        track.set_macro(SLOT_LEVEL, 0.5);
+        track.set_param(SLOT_LEVEL, 0.5);
     }
 
     let mut out: Vec<f32> =
@@ -1073,8 +1073,8 @@ pub(crate) fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
     let blocks = |s: f32| (s * SR / BLOCK as f32) as usize;
 
     for (i, (drive, why)) in entries.iter().enumerate() {
-        engine.tracks_mut()[0].set_macro(WARP_DRV_SLOT, *drive);
-        timeline.push((i as f32 * per_setting, format!("WARP.DRV {drive:.2}"), why));
+        engine.tracks_mut()[0].set_param(WARP_DRV_SLOT, *drive);
+        timeline.push((i as f32 * per_setting, format!("SHAPE.DRV {drive:.2}"), why));
 
         for hit in 0..hits {
             engine.trigger(0, 1.0);
@@ -1097,7 +1097,7 @@ pub(crate) fn render_warps_drive_demo() -> (Vec<f32>, GateTimeline) {
 
 /// The shipped kit, twice: with the shaping stage, and with it bypassed.
 ///
-/// Same seed, same pattern, same macros, same two bars, so the only variable
+/// Same seed, same pattern, same params, same two bars, so the only variable
 /// is the stage. This used to carry a third pass for `warps::Modulator`; that
 /// comparison is in `docs/warps-vendoring.md` and the module is gone.
 pub(crate) fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
@@ -1111,19 +1111,19 @@ pub(crate) fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
     // bypass, which is the one that says whether it is doing anything.
     //
     // How much to expect from it, because the honest answer is "less than you
-    // might hope". `WARP.MIX` is 0.35 on the shipped kit, so a full-scale
+    // might hope". `SHAPE.MIX` is 0.35 on the shipped kit, so a full-scale
     // sample at the strip input moves at most 35% of the way to whatever the
     // stage produced, and the difference between these two passes measures
     // 9.4 dB below pass A — a colouration, not a transformation. Warps at the
-    // same macros measured 12.1 dB down, so the replacement is if anything the
+    // same params measured 12.1 dB down, so the replacement is if anything the
     // more present of the two. If you want to hear the stage rather than
-    // measure it, `Command::Shaper`'s second file puts it at `WARP.MIX = 1`,
+    // measure it, `Command::Shaper`'s second file puts it at `SHAPE.MIX = 1`,
     // full drive, on a pitched sweep.
     let passes: &[(bool, &str)] = &[
         (true, "A - ADAA shaper, kit defaults"),
         (
             false,
-            "B - no shaping at all (WARP.DRV 0, bypass), the reference",
+            "B - no shaping at all (SHAPE.DRV 0, bypass), the reference",
         ),
     ];
 
@@ -1140,10 +1140,10 @@ pub(crate) fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
         engine.set_master_gain(0.5);
         if !*shaped {
             for t in 0..mi_drum_engine::TRACKS {
-                // `SLOT_WARPS_DRIVE`, not `SLOT_STRIP_HOLD`. Same slot index,
-                // but the printed label below says `WARP.DRV` and reaching for
+                // `SLOT_SHAPER_DRIVE`, not `SLOT_STRIP_HOLD`. Same slot index,
+                // but the printed label below says `SHAPE.DRV` and reaching for
                 // the generic name next to it reads like the bypass was missed.
-                engine.tracks_mut()[t].set_macro(mi_drum_engine::SLOT_WARPS_DRIVE, 0.0);
+                engine.tracks_mut()[t].set_param(mi_drum_engine::SLOT_SHAPER_DRIVE, 0.0);
             }
         }
 
@@ -1160,7 +1160,7 @@ pub(crate) fn render_shaper_kit_comparison() -> (Vec<f32>, Vec<(f32, String)>) {
 /// Track 4 of `DEFAULT_KIT` is a Plaits `String` — sustained and pitched,
 /// which is the opposite of what drums are and exactly what aliasing shows up
 /// on. Driven hard and taken fully wet so nothing is hidden behind
-/// `WARP.MIX`, then walked up three octaves a semitone at a time.
+/// `SHAPE.MIX`, then walked up three octaves a semitone at a time.
 ///
 /// What to listen for: alias partials move *down* as the fundamental moves
 /// up, because they are reflections about Nyquist. A stage that stays
@@ -1202,14 +1202,14 @@ pub(crate) fn render_shaper_alias_test() -> (Vec<f32>, Vec<(f32, String)>) {
         {
             let track = &mut engine.tracks_mut()[MELODIC_TRACK];
             // Hard drive, fully wet: the worst case for aliasing.
-            track.set_macro(mi_drum_engine::SLOT_STRIP_HOLD, 0.9);
-            track.set_macro(mi_drum_engine::SLOT_WARPS_MIX, 1.0);
-            track.set_macro(mi_drum_engine::SLOT_FILT_0, algo);
+            track.set_param(mi_drum_engine::SLOT_STRIP_HOLD, 0.9);
+            track.set_param(mi_drum_engine::SLOT_SHAPER_MIX, 1.0);
+            track.set_param(mi_drum_engine::SLOT_FILT_0, algo);
         }
         // Everything else silent: one voice, one variable.
         for t in 0..mi_drum_engine::TRACKS {
             if t != MELODIC_TRACK {
-                engine.tracks_mut()[t].set_macro(drum_engine::machines::SLOT_LEVEL, 0.0);
+                engine.tracks_mut()[t].set_param(drum_engine::machines::SLOT_LEVEL, 0.0);
             }
         }
 

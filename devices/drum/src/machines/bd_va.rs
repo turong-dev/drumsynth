@@ -24,11 +24,11 @@
 //! Per-sample cost: one [`BridgedT::set_hz`] (one `fast::sin_turns`
 //! lookup, no divide — the Phase 11 Option B split) plus one
 //! [`BridgedT::process`] (4 mul / 3 add). The Q-dependent divide and the
-//! second lookup run at control rate in `set_macros` via
-//! [`BridgedT::set_q`], called once per macro change (or per block under
+//! second lookup run at control rate in `set_params` via
+//! [`BridgedT::set_q`], called once per param change (or per block under
 //! Q modulation).
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -47,11 +47,11 @@
 //! | 23  | 43  | SEND.RVB| 0..1         | reverb send (track-routed) |
 //!
 //! All other slots are RESV (default 0.0) and ignored — the resonator
-//! *is* the filter, so there is no FILTER-bank cutoff macro, only Q.
+//! *is* the filter, so there is no FILTER-bank cutoff param, only Q.
 
 use crate::dsp::{decay_coeff, fast, BridgedT, DecayEnv};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5,
+    NUM_PARAMS, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5,
 };
 use crate::SAMPLE_RATE;
 
@@ -65,19 +65,19 @@ pub struct BdVa {
     /// Pitch-sweep depth in Hz, added to `base_hz` at trigger moment and
     /// decaying to zero via `pitch_env`.
     sweep_hz: f32,
-    /// Resonator Q (FILTER bank). Cached so `tick` never reads the macro
+    /// Resonator Q (FILTER bank). Cached so `tick` never reads the param
     /// array, and so `retune` doesn't have to track it.
     q: f32,
     /// Per-machine output level, 0..1.
     level: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
 }
 
 impl BdVa {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             resonator: BridgedT::new(),
             amp_env: DecayEnv::new(0.0),
@@ -88,18 +88,18 @@ impl BdVa {
             level: 0.0,
             freq_scale: 1.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let base_hz = 30.0 + 90.0 * macros[SLOT_MACH_0]; // TUNE 30..120 Hz
-        let sweep_depth = 120.0 * macros[SLOT_MACH_1]; // SWEEP 0..120 Hz above base
-        let pitch_decay_s = 0.005 + 0.05 * macros[SLOT_MACH_2]; // SWP_T 5..55 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_MACH_5]; // DEC  50..1500 ms
-        let q = 0.5 + 9.5 * macros[SLOT_FILT_1]; // Q 0.5..10 (FILTER resonance slot)
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let base_hz = 30.0 + 90.0 * params[SLOT_MACH_0]; // TUNE 30..120 Hz
+        let sweep_depth = 120.0 * params[SLOT_MACH_1]; // SWEEP 0..120 Hz above base
+        let pitch_decay_s = 0.005 + 0.05 * params[SLOT_MACH_2]; // SWP_T 5..55 ms
+        let amp_decay_s = 0.05 + 1.45 * params[SLOT_MACH_5]; // DEC  50..1500 ms
+        let q = 0.5 + 9.5 * params[SLOT_FILT_1]; // Q 0.5..10 (FILTER resonance slot)
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.base_hz = base_hz * self.freq_scale;
         self.sweep_hz = sweep_depth * self.freq_scale;
@@ -119,7 +119,7 @@ impl BdVa {
         self.resonator.set_q(self.q, self.base_hz);
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales `base_hz` and `sweep_hz` together, so the resonance frequency
     /// and the pitch-sweep depth both move with the note. Absolute, not
@@ -168,9 +168,9 @@ impl BdVa {
         let sweep = self.pitch_env.tick();
         let current_hz = self.base_hz + self.sweep_hz * sweep;
         // Per-sample: just the moving-frequency coefficient. The Q-dependent
-        // family (alpha, a0_inv, b0, a2) is cached from `set_macros` and
+        // family (alpha, a0_inv, b0, a2) is cached from `set_params` and
         // stays cached through a hit unless Q is being modulated (in which
-        // case the block-rate control pass re-runs `set_macros` and
+        // case the block-rate control pass re-runs `set_params` and
         // refreshes it). One `sin_turns` lookup, no divide.
         self.resonator.set_hz(current_hz);
         self.resonator.process(amp) * self.level
@@ -185,8 +185,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::BdVa;
-        let macros = id.default_macros();
-        let mut k = BdVa::new(&macros);
+        let params = id.default_params();
+        let mut k = BdVa::new(&params);
         for _ in 0..1000 {
             assert_eq!(k.tick(), 0.0);
         }
@@ -195,9 +195,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::BdVa;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut k = BdVa::new(&macros);
+            let mut k = BdVa::new(&params);
             k.trigger(vel);
             let mut peak = 0.0f32;
             for _ in 0..4800 {
@@ -211,25 +211,25 @@ mod tests {
     }
 
     #[test]
-    fn tune_macro_changes_resonator_pitch() {
+    fn tune_param_changes_resonator_pitch() {
         // With no pitch sweep, the resonator sits at one tone for the whole
         // hit — high TUNE produces a clearly higher-frequency ring than low
-        // TUNE over the same window. This is the direct macro→target_hz
+        // TUNE over the same window. This is the direct param→target_hz
         // check; the "pitch falls over time" path is exercised only via
-        // `sweep_macro_shortens_first_window_pitch`.
+        // `sweep_param_shortens_first_window_pitch`.
         let id = MachineId::BdVa;
-        let mut low = id.default_macros();
+        let mut low = id.default_params();
         low[SLOT_MACH_0] = 0.0; // 30 Hz base
         low[SLOT_MACH_1] = 0.0; // no pitch sweep — pure base-hz ring
         low[SLOT_FILT_1] = 0.7; // higher Q for cleaner ring
 
-        let mut high = id.default_macros();
+        let mut high = id.default_params();
         high[SLOT_MACH_0] = 1.0; // 120 Hz base
         high[SLOT_MACH_1] = 0.0;
         high[SLOT_FILT_1] = 0.7;
 
-        let crossings_in_50ms = |macros: &[f32; NUM_MACROS]| {
-            let mut k = BdVa::new(macros);
+        let crossings_in_50ms = |params: &[f32; NUM_PARAMS]| {
+            let mut k = BdVa::new(params);
             k.trigger(1.0);
             let n = (0.05 * SAMPLE_RATE) as usize;
             let mut prev = k.tick();
@@ -249,15 +249,15 @@ mod tests {
         // 30 Hz × 50 ms ≈ 1.5 cyc → 3 crossings; 120 Hz × 50 ms ≈ 6 cyc → 12.
         assert!(
             hi > lo * 2,
-            "TUNE macro should set resonator pitch: low={lo}, high={hi}"
+            "TUNE param should set resonator pitch: low={lo}, high={hi}"
         );
     }
 
     #[test]
     fn decays_to_silence() {
         let id = MachineId::BdVa;
-        let macros = id.default_macros();
-        let mut k = BdVa::new(&macros);
+        let params = id.default_params();
+        let mut k = BdVa::new(&params);
         k.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             k.tick();
@@ -268,13 +268,13 @@ mod tests {
     #[test]
     fn retune_transposes_and_survives_recompute() {
         let id = MachineId::BdVa;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let window = (0.02 * SAMPLE_RATE) as usize;
         let crossings = |semis: f32, recompute: bool| {
-            let mut k = BdVa::new(&macros);
+            let mut k = BdVa::new(&params);
             k.retune(semis);
             if recompute {
-                k.set_macros(&macros);
+                k.set_params(&params);
             }
             k.trigger(1.0);
             let mut prev = k.tick();
@@ -294,24 +294,24 @@ mod tests {
         assert!(up > base, "octave-up should cross more: {base} vs {up}");
         assert!(
             i32::abs(up_recomputed - up) <= 1,
-            "set_macros dropped the retune: {up} vs {up_recomputed}"
+            "set_params dropped the retune: {up} vs {up_recomputed}"
         );
     }
 
     #[test]
-    fn extreme_macros_do_not_produce_nans() {
+    fn extreme_params_do_not_produce_nans() {
         let id = MachineId::BdVa;
-        let base = id.default_macros();
+        let base = id.default_params();
         for &v in &[0.0f32, 1.0f32] {
-            let mut macros = base;
-            for m in macros.iter_mut() {
+            let mut params = base;
+            for m in params.iter_mut() {
                 *m = v;
             }
-            let mut k = BdVa::new(&macros);
+            let mut k = BdVa::new(&params);
             k.trigger(1.0);
             for _ in 0..(2.0 * SAMPLE_RATE) as usize {
                 let s = k.tick();
-                assert!(s.is_finite(), "non-finite output at macro={v}: {s}");
+                assert!(s.is_finite(), "non-finite output at param={v}: {s}");
             }
         }
     }

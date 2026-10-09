@@ -2,15 +2,15 @@
 //!
 //! A [`Slot`] is the per-track synthesis model: the thing that makes sound
 //! when triggered. [`Track`](crate::track::Track) is generic over it so the
-//! same strip, mixing, modulation and CC-macro framework can host drum
+//! same strip, mixing, modulation and CC-param framework can host drum
 //! machines, FM voices, or any other no-alloc voice on different devices.
 
-use crate::macros::MacroInfo;
+use crate::params::ParamInfo;
 use core::fmt::Debug;
 
 /// Identifier for a slot that can be selected per track.
 ///
-/// `N` is the device's macro count so the identifier can vend a default macro
+/// `N` is the device's param count so the identifier can vend a default param
 /// array of the right size.
 pub trait SlotId<const N: usize>: Copy + Eq + Debug {
     /// Stable catalogue index, `0..count()`.
@@ -22,19 +22,19 @@ pub trait SlotId<const N: usize>: Copy + Eq + Debug {
     /// Number of identifiers in the device's catalogue.
     fn count() -> usize;
 
-    /// Factory macro values for this identifier.
-    fn default_macros(self) -> [f32; N];
+    /// Factory param values for this identifier.
+    fn default_params(self) -> [f32; N];
 }
 
 /// Display and control metadata for a slot identifier.
 ///
-/// This is the narrow surface the grid UI needs from a device: macro names,
+/// This is the narrow surface the grid UI needs from a device: param names,
 /// abbreviations, defaults, and a human-readable label per machine. It extends
 /// [`SlotId`] so a device can vend both identity and metadata from the same
 /// type.
 pub trait DeviceModel<const N: usize>: SlotId<N> {
-    /// Per-macro metadata for the machine identified by `self`.
-    fn macro_info(self) -> [MacroInfo; N];
+    /// Per-param metadata for the machine identified by `self`.
+    fn param_info(self) -> [ParamInfo; N];
 
     /// Human-readable label for the machine identified by `self`.
     fn label(self) -> &'static str;
@@ -42,15 +42,15 @@ pub trait DeviceModel<const N: usize>: SlotId<N> {
 
 /// A single voice slot that [`Track`](crate::track::Track) can host.
 ///
-/// `N` is the number of normalised macros the slot understands. This is a
+/// `N` is the number of normalised params the slot understands. This is a
 /// const generic rather than an associated const because array sizes must be
 /// known at compile time.
 pub trait Slot<const N: usize>: Sized {
     /// Device-specific identifier for this slot.
     type Id: SlotId<N>;
 
-    /// Build a slot from its identifier and initial macros.
-    fn new(id: Self::Id, macros: &[f32; N]) -> Self;
+    /// Build a slot from its identifier and initial params.
+    fn new(id: Self::Id, params: &[f32; N]) -> Self;
 
     /// Build a slot directly in the memory pointed to by `ptr`.
     ///
@@ -63,8 +63,8 @@ pub trait Slot<const N: usize>: Sized {
     ///
     /// `ptr` must be valid for writes and properly aligned for `Self`.
     #[allow(unsafe_code)]
-    unsafe fn new_in_place(id: Self::Id, macros: &[f32; N], ptr: *mut Self) {
-        ptr.write(Self::new(id, macros));
+    unsafe fn new_in_place(id: Self::Id, params: &[f32; N], ptr: *mut Self) {
+        ptr.write(Self::new(id, params));
     }
 
     /// Rebuild this slot in place for a different machine.
@@ -80,15 +80,15 @@ pub trait Slot<const N: usize>: Sized {
     /// `ptr` must point to an already-constructed slot of this type, as
     /// returned by a previous `new_in_place` or `load_in_place`.
     #[allow(unsafe_code)]
-    unsafe fn load_in_place(id: Self::Id, macros: &[f32; N], ptr: *mut Self) {
-        Self::new_in_place(id, macros, ptr);
+    unsafe fn load_in_place(id: Self::Id, params: &[f32; N], ptr: *mut Self) {
+        Self::new_in_place(id, params, ptr);
     }
 
     /// Which identifier this slot was built from.
     fn id(&self) -> Self::Id;
 
-    /// Recompute coefficients from macros. Setup/control rate.
-    fn set_macros(&mut self, macros: &[f32; N]);
+    /// Recompute coefficients from params. Setup/control rate.
+    fn set_params(&mut self, params: &[f32; N]);
 
     /// Begin a hit at `velocity` (0..=1.0).
     fn trigger(&mut self, velocity: f32);
@@ -108,7 +108,7 @@ pub trait Slot<const N: usize>: Sized {
     /// check whether they are sounding.
     fn release(&mut self) {}
 
-    /// Transpose the voice by `semis` semitones relative to its macro pitch.
+    /// Transpose the voice by `semis` semitones relative to its param pitch.
     ///
     /// Devices without a pitch concept may no-op. Absolute, not incremental.
     fn retune(&mut self, semis: f32);

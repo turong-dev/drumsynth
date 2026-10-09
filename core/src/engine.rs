@@ -18,7 +18,7 @@ use crate::{EngineEvent, TimedQueue, BLOCK};
 /// Trait surface shared by every device engine.
 ///
 /// Consumers (firmware runner, render harness, MIDI router) bind to this
-/// rather than to a concrete engine type. `N` is the device's macro count.
+/// rather than to a concrete engine type. `N` is the device's param count.
 pub trait DeviceEngine<const N: usize> {
     /// Slot type hosted on each track.
     type Slot: Slot<N>;
@@ -98,7 +98,7 @@ pub trait DeviceEngine<const N: usize> {
     fn load_kit(&mut self, kit: &[<Self::Slot as Slot<N>>::Id]);
 }
 
-/// The device engine: generic over the slot type, macro count, and track count.
+/// The device engine: generic over the slot type, param count, and track count.
 ///
 /// Construct once, hold for the lifetime of the program. Everything it needs
 /// lives inside it.
@@ -166,7 +166,7 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
         &mut *dst
     }
 
-    /// Replace the entire kit one track at a time. Keeps strip + macro
+    /// Replace the entire kit one track at a time. Keeps strip + param
     /// configurations on untouched tracks intact.
     pub fn load_kit(&mut self, kit: &[S::Id; T]) {
         for (i, id) in kit.iter().enumerate() {
@@ -212,7 +212,7 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
     ///
     /// The MIDI channel selects the track (`channel` < `T`); the note
     /// number sets its pitch — [`CHROMATIC_REFERENCE_NOTE`] (middle C)
-    /// is the machine's macro-configured pitch, and each semitone away
+    /// is the machine's param-configured pitch, and each semitone away
     /// transposes the whole voice via [`Track::retune`] before the hit.
     ///
     /// Returns `Some(track)` when the note landed, `None` when the channel
@@ -623,7 +623,7 @@ pub fn configure_default_notes(map: &mut [Option<u8>; 128]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::macros::NUM_MACROS;
+    use crate::params::NUM_PARAMS;
     use crate::slot::{Slot, SlotId};
 
     /// A dummy slot for testing the generic engine without pulling in the drum
@@ -631,7 +631,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct DummyId(usize);
 
-    impl SlotId<NUM_MACROS> for DummyId {
+    impl SlotId<NUM_PARAMS> for DummyId {
         fn index(self) -> usize {
             self.0
         }
@@ -645,8 +645,8 @@ mod tests {
         fn count() -> usize {
             2
         }
-        fn default_macros(self) -> [f32; NUM_MACROS] {
-            [0.0; NUM_MACROS]
+        fn default_params(self) -> [f32; NUM_PARAMS] {
+            [0.0; NUM_PARAMS]
         }
     }
 
@@ -654,15 +654,15 @@ mod tests {
         active: bool,
     }
 
-    impl Slot<NUM_MACROS> for DummySlot {
+    impl Slot<NUM_PARAMS> for DummySlot {
         type Id = DummyId;
-        fn new(_id: Self::Id, _macros: &[f32; NUM_MACROS]) -> Self {
+        fn new(_id: Self::Id, _params: &[f32; NUM_PARAMS]) -> Self {
             Self { active: false }
         }
         fn id(&self) -> Self::Id {
             DummyId(0)
         }
-        fn set_macros(&mut self, _macros: &[f32; NUM_MACROS]) {}
+        fn set_params(&mut self, _params: &[f32; NUM_PARAMS]) {}
         fn trigger(&mut self, _velocity: f32) {
             self.active = true;
         }
@@ -688,7 +688,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct GateId(usize);
 
-    impl SlotId<NUM_MACROS> for GateId {
+    impl SlotId<NUM_PARAMS> for GateId {
         fn index(self) -> usize {
             self.0
         }
@@ -702,8 +702,8 @@ mod tests {
         fn count() -> usize {
             2
         }
-        fn default_macros(self) -> [f32; NUM_MACROS] {
-            [0.0; NUM_MACROS]
+        fn default_params(self) -> [f32; NUM_PARAMS] {
+            [0.0; NUM_PARAMS]
         }
     }
 
@@ -712,9 +712,9 @@ mod tests {
         released: u32,
     }
 
-    impl Slot<NUM_MACROS> for GatedSlot {
+    impl Slot<NUM_PARAMS> for GatedSlot {
         type Id = GateId;
-        fn new(_id: Self::Id, _macros: &[f32; NUM_MACROS]) -> Self {
+        fn new(_id: Self::Id, _params: &[f32; NUM_PARAMS]) -> Self {
             Self {
                 gate: false,
                 released: 0,
@@ -723,7 +723,7 @@ mod tests {
         fn id(&self) -> Self::Id {
             GateId(0)
         }
-        fn set_macros(&mut self, _macros: &[f32; NUM_MACROS]) {}
+        fn set_params(&mut self, _params: &[f32; NUM_PARAMS]) {}
         fn trigger(&mut self, _velocity: f32) {
             self.gate = true;
         }
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn generic_engine_processes_without_nan() {
         let mut engine =
-            Engine::<DummySlot, NUM_MACROS, 2>::new_with_kit(&[DummyId(0), DummyId(1)]);
+            Engine::<DummySlot, NUM_PARAMS, 2>::new_with_kit(&[DummyId(0), DummyId(1)]);
         engine.trigger(0, 1.0);
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn one_shot_slot_ignores_release() {
         let mut engine =
-            Engine::<DummySlot, NUM_MACROS, 2>::new_with_kit(&[DummyId(0), DummyId(1)]);
+            Engine::<DummySlot, NUM_PARAMS, 2>::new_with_kit(&[DummyId(0), DummyId(1)]);
         engine.trigger(0, 1.0);
         assert!(engine.tracks[0].is_active());
         engine.release(0);
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn release_closes_a_gated_voice() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         engine.trigger(0, 1.0);
         engine.trigger(1, 1.0);
         assert!(engine.is_active());
@@ -797,7 +797,7 @@ mod tests {
 
     #[test]
     fn release_out_of_range_is_a_noop() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         engine.trigger(0, 1.0);
         // Would panic on an unchecked index.
         engine.release(7);
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn release_channel_maps_channel_to_track() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         assert_eq!(engine.release_channel(1, 60), Some(1));
         assert_eq!(
             engine.release_channel(9, 60),
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn release_channel_routes_the_midi_stream() {
         // The end-to-end shape: bytes in, gate closes on the right track.
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         let mut parser = crate::midi::MidiParser::new();
         for b in [0x91, 60, 127] {
             if let Some(ev) = parser.push(b) {
@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn release_through_the_note_map() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         engine.set_note(36, Some(1));
         engine.trigger(1, 1.0);
         assert_eq!(engine.release_note(36), Some(1));
@@ -850,7 +850,7 @@ mod tests {
     /// gate at all.
     #[test]
     fn a_gated_voice_sustains_until_released() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
         engine.trigger(0, 1.0);
@@ -881,7 +881,7 @@ mod tests {
     /// crate pins the note-on half; this is the other half.
     #[test]
     fn timed_note_off_fires_at_its_offset() {
-        let mut e = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut e = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         e.trigger(0, 1.0);
         e.schedule_timed(
             10,
@@ -911,7 +911,7 @@ mod tests {
     /// note-off and re-audibilise the level it was releasing from.
     #[test]
     fn release_does_not_arm_the_declick_crossfade() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
         engine.trigger(0, 1.0);
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn panic_still_cuts_a_gated_voice() {
-        let mut engine = Engine::<GatedSlot, NUM_MACROS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
+        let mut engine = Engine::<GatedSlot, NUM_PARAMS, 2>::new_with_kit(&[GateId(0), GateId(1)]);
         engine.trigger(0, 1.0);
         engine.panic();
         assert!(!engine.is_active(), "panic must still be instant silence");

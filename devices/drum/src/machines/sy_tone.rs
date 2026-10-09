@@ -3,11 +3,11 @@
 //! The simplest tonal machine — a carrier/modulator FM pair with feedback
 //! on the modulator, through the track strip's filter and amp envelope.
 //! Unlike the drum machines, SY Tone is *tonal*: it tracks pitch via the
-//! TUNE macro (which here maps to a full note range, not just a drum-pitch
+//! TUNE param (which here maps to a full note range, not just a drum-pitch
 //! rasp), and the strip's amp envelope defaults to ADSR (Phase 2 will
 //! add proper note-off support; for now it's AHD like the drums).
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -29,7 +29,7 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4,
     SLOT_MACH_5,
 };
 use crate::SAMPLE_RATE;
@@ -46,14 +46,14 @@ pub struct SyTone {
     /// Last modulator output, used for feedback.
     mod_last: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl SyTone {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             carrier: SineOsc::new(),
             modulator: SineOsc::new(),
@@ -66,21 +66,21 @@ impl SyTone {
             freq_scale: 1.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
         // Exponential pitch mapping: 55 Hz (A1) to 1760 Hz (A6).
-        // macro 0 = 0 → 55 Hz, 1 → 1760 Hz. Use exp2 over 5 octaves.
-        let carrier_hz = 55.0 * crate::dsp::fast::exp2_approx(macros[SLOT_MACH_0] * 5.0);
-        let mod_ratio = 1.0 + 3.0 * macros[SLOT_MACH_1]; // RATIO 1..4
-        let feedback = macros[SLOT_MACH_2]; // FDBK 0..1
-        let mod_decay_s = 0.005 + 0.195 * macros[SLOT_MACH_4]; // MENV 5..200 ms
-        let mod_amount = macros[SLOT_MACH_3] * 3.0; // MOD.AMT 0..3
-        let amp_decay_s = 0.05 + 1.95 * macros[SLOT_MACH_5]; // DEC 50..2000 ms
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+        // param 0 = 0 → 55 Hz, 1 → 1760 Hz. Use exp2 over 5 octaves.
+        let carrier_hz = 55.0 * crate::dsp::fast::exp2_approx(params[SLOT_MACH_0] * 5.0);
+        let mod_ratio = 1.0 + 3.0 * params[SLOT_MACH_1]; // RATIO 1..4
+        let feedback = params[SLOT_MACH_2]; // FDBK 0..1
+        let mod_decay_s = 0.005 + 0.195 * params[SLOT_MACH_4]; // MENV 5..200 ms
+        let mod_amount = params[SLOT_MACH_3] * 3.0; // MOD.AMT 0..3
+        let amp_decay_s = 0.05 + 1.95 * params[SLOT_MACH_5]; // DEC 50..2000 ms
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.carrier.set_freq(carrier_hz * self.freq_scale);
         self.mod_hz = carrier_hz * mod_ratio * self.freq_scale;
@@ -94,7 +94,7 @@ impl SyTone {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales carrier and modulator together so the FM ratio — and with it
     /// the timbre — survives the transpose. This is the machine that makes
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::SyTone;
-        let macros = id.default_macros();
-        let mut s = SyTone::new(&macros);
+        let params = id.default_params();
+        let mut s = SyTone::new(&params);
         for _ in 0..1000 {
             assert_eq!(s.tick(), 0.0);
         }
@@ -177,8 +177,8 @@ mod tests {
     #[test]
     fn produces_sound() {
         let id = MachineId::SyTone;
-        let macros = id.default_macros();
-        let mut s = SyTone::new(&macros);
+        let params = id.default_params();
+        let mut s = SyTone::new(&params);
         s.trigger(1.0);
         let mut peak = 0.0f32;
         for _ in 0..4800 {
@@ -190,9 +190,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::SyTone;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut s = SyTone::new(&macros);
+            let mut s = SyTone::new(&params);
             s.trigger(vel);
             let mut peak = 0.0f32;
             for _ in 0..2400 {
@@ -206,8 +206,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::SyTone;
-        let macros = id.default_macros();
-        let mut s = SyTone::new(&macros);
+        let params = id.default_params();
+        let mut s = SyTone::new(&params);
         s.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();
@@ -216,18 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn pitch_tracks_macro() {
+    fn pitch_tracks_param() {
         let id = MachineId::SyTone;
-        let mut high = id.default_macros();
+        let mut high = id.default_params();
         high[0] = 1.0; // → ~1760 Hz
-        let mut low = id.default_macros();
+        let mut low = id.default_params();
         low[0] = 0.0; // → 55 Hz
 
         // Sample the first 256 output values at each pitch. If pitch tracking
         // works, the two sequences will differ (different carrier frequency →
         // different waveform shape even through FM sidebands).
-        let render = |macros: &[f32; NUM_MACROS]| -> [f32; 256] {
-            let mut s = SyTone::new(macros);
+        let render = |params: &[f32; NUM_PARAMS]| -> [f32; 256] {
+            let mut s = SyTone::new(params);
             s.trigger(1.0);
             let mut buf = [0.0f32; 256];
             for i in 0..256 {
@@ -259,10 +259,10 @@ mod tests {
     #[test]
     fn no_nans_from_feedback() {
         let id = MachineId::SyTone;
-        let mut macros = id.default_macros();
-        macros[SLOT_MACH_2] = 1.0; // max feedback
-        macros[SLOT_MACH_3] = 1.0; // max FM amount
-        let mut s = SyTone::new(&macros);
+        let mut params = id.default_params();
+        params[SLOT_MACH_2] = 1.0; // max feedback
+        params[SLOT_MACH_3] = 1.0; // max FM amount
+        let mut s = SyTone::new(&params);
         s.trigger(1.0);
         for _ in 0..(2.0 * SAMPLE_RATE) as usize {
             let v = s.tick();
@@ -273,10 +273,10 @@ mod tests {
     #[test]
     fn retune_transposes_an_octave() {
         let id = MachineId::SyTone;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let window = (0.03 * SAMPLE_RATE) as usize;
         let crossings = |semis: f32| {
-            let mut s = SyTone::new(&macros);
+            let mut s = SyTone::new(&params);
             s.retune(semis);
             s.trigger(1.0);
             let mut prev = s.tick();

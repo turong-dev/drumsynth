@@ -8,8 +8,8 @@
 //! run and failed in the next before being moved here.
 
 use mi_drum_engine::{
-    DeviceEngine, MiDrumEngine, MiMachineId, BLOCK, SAMPLE_RATE, SLOT_FILT_0, SLOT_WARPS_MIX,
-    SLOT_WARPS_MOD_SRC,
+    DeviceEngine, MiDrumEngine, MiMachineId, BLOCK, SAMPLE_RATE, SLOT_FILT_0, SLOT_SHAPER_MIX,
+    SLOT_SHAPER_MOD_SRC,
 };
 
 /// Heap-allocate the engine; the struct is far too large for a test stack.
@@ -35,10 +35,10 @@ fn engine_box() -> Box<MiDrumEngine> {
 fn render(id: MiMachineId, mod_src: Option<f32>) -> Vec<f32> {
     let mut e = engine_box();
     e.tracks_mut()[0].load_machine(id);
-    e.tracks_mut()[0].set_macro(SLOT_WARPS_MIX, 1.0);
-    e.tracks_mut()[0].set_macro(SLOT_FILT_0, 0.25); // analog ring mod
+    e.tracks_mut()[0].set_param(SLOT_SHAPER_MIX, 1.0);
+    e.tracks_mut()[0].set_param(SLOT_FILT_0, 0.25); // analog ring mod
     if let Some(v) = mod_src {
-        e.tracks_mut()[0].set_macro(SLOT_WARPS_MOD_SRC, v);
+        e.tracks_mut()[0].set_param(SLOT_SHAPER_MOD_SRC, v);
     }
     e.trigger_channel(0, 60, 1.0);
     let mut l = [0.0f32; BLOCK];
@@ -53,7 +53,7 @@ fn render(id: MiMachineId, mod_src: Option<f32>) -> Vec<f32> {
 
 /// Warps cross-modulates input 1 against input 2, so handing it the same
 /// signal twice is the degenerate case: a comparator with nothing to compare,
-/// and `ALGORITHM_XFADE` reduced to a gain. `WARP.IN` exists so no track has
+/// and `ALGORITHM_XFADE` reduced to a gain. `SHAPE.IN` exists so no track has
 /// to sit there — but only if its *default* points at something real.
 ///
 /// That is not automatic, because the honest default differs by machine. A
@@ -63,7 +63,7 @@ fn render(id: MiMachineId, mod_src: Option<f32>) -> Vec<f32> {
 /// leaves seven of the 28 machines — including four of the six tracks in
 /// `DEFAULT_KIT` — exactly where they started.
 ///
-/// Asserted by forcing `WARP.IN` to self and requiring each machine's default
+/// Asserted by forcing `SHAPE.IN` to self and requiring each machine's default
 /// to sound different from that.
 #[test]
 fn every_machine_has_a_real_modulator_by_default() {
@@ -78,7 +78,7 @@ fn every_machine_has_a_real_modulator_by_default() {
         assert!(
             delta > 1.0e-4,
             "{id:?} defaults to cross-modulating against itself (max delta \
-             {delta}) — its WARP.IN default has no second signal to reach for"
+             {delta}) — its SHAPE.IN default has no second signal to reach for"
         );
     }
 }

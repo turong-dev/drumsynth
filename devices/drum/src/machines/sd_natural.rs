@@ -4,10 +4,10 @@
 //! to avoid sounding like a tom. The wires are highpassed noise with their own
 //! — usually longer — decay.
 //!
-//! The `NMIX` macro is the single most useful control here: sweep it and you
+//! The `NMIX` param is the single most useful control here: sweep it and you
 //! travel from tom, through snare, to something closer to a clap.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -30,7 +30,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
+    NUM_PARAMS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
     SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -46,14 +46,14 @@ pub struct SdNatural {
     body_gain: f32,
     noise_gain: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl SdNatural {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut s = Self {
             body_a: SineOsc::new(),
             body_b: SineOsc::new(),
@@ -66,19 +66,19 @@ impl SdNatural {
             freq_scale: 1.0,
             level: 0.0,
         };
-        s.set_macros(macros);
+        s.set_params(params);
         s
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 100.0 + 300.0 * macros[SLOT_MACH_0]; // TUNE 100..400 Hz
-        let body_ratio = 1.0 + macros[SLOT_MACH_1]; // RATIO 1.0..2.0
-        let body_decay_s = 0.04 + 0.6 * macros[SLOT_MACH_5]; // BDEC 40..640 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_MACH_6]; // NDEC 30..830 ms
-        let noise_hp_hz = 400.0 + 3600.0 * macros[SLOT_FILT_0]; // HPF 400..4000 Hz
-        let noise_mix = macros[SLOT_MACH_7]; // NMIX 0..1
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let body_hz = 100.0 + 300.0 * params[SLOT_MACH_0]; // TUNE 100..400 Hz
+        let body_ratio = 1.0 + params[SLOT_MACH_1]; // RATIO 1.0..2.0
+        let body_decay_s = 0.04 + 0.6 * params[SLOT_MACH_5]; // BDEC 40..640 ms
+        let noise_decay_s = 0.03 + 0.8 * params[SLOT_MACH_6]; // NDEC 30..830 ms
+        let noise_hp_hz = 400.0 + 3600.0 * params[SLOT_FILT_0]; // HPF 400..4000 Hz
+        let noise_mix = params[SLOT_MACH_7]; // NMIX 0..1
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_a.set_freq(body_hz * self.freq_scale);
         self.body_b.set_freq(body_hz * body_ratio * self.freq_scale);
@@ -95,7 +95,7 @@ impl SdNatural {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both shell tones, preserving the fixed ratio between them.
     /// The noise rattle is pitchless and untouched. Absolute, not
@@ -162,33 +162,33 @@ mod tests {
 
     #[test]
     fn silent_until_struck() {
-        let macros = MachineId::SdNatural.default_macros();
-        let mut s = SdNatural::new(&macros);
+        let params = MachineId::SdNatural.default_params();
+        let mut s = SdNatural::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn full_noise_mix_still_makes_sound() {
-        let mut macros = MachineId::SdNatural.default_macros();
-        macros[SLOT_MACH_7] = 1.0; // NMIX
-        let mut s = SdNatural::new(&macros);
+        let mut params = MachineId::SdNatural.default_params();
+        params[SLOT_MACH_7] = 1.0; // NMIX
+        let mut s = SdNatural::new(&params);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
     }
 
     #[test]
     fn zero_noise_mix_still_makes_sound() {
-        let mut macros = MachineId::SdNatural.default_macros();
-        macros[SLOT_MACH_7] = 0.0; // NMIX
-        let mut s = SdNatural::new(&macros);
+        let mut params = MachineId::SdNatural.default_params();
+        params[SLOT_MACH_7] = 0.0; // NMIX
+        let mut s = SdNatural::new(&params);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 4800) > 0.05);
     }
 
     #[test]
     fn decays_to_silence() {
-        let macros = MachineId::SdNatural.default_macros();
-        let mut s = SdNatural::new(&macros);
+        let params = MachineId::SdNatural.default_params();
+        let mut s = SdNatural::new(&params);
         s.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();

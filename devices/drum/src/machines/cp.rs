@@ -14,7 +14,7 @@
 //! which the envelope falls through to an exponential decay tail. One PRNG,
 //! one filter, one table walk. The classic clap shape for the cost of a hat.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -36,7 +36,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, OnePoleLp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_0, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5,
+    NUM_PARAMS, SLOT_FILT_0, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5,
     SLOT_MACH_6, SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -62,7 +62,7 @@ pub struct Cp {
     body_hz: f32,
     body_ratio: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     body_gain: f32,
     noise_gain: f32,
@@ -70,8 +70,8 @@ pub struct Cp {
 }
 
 impl Cp {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut s = Self {
             noise: Noise::new(0x4D3A_91C7),
             noise_env: BurstEnv::new(),
@@ -86,20 +86,20 @@ impl Cp {
             noise_gain: 0.0,
             level: 0.0,
         };
-        s.set_macros(macros);
+        s.set_params(params);
         s
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let body_hz = 150.0 + 250.0 * macros[SLOT_MACH_0]; // TUNE 150..400 Hz
-        let body_ratio = 1.0 + 0.5 * macros[SLOT_MACH_1]; // RATIO 1.0..1.5
-        let body_decay_s = 0.05 + 0.2 * macros[SLOT_MACH_5]; // BDEC 50..250 ms
-        let noise_decay_s = 0.1 + 0.5 * macros[SLOT_MACH_6]; // NDEC 100..600 ms
-        let hp_hz = 800.0 + 3200.0 * macros[SLOT_FILT_0]; // HPF 800..4000 Hz
-        let lp_hz = 4000.0 + 8000.0 * macros[SLOT_FILT_1]; // LPF 4..12 kHz
-        let bal = macros[SLOT_MACH_7].clamp(0.0, 1.0); // BAL noise↔body
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let body_hz = 150.0 + 250.0 * params[SLOT_MACH_0]; // TUNE 150..400 Hz
+        let body_ratio = 1.0 + 0.5 * params[SLOT_MACH_1]; // RATIO 1.0..1.5
+        let body_decay_s = 0.05 + 0.2 * params[SLOT_MACH_5]; // BDEC 50..250 ms
+        let noise_decay_s = 0.1 + 0.5 * params[SLOT_MACH_6]; // NDEC 100..600 ms
+        let hp_hz = 800.0 + 3200.0 * params[SLOT_FILT_0]; // HPF 800..4000 Hz
+        let lp_hz = 4000.0 + 8000.0 * params[SLOT_FILT_1]; // LPF 4..12 kHz
+        let bal = params[SLOT_MACH_7].clamp(0.0, 1.0); // BAL noise↔body
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.body_hz = body_hz * self.freq_scale;
         self.body_ratio = body_ratio;
@@ -116,7 +116,7 @@ impl Cp {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales the FM body; the noise crunch is pitchless and untouched.
     /// Absolute, not incremental.
@@ -290,16 +290,16 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::Cp;
-        let macros = id.default_macros();
-        let mut s = Cp::new(&macros);
+        let params = id.default_params();
+        let mut s = Cp::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn produces_burst_then_tail() {
         let id = MachineId::Cp;
-        let macros = id.default_macros();
-        let mut s = Cp::new(&macros);
+        let params = id.default_params();
+        let mut s = Cp::new(&params);
         s.trigger(1.0);
 
         // Count "loud then quiet" transitions in the first 30ms — should see
@@ -338,8 +338,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::Cp;
-        let macros = id.default_macros();
-        let mut s = Cp::new(&macros);
+        let params = id.default_params();
+        let mut s = Cp::new(&params);
         s.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();

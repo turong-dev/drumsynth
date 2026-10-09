@@ -2,10 +2,10 @@
 //!
 //! The Syntakt-architecture machine layer: named synthesis models, enum
 //! dispatch via [`MachineSlot`], and the per-machine metadata table
-//! [`MACHINE_INFO`]. The generic macro/CC slot system lives in
-//! [`device_core::macros`].
+//! [`MACHINE_INFO`]. The generic param/CC slot system lives in
+//! [`device_core::params`].
 
-pub use device_core::macros::*;
+pub use device_core::params::*;
 
 pub mod bd_classic;
 pub mod bd_fm;
@@ -151,14 +151,14 @@ impl MachineId {
         }
     }
 
-    /// Macros this machine exposes, with their default values.
-    pub fn macros(self) -> [MacroInfo; NUM_MACROS] {
-        MACHINE_INFO[self.index()].macros
+    /// Params this machine exposes, with their default values.
+    pub fn params(self) -> [ParamInfo; NUM_PARAMS] {
+        MACHINE_INFO[self.index()].params
     }
 
-    /// Look up a macro's metadata by name. Case-insensitive, ASCII only.
-    pub fn macro_by_name(self, name: &str) -> Option<(usize, MacroInfo)> {
-        for (i, m) in self.macros().into_iter().enumerate() {
+    /// Look up a param's metadata by name. Case-insensitive, ASCII only.
+    pub fn param_by_name(self, name: &str) -> Option<(usize, ParamInfo)> {
+        for (i, m) in self.params().into_iter().enumerate() {
             // `eq_ignore_ascii_case` is core-only; `to_ascii_lowercase`
             // would allocate and break the no-alloc contract.
             if m.name.eq_ignore_ascii_case(name.trim()) {
@@ -168,11 +168,11 @@ impl MachineId {
         None
     }
 
-    /// Factory macro values, packed into an array ready for
-    /// `Track::set_macros`.
-    pub fn default_macros(self) -> [f32; NUM_MACROS] {
-        let mut out = [0.0f32; NUM_MACROS];
-        for (i, m) in self.macros().into_iter().enumerate() {
+    /// Factory param values, packed into an array ready for
+    /// `Track::set_params`.
+    pub fn default_params(self) -> [f32; NUM_PARAMS] {
+        let mut out = [0.0f32; NUM_PARAMS];
+        for (i, m) in self.params().into_iter().enumerate() {
             out[i] = m.default;
         }
         out
@@ -181,13 +181,13 @@ impl MachineId {
 
 /// Per-machine metadata, indexed by [`MachineId::index`].
 struct MachineInfo {
-    macros: [MacroInfo; NUM_MACROS],
+    params: [ParamInfo; NUM_PARAMS],
 }
 
 static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 0: BD Classic
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.2),   // MACH 0
             mi("SWEEP", "SWP", 0.36), // MACH 1
             mi("SWP_T", "SWT", 0.15), // MACH 2
@@ -224,7 +224,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 1: BD FM
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.2),     // MACH 0
             mi("SWEEP", "SWP", 0.3),    // MACH 1
             mi("SWP_T", "SWT", 0.15),   // MACH 2
@@ -261,7 +261,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 2: BD VA
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.28), // MACH 0
             mi("SWEEP", "SWP", 1.0), // MACH 1
             mi("SWP_T", "SWT", 0.1), // MACH 2
@@ -298,7 +298,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 3: Tom
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.35),  // MACH 0
             mi("SWEEP", "SWP", 0.4),  // MACH 1
             mi("SWP_T", "SWT", 0.4),  // MACH 2
@@ -335,7 +335,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 4: SD Natural
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.28),  // MACH 0
             mi("RATIO", "RTO", 0.48), // MACH 1
             resv(),                   // MACH 2
@@ -372,7 +372,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 5: SD FM
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.28),   // MACH 0
             mi("RAT", "RAT", 0.33),    // MACH 1
             mi("MOD.AMT", "MDA", 0.3), // MACH 2
@@ -409,7 +409,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 6: RS
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.4),   // MACH 0
             mi("DET", "DET", 0.25),   // MACH 1
             resv(),                   // MACH 2
@@ -446,7 +446,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 7: CP
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.3),  // MACH 0
             mi("RATIO", "RTO", 0.5), // MACH 1
             resv(),                  // MACH 2
@@ -483,7 +483,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 8: Hat Classic
     MachineInfo {
-        macros: [
+        params: [
             resv(),                  // MACH 0
             resv(),                  // MACH 1
             resv(),                  // MACH 2
@@ -520,7 +520,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 9: HH Basic
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.3),  // MACH 0
             mi("TONE", "TON", 0.5),  // MACH 1
             resv(),                  // MACH 2
@@ -557,7 +557,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 10: CY Metallic
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.2),  // MACH 0
             mi("TONE", "TON", 0.3),  // MACH 1
             resv(),                  // MACH 2
@@ -594,7 +594,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 11: CB Classic
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.4),   // MACH 0
             mi("DET", "DET", 0.86),   // MACH 1
             resv(),                   // MACH 2
@@ -631,7 +631,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 12: SY Tone
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.5),    // MACH 0
             mi("RATIO", "RTO", 0.25),  // MACH 1
             mi("FDBK", "FDB", 0.2),    // MACH 2
@@ -668,7 +668,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 13: Dub Siren
     MachineInfo {
-        macros: [
+        params: [
             mi("TUNE", "TUN", 0.3),  // MACH 0
             mi("DEPTH", "DPT", 0.5), // MACH 1
             mi("RATE", "RTE", 0.2),  // MACH 2
@@ -705,7 +705,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     },
     // 14: Sweep FX
     MachineInfo {
-        macros: [
+        params: [
             mi("RATE", "RTE", 0.2),   // MACH 0
             mi("DEPTH", "DPT", 0.5),  // MACH 1
             mi("START", "STR", 0.45), // MACH 2
@@ -779,24 +779,24 @@ pub enum MachineSlot {
 }
 
 impl MachineSlot {
-    /// Build a slot of the given machine with the given macros applied.
-    pub fn new(id: MachineId, macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build a slot of the given machine with the given params applied.
+    pub fn new(id: MachineId, params: &[f32; NUM_PARAMS]) -> Self {
         match id {
-            MachineId::BdClassic => Self::BdClassic(BdClassic::new(macros)),
-            MachineId::BdFm => Self::BdFm(BdFm::new(macros)),
-            MachineId::BdVa => Self::BdVa(BdVa::new(macros)),
-            MachineId::Tom => Self::Tom(Tom::new(macros)),
-            MachineId::SdNatural => Self::SdNatural(SdNatural::new(macros)),
-            MachineId::SdFm => Self::SdFm(SdFm::new(macros)),
-            MachineId::Rs => Self::Rs(Rs::new(macros)),
-            MachineId::Cp => Self::Cp(Cp::new(macros)),
-            MachineId::HatClassic => Self::HatClassic(HatClassic::new(macros)),
-            MachineId::HhBasic => Self::HhBasic(HhBasic::new(macros)),
-            MachineId::CyMetallic => Self::CyMetallic(CyMetallic::new(macros)),
-            MachineId::CbClassic => Self::CbClassic(CbClassic::new(macros)),
-            MachineId::SyTone => Self::SyTone(SyTone::new(macros)),
-            MachineId::DubSiren => Self::DubSiren(DubSiren::new(macros)),
-            MachineId::SweepFx => Self::SweepFx(SweepFx::new(macros)),
+            MachineId::BdClassic => Self::BdClassic(BdClassic::new(params)),
+            MachineId::BdFm => Self::BdFm(BdFm::new(params)),
+            MachineId::BdVa => Self::BdVa(BdVa::new(params)),
+            MachineId::Tom => Self::Tom(Tom::new(params)),
+            MachineId::SdNatural => Self::SdNatural(SdNatural::new(params)),
+            MachineId::SdFm => Self::SdFm(SdFm::new(params)),
+            MachineId::Rs => Self::Rs(Rs::new(params)),
+            MachineId::Cp => Self::Cp(Cp::new(params)),
+            MachineId::HatClassic => Self::HatClassic(HatClassic::new(params)),
+            MachineId::HhBasic => Self::HhBasic(HhBasic::new(params)),
+            MachineId::CyMetallic => Self::CyMetallic(CyMetallic::new(params)),
+            MachineId::CbClassic => Self::CbClassic(CbClassic::new(params)),
+            MachineId::SyTone => Self::SyTone(SyTone::new(params)),
+            MachineId::DubSiren => Self::DubSiren(DubSiren::new(params)),
+            MachineId::SweepFx => Self::SweepFx(SweepFx::new(params)),
         }
     }
 
@@ -821,24 +821,24 @@ impl MachineSlot {
         }
     }
 
-    /// Recompute coefficients from the supplied macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
+    /// Recompute coefficients from the supplied params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
         match self {
-            Self::BdClassic(m) => m.set_macros(macros),
-            Self::BdFm(m) => m.set_macros(macros),
-            Self::BdVa(m) => m.set_macros(macros),
-            Self::Tom(m) => m.set_macros(macros),
-            Self::SdNatural(m) => m.set_macros(macros),
-            Self::SdFm(m) => m.set_macros(macros),
-            Self::Rs(m) => m.set_macros(macros),
-            Self::Cp(m) => m.set_macros(macros),
-            Self::HatClassic(m) => m.set_macros(macros),
-            Self::HhBasic(m) => m.set_macros(macros),
-            Self::CyMetallic(m) => m.set_macros(macros),
-            Self::CbClassic(m) => m.set_macros(macros),
-            Self::SyTone(m) => m.set_macros(macros),
-            Self::DubSiren(m) => m.set_macros(macros),
-            Self::SweepFx(m) => m.set_macros(macros),
+            Self::BdClassic(m) => m.set_params(params),
+            Self::BdFm(m) => m.set_params(params),
+            Self::BdVa(m) => m.set_params(params),
+            Self::Tom(m) => m.set_params(params),
+            Self::SdNatural(m) => m.set_params(params),
+            Self::SdFm(m) => m.set_params(params),
+            Self::Rs(m) => m.set_params(params),
+            Self::Cp(m) => m.set_params(params),
+            Self::HatClassic(m) => m.set_params(params),
+            Self::HhBasic(m) => m.set_params(params),
+            Self::CyMetallic(m) => m.set_params(params),
+            Self::CbClassic(m) => m.set_params(params),
+            Self::SyTone(m) => m.set_params(params),
+            Self::DubSiren(m) => m.set_params(params),
+            Self::SweepFx(m) => m.set_params(params),
         }
     }
 
@@ -878,7 +878,7 @@ impl MachineSlot {
         }
     }
 
-    /// Transpose by `semis` semitones relative to the machine's macro pitch.
+    /// Transpose by `semis` semitones relative to the machine's param pitch.
     ///
     /// Scales every oscillator the machine owns so the whole voice — sweep,
     /// FM ratio, detune — moves in pitch. Noise-only machines (Hat Classic)
@@ -981,43 +981,43 @@ mod tests {
     }
 
     #[test]
-    fn every_machine_has_named_macros_and_defaults() {
+    fn every_machine_has_named_params_and_defaults() {
         for m in MachineId::ALL {
-            let macros = m.macros();
-            for info in &macros {
+            let params = m.params();
+            for info in &params {
                 assert!(!info.name.is_empty(), "empty name on {m:?}");
                 assert!(
                     info.default >= 0.0 && info.default <= 1.0,
                     "bad default on {m:?}"
                 );
             }
-            assert_eq!(macros.len(), NUM_MACROS);
+            assert_eq!(params.len(), NUM_PARAMS);
         }
     }
 
     #[test]
-    fn default_macros_round_trip() {
+    fn default_params_round_trip() {
         let m = MachineId::BdClassic;
-        let d = m.default_macros();
-        for (i, info) in m.macros().into_iter().enumerate() {
-            assert_eq!(d[i], info.default, "macro {i} defaulted wrong");
+        let d = m.default_params();
+        for (i, info) in m.params().into_iter().enumerate() {
+            assert_eq!(d[i], info.default, "param {i} defaulted wrong");
         }
     }
 
     #[test]
-    fn macro_by_name_finds_uppercase_exact() {
+    fn param_by_name_finds_uppercase_exact() {
         let m = MachineId::BdClassic;
-        assert_eq!(m.macro_by_name("TUNE").map(|(i, _)| i), Some(SLOT_MACH_0));
-        assert_eq!(m.macro_by_name("tune").map(|(i, _)| i), Some(SLOT_MACH_0));
-        assert_eq!(m.macro_by_name("DEC").map(|(i, _)| i), Some(SLOT_MACH_5));
-        assert_eq!(m.macro_by_name("MISSING"), None);
+        assert_eq!(m.param_by_name("TUNE").map(|(i, _)| i), Some(SLOT_MACH_0));
+        assert_eq!(m.param_by_name("tune").map(|(i, _)| i), Some(SLOT_MACH_0));
+        assert_eq!(m.param_by_name("DEC").map(|(i, _)| i), Some(SLOT_MACH_5));
+        assert_eq!(m.param_by_name("MISSING"), None);
     }
 
     #[test]
     fn canonical_slot_constants_are_stable() {
-        assert_eq!(NUM_MACROS, 32);
+        assert_eq!(NUM_PARAMS, 32);
         assert_eq!(NUM_BANKS, 4);
-        assert_eq!(MACROS_PER_BANK, 8);
+        assert_eq!(PARAMS_PER_BANK, 8);
         // Bank 0: MACH (numbered)
         assert_eq!(SLOT_MACH_0, 0);
         assert_eq!(SLOT_MACH_1, 1);
@@ -1054,8 +1054,8 @@ mod tests {
     #[test]
     fn every_slot_acts_like_its_machine() {
         for id in MachineId::ALL {
-            let macros = id.default_macros();
-            let mut slot = MachineSlot::new(id, &macros);
+            let params = id.default_params();
+            let mut slot = MachineSlot::new(id, &params);
             assert!(!slot.is_active());
             slot.trigger(1.0);
             assert!(slot.is_active());

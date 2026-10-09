@@ -6,7 +6,7 @@
 //! tick; cheaper than the Syntakt analog SD FM in absolute terms and
 //! indistinguishable in character for one-shot drum use.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -30,7 +30,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_5,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_5,
     SLOT_MACH_6, SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -49,14 +49,14 @@ pub struct SdFm {
     body_gain: f32,
     noise_gain: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl SdFm {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut s = Self {
             carrier: SineOsc::new(),
             modulator: SineOsc::new(),
@@ -72,20 +72,20 @@ impl SdFm {
             freq_scale: 1.0,
             level: 0.0,
         };
-        s.set_macros(macros);
+        s.set_params(params);
         s
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let carrier_hz = 100.0 + 300.0 * macros[SLOT_MACH_0]; // TUNE 100..400 Hz
-        let mod_ratio = 1.0 + 3.0 * macros[SLOT_MACH_1]; // RAT 1..4
-        let body_decay_s = 0.04 + 0.44 * macros[SLOT_MACH_5]; // BDEC 40..480 ms
-        let noise_decay_s = 0.03 + 0.8 * macros[SLOT_MACH_6]; // NDEC 30..830 ms
-        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MACH_3]; // MENV 5..105 ms
-        let mod_amount = macros[SLOT_MACH_2] * 3.0; // AMT 0..3
-        let noise_mix = macros[SLOT_MACH_7].clamp(0.0, 1.0); // NMIX 0..1
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let carrier_hz = 100.0 + 300.0 * params[SLOT_MACH_0]; // TUNE 100..400 Hz
+        let mod_ratio = 1.0 + 3.0 * params[SLOT_MACH_1]; // RAT 1..4
+        let body_decay_s = 0.04 + 0.44 * params[SLOT_MACH_5]; // BDEC 40..480 ms
+        let noise_decay_s = 0.03 + 0.8 * params[SLOT_MACH_6]; // NDEC 30..830 ms
+        let mod_decay_s = 0.005 + 0.1 * params[SLOT_MACH_3]; // MENV 5..105 ms
+        let mod_amount = params[SLOT_MACH_2] * 3.0; // AMT 0..3
+        let noise_mix = params[SLOT_MACH_7].clamp(0.0, 1.0); // NMIX 0..1
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.carrier.set_freq(carrier_hz * self.freq_scale);
         self.mod_hz = carrier_hz * mod_ratio * self.freq_scale;
@@ -105,7 +105,7 @@ impl SdFm {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales carrier and modulator together so the FM ratio — and with it
     /// the snare's timbre — survives the transpose. The noise rattle is
@@ -186,15 +186,15 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::SdFm;
-        let macros = id.default_macros();
-        let mut s = SdFm::new(&macros);
+        let params = id.default_params();
+        let mut s = SdFm::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn full_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
-        let mut m = id.default_macros();
+        let mut m = id.default_params();
         m[SLOT_MACH_7] = 1.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn zero_noise_mix_still_makes_sound() {
         let id = MachineId::SdFm;
-        let mut m = id.default_macros();
+        let mut m = id.default_params();
         m[SLOT_MACH_7] = 0.0;
         let mut s = SdFm::new(&m);
         s.trigger(1.0);
@@ -214,14 +214,14 @@ mod tests {
     #[test]
     fn fm_amount_changes_tone() {
         let id = MachineId::SdFm;
-        let mut clean = id.default_macros();
+        let mut clean = id.default_params();
         clean[SLOT_MACH_2] = 0.0;
         clean[SLOT_MACH_7] = 0.0;
-        let mut fm = id.default_macros();
+        let mut fm = id.default_params();
         fm[SLOT_MACH_2] = 1.0;
         fm[SLOT_MACH_7] = 0.0;
-        let crossings = |macros: &[f32; NUM_MACROS]| {
-            let mut s = SdFm::new(macros);
+        let crossings = |params: &[f32; NUM_PARAMS]| {
+            let mut s = SdFm::new(params);
             s.trigger(1.0);
             let n = (0.02 * SAMPLE_RATE) as usize;
             let mut prev = s.tick();
@@ -246,8 +246,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::SdFm;
-        let macros = id.default_macros();
-        let mut s = SdFm::new(&macros);
+        let params = id.default_params();
+        let mut s = SdFm::new(&params);
         s.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();

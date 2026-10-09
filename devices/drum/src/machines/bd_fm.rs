@@ -5,7 +5,7 @@
 //! (osc A) with its own decay, giving a punchier, more "electronic" attack
 //! without needing a soft-clipper. The Syntakt BD FM has separate mod-osc
 //! pitch, decay, and amount controls; we surface the most musically
-//! important three of those as macros.
+//! important three of those as params.
 //!
 //! # Topology
 //!
@@ -18,7 +18,7 @@
 //! Per-sample cost: two `sin_turns` lookups (carrier + modulator) — still
 //! cheap thanks to the table swap.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -40,7 +40,7 @@
 
 use crate::dsp::{decay_coeff, fast, DecayEnv, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4,
     SLOT_MACH_5, SLOT_MACH_6,
 };
 use crate::SAMPLE_RATE;
@@ -52,21 +52,21 @@ pub struct BdFm {
     amp_env: DecayEnv,
     pitch_env: DecayEnv,
     mod_env: DecayEnv,
-    // Cached from macros so `tick` never reads the macro array.
+    // Cached from params so `tick` never reads the param array.
     start_hz: f32,
     end_hz: f32,
     sweep_range: f32,
     mod_hz: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     mod_amount: f32,
     level: f32,
 }
 
 impl BdFm {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             carrier: SineOsc::new(),
             modulator: SineOsc::new(),
@@ -81,20 +81,20 @@ impl BdFm {
             mod_amount: 0.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 30.0 + 90.0 * macros[SLOT_MACH_0]; // TUNE 30..120 Hz
-        let pitch_ratio = 1.0 + 8.0 * macros[SLOT_MACH_1]; // SWEEP 1×..9×
-        let pitch_decay_s = 0.005 + 0.1 * macros[SLOT_MACH_2]; // SWP_T 5..105 ms
-        let amp_decay_s = 0.05 + 1.45 * macros[SLOT_MACH_5]; // DEC 50..1500 ms
-        let mod_ratio = 1.0 + 7.0 * macros[SLOT_MACH_3]; // MOD.HZ 1×..8× relative
-        let mod_decay_s = 0.005 + 0.1 * macros[SLOT_MACH_4]; // MOD.DC 5..105 ms
-        let mod_amount = macros[SLOT_MACH_6] * 4.0; // MOD.AMT 0..4 (in carrier cycles)
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let end_hz = 30.0 + 90.0 * params[SLOT_MACH_0]; // TUNE 30..120 Hz
+        let pitch_ratio = 1.0 + 8.0 * params[SLOT_MACH_1]; // SWEEP 1×..9×
+        let pitch_decay_s = 0.005 + 0.1 * params[SLOT_MACH_2]; // SWP_T 5..105 ms
+        let amp_decay_s = 0.05 + 1.45 * params[SLOT_MACH_5]; // DEC 50..1500 ms
+        let mod_ratio = 1.0 + 7.0 * params[SLOT_MACH_3]; // MOD.HZ 1×..8× relative
+        let mod_decay_s = 0.005 + 0.1 * params[SLOT_MACH_4]; // MOD.DC 5..105 ms
+        let mod_amount = params[SLOT_MACH_6] * 4.0; // MOD.AMT 0..4 (in carrier cycles)
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;
@@ -111,7 +111,7 @@ impl BdFm {
             .set_coeff(decay_coeff(mod_decay_s, SAMPLE_RATE));
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales the sweep endpoints *and* the modulator, so the FM ratio (and
     /// therefore the timbre) is preserved while everything moves in pitch.
@@ -182,8 +182,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::BdFm;
-        let macros = id.default_macros();
-        let mut k = BdFm::new(&macros);
+        let params = id.default_params();
+        let mut k = BdFm::new(&params);
         for _ in 0..1000 {
             assert_eq!(k.tick(), 0.0);
         }
@@ -192,9 +192,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::BdFm;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut k = BdFm::new(&macros);
+            let mut k = BdFm::new(&params);
             k.trigger(vel);
             let mut peak = 0.0f32;
             for _ in 0..4800 {
@@ -208,15 +208,15 @@ mod tests {
     #[test]
     fn mod_amount_changes_tone() {
         let id = MachineId::BdFm;
-        let mut quiet = id.default_macros();
+        let mut quiet = id.default_params();
         quiet[SLOT_MACH_6] = 0.0; // MOD.AMT = 0 → plain sine (no FM)
-        let mut loud = id.default_macros();
+        let mut loud = id.default_params();
         loud[SLOT_MACH_6] = 1.0; // MOD.AMT = 1 → max FM
 
         // FM adds sidebands at higher frequencies, so the heavier-FM case
         // should have more zero crossings per unit time than the clean sine.
-        let crossings = |macros: &[f32; NUM_MACROS]| {
-            let mut k = BdFm::new(macros);
+        let crossings = |params: &[f32; NUM_PARAMS]| {
+            let mut k = BdFm::new(params);
             k.trigger(1.0);
             let n = (0.02 * SAMPLE_RATE) as usize; // 20ms window
             let mut prev = k.tick();
@@ -241,8 +241,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::BdFm;
-        let macros = id.default_macros();
-        let mut k = BdFm::new(&macros);
+        let params = id.default_params();
+        let mut k = BdFm::new(&params);
         k.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             k.tick();

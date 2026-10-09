@@ -69,8 +69,8 @@ pub enum LfoMode {
 /// What a modulator can address.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ModDest {
-    /// Machine macro knob `0..7`.
-    Macro(usize),
+    /// Machine param knob `0..7`.
+    Param(usize),
     /// Strip filter cutoff.
     FilterCutoff,
     /// Strip filter resonance.
@@ -92,21 +92,21 @@ pub enum ModDest {
 }
 
 impl ModDest {
-    /// Quantise a normalised `0..1` macro value onto a [`ModDest`].
+    /// Quantise a normalised `0..1` param value onto a [`ModDest`].
     ///
-    /// Sixteen steps, evenly spaced: the eight macro knobs, then the strip
+    /// Sixteen steps, evenly spaced: the eight param knobs, then the strip
     /// destinations, then [`ModDest::None`] as a final "off" position. This is
-    /// the mapping the LFO-destination macro slots use.
-    pub fn from_macro(v: f32) -> Self {
+    /// the mapping the LFO-destination param slots use.
+    pub fn from_param(v: f32) -> Self {
         const DESTS: [ModDest; 16] = [
-            ModDest::Macro(0),
-            ModDest::Macro(1),
-            ModDest::Macro(2),
-            ModDest::Macro(3),
-            ModDest::Macro(4),
-            ModDest::Macro(5),
-            ModDest::Macro(6),
-            ModDest::Macro(7),
+            ModDest::Param(0),
+            ModDest::Param(1),
+            ModDest::Param(2),
+            ModDest::Param(3),
+            ModDest::Param(4),
+            ModDest::Param(5),
+            ModDest::Param(6),
+            ModDest::Param(7),
             ModDest::FilterCutoff,
             ModDest::FilterReso,
             ModDest::Drive,
@@ -458,7 +458,7 @@ mod tests {
             LfoWave::Sine,
             LfoMode::Free,
             0.0,
-            ModDest::Macro(0),
+            ModDest::Param(0),
             0.0,
         );
         assert!(!lfo.is_contributing(), "depth 0 should not contribute");
@@ -469,7 +469,7 @@ mod tests {
             LfoWave::Sine,
             LfoMode::Free,
             0.5,
-            ModDest::Macro(0),
+            ModDest::Param(0),
             0.0,
         );
         assert!(lfo.is_contributing(), "should contribute with depth + dest");

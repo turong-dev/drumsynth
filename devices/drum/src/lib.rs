@@ -39,8 +39,8 @@
 //! out. MIDI note and CC mappings live in the engine as small tables so the
 //! firmware just looks them up.
 //!
-//! Machines expose a uniform surface of [`NUM_MACROS`] normalised knobs so
-//! the host renderer can sweep any macro of any machine generically — no
+//! Machines expose a uniform surface of [`NUM_PARAMS`] normalised knobs so
+//! the host renderer can sweep any param of any machine generically — no
 //! hand-maintained per-parameter enum to keep in step with the catalogue.
 
 #![no_std]
@@ -64,7 +64,7 @@ pub use device_core::strip::StripParams;
 pub use device_core::track::{pan_law, ModState, VelMod, CHOKE_SAMPLES};
 
 pub use machines::{
-    MachineId, MacroInfo, MACROS_PER_BANK, NUM_BANKS, NUM_MACROS, SLOT_FILT_0, SLOT_FILT_1,
+    MachineId, ParamInfo, NUM_BANKS, NUM_PARAMS, PARAMS_PER_BANK, SLOT_FILT_0, SLOT_FILT_1,
     SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST,
     SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
     SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
@@ -80,7 +80,7 @@ pub use device_core::engine::{DeviceEngine, Engine};
 /// a lot and need a known length.
 pub const TRACKS: usize = 8;
 
-impl SlotId<NUM_MACROS> for crate::machines::MachineId {
+impl SlotId<NUM_PARAMS> for crate::machines::MachineId {
     fn index(self) -> usize {
         self.index()
     }
@@ -90,14 +90,14 @@ impl SlotId<NUM_MACROS> for crate::machines::MachineId {
     fn count() -> usize {
         Self::COUNT
     }
-    fn default_macros(self) -> [f32; NUM_MACROS] {
-        self.default_macros()
+    fn default_params(self) -> [f32; NUM_PARAMS] {
+        self.default_params()
     }
 }
 
-impl device_core::slot::DeviceModel<NUM_MACROS> for crate::machines::MachineId {
-    fn macro_info(self) -> [MacroInfo; NUM_MACROS] {
-        self.macros()
+impl device_core::slot::DeviceModel<NUM_PARAMS> for crate::machines::MachineId {
+    fn param_info(self) -> [ParamInfo; NUM_PARAMS] {
+        self.params()
     }
     fn label(self) -> &'static str {
         self.label()
@@ -110,18 +110,18 @@ pub struct DrumSlot {
     inner: crate::machines::MachineSlot,
 }
 
-impl Slot<NUM_MACROS> for DrumSlot {
+impl Slot<NUM_PARAMS> for DrumSlot {
     type Id = crate::machines::MachineId;
-    fn new(id: Self::Id, macros: &[f32; NUM_MACROS]) -> Self {
+    fn new(id: Self::Id, params: &[f32; NUM_PARAMS]) -> Self {
         Self {
-            inner: crate::machines::MachineSlot::new(id, macros),
+            inner: crate::machines::MachineSlot::new(id, params),
         }
     }
     fn id(&self) -> Self::Id {
         self.inner.id()
     }
-    fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        self.inner.set_macros(macros)
+    fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        self.inner.set_params(params)
     }
     fn trigger(&mut self, velocity: f32) {
         self.inner.trigger(velocity)
@@ -144,9 +144,9 @@ impl Slot<NUM_MACROS> for DrumSlot {
 }
 
 /// One channel of the drum kit.
-pub type Track = device_core::track::Track<DrumSlot, NUM_MACROS>;
-/// A complete drum sound: machine + macros + strip.
-pub type Sound = device_core::sound::Sound<DrumSlot, NUM_MACROS>;
+pub type Track = device_core::track::Track<DrumSlot, NUM_PARAMS>;
+/// A complete drum sound: machine + params + strip.
+pub type Sound = device_core::sound::Sound<DrumSlot, NUM_PARAMS>;
 
 /// Which machine is loaded on each track at engine construction.
 const DEFAULT_KIT: [MachineId; TRACKS] = [
@@ -162,11 +162,11 @@ const DEFAULT_KIT: [MachineId; TRACKS] = [
 
 /// The drum engine: a [`DeviceEngine`] pre-configured for the drum kit.
 pub struct DrumEngine {
-    inner: Engine<DrumSlot, NUM_MACROS, TRACKS>,
+    inner: Engine<DrumSlot, NUM_PARAMS, TRACKS>,
 }
 
 impl core::ops::Deref for DrumEngine {
-    type Target = Engine<DrumSlot, NUM_MACROS, TRACKS>;
+    type Target = Engine<DrumSlot, NUM_PARAMS, TRACKS>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -178,7 +178,7 @@ impl core::ops::DerefMut for DrumEngine {
     }
 }
 
-impl DeviceEngine<NUM_MACROS> for DrumEngine {
+impl DeviceEngine<NUM_PARAMS> for DrumEngine {
     type Slot = DrumSlot;
 
     fn tracks(&self) -> &[Track] {
@@ -269,7 +269,7 @@ impl DeviceEngine<NUM_MACROS> for DrumEngine {
         self.inner.send_fx.drive = value
     }
 
-    fn load_kit(&mut self, kit: &[<DrumSlot as Slot<NUM_MACROS>>::Id]) {
+    fn load_kit(&mut self, kit: &[<DrumSlot as Slot<NUM_PARAMS>>::Id]) {
         self.inner
             .load_kit(kit.try_into().expect("kit length must match track count"))
     }
@@ -288,8 +288,8 @@ impl DrumEngine {
             inner: Engine::new_with_kit(&DEFAULT_KIT),
         };
         e.tracks[2].strip.choke_mask = 1 << 3;
-        e.tracks[2].set_macro(0, 0.05);
-        e.tracks[3].set_macro(3, 0.25);
+        e.tracks[2].set_param(0, 0.05);
+        e.tracks[3].set_param(3, 0.25);
         configure_default_notes(&mut e.note_map);
         e
     }
@@ -303,8 +303,8 @@ impl DrumEngine {
         Engine::new_in_place_with_kit(core::ptr::addr_of_mut!((*dst).inner), &DEFAULT_KIT);
         let engine = &mut *dst;
         engine.tracks[2].strip.choke_mask = 1 << 3;
-        engine.tracks[2].set_macro(0, 0.05);
-        engine.tracks[3].set_macro(3, 0.25);
+        engine.tracks[2].set_param(0, 0.05);
+        engine.tracks[3].set_param(3, 0.25);
         configure_default_notes(&mut engine.note_map);
         engine
     }
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn track_retune_transposes_and_survives_macro_recompute() {
+    fn track_retune_transposes_and_survives_param_recompute() {
         // Track 7 is SyTone (Middle C). Pitch measured by zero crossings in
         // the first ~30 ms of a hit, where the FM sidebands are still busy
         // but the carrier dominates.
@@ -470,14 +470,14 @@ mod tests {
             "octave-up should roughly double crossings: {base} vs {octave}"
         );
 
-        // A macro recompute (e.g. from a CC) must not drop the transpose.
+        // A param recompute (e.g. from a CC) must not drop the transpose.
         let mut e = DrumEngine::new();
         e.tracks[7].retune(12.0);
-        e.tracks[7].set_macro(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
+        e.tracks[7].set_param(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
         let after_recompute = crossings(&mut e);
         assert!(
             (after_recompute as i64 - octave as i64).abs() <= 2,
-            "macro recompute dropped the retune: {octave} vs {after_recompute}"
+            "param recompute dropped the retune: {octave} vs {after_recompute}"
         );
     }
 
@@ -507,15 +507,15 @@ mod tests {
     }
 
     #[test]
-    fn no_nans_from_extreme_macros() {
-        // Push every macro to both extremes economically: corner-sweep the
+    fn no_nans_from_extreme_params() {
+        // Push every param to both extremes economically: corner-sweep the
         // first track with each extreme pattern and a hit.
         for v in [0.0f32, 1.0f32] {
             let mut e = DrumEngine::new();
             for (i, m) in e.tracks.iter_mut().enumerate() {
                 m.load_machine(MachineId::ALL[i % MachineId::ALL.len()]);
-                let all = [v; NUM_MACROS];
-                m.set_macros(&all);
+                let all = [v; NUM_PARAMS];
+                m.set_params(&all);
                 let strip = StripParams {
                     f_mode: dsp::SvfMode::Lp,
                     f_cutoff_hz: 200.0 + v * 10_000.0,
@@ -533,7 +533,7 @@ mod tests {
             for _ in 0..64 {
                 e.process(&mut l, &mut r);
                 for &s in l.iter().chain(r.iter()) {
-                    assert!(s.is_finite(), "degenerate macros produced {s}");
+                    assert!(s.is_finite(), "degenerate params produced {s}");
                 }
             }
         }
@@ -545,8 +545,8 @@ mod tests {
         let mut e = DrumEngine::new();
         // Track 0 = hat (already loaded), track 1 = a longer hat.
         e.tracks[1].load_machine(MachineId::HatClassic);
-        e.tracks[1].set_macro(0, 0.9); // ~470 ms decay = "open"
-        e.tracks[0].set_macro(0, 0.05); // ~35 ms decay = "closed"
+        e.tracks[1].set_param(0, 0.9); // ~470 ms decay = "open"
+        e.tracks[0].set_param(0, 0.05); // ~35 ms decay = "closed"
                                         // OH (track 1) chokes CH (track 0).
         e.tracks[1].strip.choke_mask = 1 << 0;
 
@@ -572,21 +572,21 @@ mod tests {
     }
 
     #[test]
-    fn lfo_modulates_macro() {
-        // LFO 0 on track 0 targets macro 0 (TUNE) with depth 0.5.
+    fn lfo_modulates_param() {
+        // LFO 0 on track 0 targets param 0 (TUNE) with depth 0.5.
         let mut e = DrumEngine::new();
         e.tracks[0].mod_state.lfos[0].set_params(
             2.0, // 2 Hz
             dsp::LfoWave::Sine,
             dsp::LfoMode::Free,
             0.5, // depth
-            dsp::ModDest::Macro(0),
+            dsp::ModDest::Param(0),
             0.0,
         );
 
-        let macro0_before = e.tracks[0].base_macros[0];
+        let param0_before = e.tracks[0].base_params[0];
 
-        // Run several blocks and check the effective macro changed.
+        // Run several blocks and check the effective param changed.
         let mut l = [0.0f32; BLOCK];
         let mut r = [0.0f32; BLOCK];
         e.trigger(0, 1.0);
@@ -594,18 +594,18 @@ mod tests {
             e.process(&mut l, &mut r);
         }
 
-        // The LFO should have modulated macro 0 away from its base value at
+        // The LFO should have modulated param 0 away from its base value at
         // some point in the cycle. We can't directly read the effective
-        // macro, but we can confirm the track is still producing finite
+        // param, but we can confirm the track is still producing finite
         // output (didn't NaN) and that the control path ran.
         for &s in l.iter() {
             assert!(s.is_finite(), "LFO mod produced NaN");
         }
 
-        // Base macro should be unchanged — modulation is additive, not destructive.
+        // Base param should be unchanged — modulation is additive, not destructive.
         assert_eq!(
-            e.tracks[0].base_macros[0], macro0_before,
-            "LFO mod should not mutate base_macros"
+            e.tracks[0].base_params[0], param0_before,
+            "LFO mod should not mutate base_params"
         );
     }
 
@@ -662,7 +662,7 @@ mod tests {
         let mut e = DrumEngine::new();
         let sound = Sound {
             id: MachineId::BdFm,
-            macros: [0.5; NUM_MACROS],
+            params: [0.5; NUM_PARAMS],
             strip: StripParams {
                 pan: 0.3,
                 level: 0.6,
@@ -671,11 +671,11 @@ mod tests {
         };
         e.load_sound(0, &sound);
         assert_eq!(e.tracks[0].id(), MachineId::BdFm);
-        // Macros round-trip, except the MACH slot which always mirrors the
+        // Params round-trip, except the MACH slot which always mirrors the
         // loaded machine (BdFm = catalogue index 1 / 14 at COUNT=15).
-        let mut expected = [0.5; NUM_MACROS];
+        let mut expected = [0.5; NUM_PARAMS];
         expected[SLOT_MACHINE] = 1.0 / 14.0;
-        assert_eq!(e.tracks[0].base_macros, expected);
+        assert_eq!(e.tracks[0].base_params, expected);
         assert_eq!(e.tracks[0].strip.pan, 0.3);
         assert_eq!(e.tracks[0].strip.level, 0.6);
     }
@@ -687,35 +687,35 @@ mod tests {
 
         // 0.5 quantises onto the middle of the catalogue (index 7 = Cp at
         // COUNT=15).
-        e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
+        e.tracks[0].set_param(SLOT_MACHINE, 0.5);
         assert_eq!(e.tracks[0].id(), MachineId::Cp);
-        // Macros reset to the new machine's defaults, MACH slot mirroring it.
-        assert_eq!(e.tracks[0].base_macros[SLOT_MACHINE], 7.0 / 14.0);
+        // Params reset to the new machine's defaults, MACH slot mirroring it.
+        assert_eq!(e.tracks[0].base_params[SLOT_MACHINE], 7.0 / 14.0);
 
-        // Re-setting the same machine is a no-op (doesn't wipe macros).
-        e.tracks[0].set_macro(SLOT_LEVEL, 0.5);
-        e.tracks[0].set_macro(SLOT_PAN, 0.5);
-        e.tracks[0].set_macro(SLOT_MACHINE, 0.5);
+        // Re-setting the same machine is a no-op (doesn't wipe params).
+        e.tracks[0].set_param(SLOT_LEVEL, 0.5);
+        e.tracks[0].set_param(SLOT_PAN, 0.5);
+        e.tracks[0].set_param(SLOT_MACHINE, 0.5);
         assert_eq!(e.tracks[0].id(), MachineId::Cp);
-        assert_eq!(e.tracks[0].base_macros[SLOT_LEVEL], 0.5);
-        assert_eq!(e.tracks[0].base_macros[SLOT_PAN], 0.5);
+        assert_eq!(e.tracks[0].base_params[SLOT_LEVEL], 0.5);
+        assert_eq!(e.tracks[0].base_params[SLOT_PAN], 0.5);
 
         // Top of the range hits the last machine in the catalogue.
-        e.tracks[0].set_macro(SLOT_MACHINE, 1.0);
+        e.tracks[0].set_param(SLOT_MACHINE, 1.0);
         assert_eq!(e.tracks[0].id(), MachineId::SweepFx);
     }
 
     /// Output routing (SLOT_OUT) quantises 0..1 over the 4 `OutPair`
     /// variants, sets `strip.out`, and writes the quantised value back so
     /// round-trip reads return the canonical centre. Instant under CC
-    /// (`set_macro_target`) and `set_macros` (bulk replace) — same
+    /// (`set_param_target`) and `set_params` (bulk replace) — same
     /// discipline as the machine selector.
     #[test]
-    fn out_macro_quantises_and_round_trips() {
+    fn out_param_quantises_and_round_trips() {
         let mut e = DrumEngine::new();
-        // Default routing is Master (OUT macro = 0.0).
+        // Default routing is Master (OUT param = 0.0).
         assert_eq!(e.tracks[0].strip.out, OutPair::Master);
-        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 0.0);
+        assert_eq!(e.tracks[0].base_params[SLOT_OUT], 0.0);
 
         // 0.0 → Master, 0.34 → Aux1, 0.67 → Aux2, 1.0 → Aux3. The quantise
         // centres at 0.0, 1/3, 2/3, 1.0 and writes that canonical value
@@ -726,49 +726,49 @@ mod tests {
             (0.67, OutPair::Aux2, 2.0 / 3.0),
             (1.0, OutPair::Aux3, 1.0),
         ] {
-            e.tracks[0].set_macro(SLOT_OUT, input);
+            e.tracks[0].set_param(SLOT_OUT, input);
             assert_eq!(
                 e.tracks[0].strip.out, expected_pair,
-                "macro {input} routed to wrong pair"
+                "param {input} routed to wrong pair"
             );
             assert_eq!(
-                e.tracks[0].base_macros[SLOT_OUT], expected_q,
-                "macro {input} did not quantise-back to {expected_q}"
+                e.tracks[0].base_params[SLOT_OUT], expected_q,
+                "param {input} did not quantise-back to {expected_q}"
             );
         }
 
-        // `set_macro_target` jumps instantly — no smoothing.
-        e.tracks[0].macro_pending = !0; // poison: any pending should be cleared
-        e.tracks[0].set_macro_target(SLOT_OUT, 1.0);
+        // `set_param_target` jumps instantly — no smoothing.
+        e.tracks[0].param_pending = !0; // poison: any pending should be cleared
+        e.tracks[0].set_param_target(SLOT_OUT, 1.0);
         assert_eq!(e.tracks[0].strip.out, OutPair::Aux3);
         assert_eq!(
-            e.tracks[0].macro_pending & (1 << SLOT_OUT),
+            e.tracks[0].param_pending & (1 << SLOT_OUT),
             0,
             "SLOT_OUT left pending"
         );
 
-        // `set_macros` (bulk) applies routing too.
-        let mut all = e.tracks[0].base_macros;
+        // `set_params` (bulk) applies routing too.
+        let mut all = e.tracks[0].base_params;
         all[SLOT_OUT] = 0.34; // Aux1
-        e.tracks[0].set_macros(&all);
+        e.tracks[0].set_params(&all);
         assert_eq!(e.tracks[0].strip.out, OutPair::Aux1);
-        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 1.0 / 3.0);
+        assert_eq!(e.tracks[0].base_params[SLOT_OUT], 1.0 / 3.0);
 
         // `set_strip` mirror: editing routing via the strip (e.g. a Sound
-        // carrying `out`) writes the canonical macro value back so MIDI
+        // carrying `out`) writes the canonical param value back so MIDI
         // feedback reports the in-use pair.
         let mut strip = e.tracks[0].strip;
         strip.out = OutPair::Aux2;
         e.tracks[0].set_strip(&strip);
         assert_eq!(e.tracks[0].strip.out, OutPair::Aux2);
-        assert_eq!(e.tracks[0].base_macros[SLOT_OUT], 2.0 / 3.0);
+        assert_eq!(e.tracks[0].base_params[SLOT_OUT], 2.0 / 3.0);
     }
 
     #[test]
     fn machine_select_keeps_sends_and_strip() {
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro(SLOT_SEND_DELAY, 0.7);
-        e.tracks[0].set_macro(SLOT_MACHINE, 0.1); // BdFm (index 1)
+        e.tracks[0].set_param(SLOT_SEND_DELAY, 0.7);
+        e.tracks[0].set_param(SLOT_MACHINE, 0.1); // BdFm (index 1)
         assert_eq!(e.tracks[0].id(), MachineId::BdFm);
         assert_eq!(
             e.tracks[0].strip.send_delay, 0.7,
@@ -790,9 +790,9 @@ mod tests {
         // With no LFOs and no velocity mod, control() should be a fast
         // no-op — the fast path returns before any work.
         let mut e = DrumEngine::new();
-        let macro0 = e.tracks[0].base_macros;
+        let param0 = e.tracks[0].base_params;
         e.tracks[0].control();
-        assert_eq!(e.tracks[0].base_macros, macro0, "control() mutated base");
+        assert_eq!(e.tracks[0].base_params, param0, "control() mutated base");
     }
 
     // ----- Phase 8: sample-accurate timed events -----
@@ -986,40 +986,40 @@ mod tests {
     }
 
     #[test]
-    fn send_macro_drives_delay_send() {
+    fn send_param_drives_delay_send() {
         let mut e = DrumEngine::new();
-        // Route kick → delay through the SEND.DLY *macro* (track-routed), not
+        // Route kick → delay through the SEND.DLY *param* (track-routed), not
         // the strip field.
-        e.tracks[0].set_macro(SLOT_SEND_DELAY, 0.7);
+        e.tracks[0].set_param(SLOT_SEND_DELAY, 0.7);
         e.send_fx.delay.set_params(0.020, 0.7, 20_000.0, 1.0);
         e.send_fx.delay.reset();
 
         let (peak_l, peak_r) = render_peak_with_send(&mut e, 0, 32);
         assert!(
             peak_l > 0.01,
-            "SEND.DLY macro produced no audible wet: peak_l={peak_l}"
+            "SEND.DLY param produced no audible wet: peak_l={peak_l}"
         );
         assert!(
             peak_r > 0.01,
-            "SEND.DLY macro produced no audible wet R: peak_r={peak_r}"
+            "SEND.DLY param produced no audible wet R: peak_r={peak_r}"
         );
     }
 
     #[test]
-    fn send_macro_drives_reverb_send() {
+    fn send_param_drives_reverb_send() {
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro(SLOT_SEND_REVERB, 0.7);
+        e.tracks[0].set_param(SLOT_SEND_REVERB, 0.7);
         e.send_fx.reverb.set_params(0.0, 0.8, 6_000.0, 1.0);
         e.send_fx.reverb.reset();
 
         let (peak_l, peak_r) = render_peak_with_send(&mut e, 0, 64);
         assert!(
             peak_l > 0.001,
-            "SEND.RVB macro produced no audible wet: peak_l={peak_l}"
+            "SEND.RVB param produced no audible wet: peak_l={peak_l}"
         );
         assert!(
             peak_r > 0.001,
-            "SEND.RVB macro produced no audible wet R: peak_r={peak_r}"
+            "SEND.RVB param produced no audible wet R: peak_r={peak_r}"
         );
     }
 
@@ -1570,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_cutoff_macro_sets_filter_cutoff() {
+    fn strip_cutoff_param_sets_filter_cutoff() {
         let mut e = DrumEngine::new();
         // Default strip filter is Off, so set a mode first.
         let strip = StripParams {
@@ -1579,52 +1579,52 @@ mod tests {
             ..StripParams::default()
         };
         e.tracks[0].set_strip(&strip);
-        // Now drive cutoff via the macro slot.
-        e.tracks[0].set_macro(SLOT_STRIP_CUT, 0.0); // 20 Hz
+        // Now drive cutoff via the param slot.
+        e.tracks[0].set_param(SLOT_STRIP_CUT, 0.0); // 20 Hz
         approx::assert_abs_diff_eq!(e.tracks[0].strip.f_cutoff_hz, 20.0, epsilon = 0.5);
-        e.tracks[0].set_macro(SLOT_STRIP_CUT, 1.0); // 20 kHz
+        e.tracks[0].set_param(SLOT_STRIP_CUT, 1.0); // 20 kHz
         approx::assert_abs_diff_eq!(e.tracks[0].strip.f_cutoff_hz, 20_000.0, epsilon = 50.0);
     }
 
     #[test]
-    fn strip_reso_macro_sets_filter_resonance() {
+    fn strip_reso_param_sets_filter_resonance() {
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro(SLOT_STRIP_RESO, 0.0);
+        e.tracks[0].set_param(SLOT_STRIP_RESO, 0.0);
         approx::assert_abs_diff_eq!(e.tracks[0].strip.f_reso_q, 0.5, epsilon = 1e-6);
-        e.tracks[0].set_macro(SLOT_STRIP_RESO, 1.0);
+        e.tracks[0].set_param(SLOT_STRIP_RESO, 1.0);
         approx::assert_abs_diff_eq!(e.tracks[0].strip.f_reso_q, 20.0, epsilon = 1e-6);
     }
 
     #[test]
-    fn strip_env_macros_set_ahd_timings() {
+    fn strip_env_params_set_ahd_timings() {
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro(SLOT_STRIP_ATK, 0.5);
+        e.tracks[0].set_param(SLOT_STRIP_ATK, 0.5);
         approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_attack_s, 0.5, epsilon = 1e-6);
-        e.tracks[0].set_macro(SLOT_STRIP_HOLD, 0.5);
+        e.tracks[0].set_param(SLOT_STRIP_HOLD, 0.5);
         approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_hold_s, 5.0, epsilon = 1e-6);
-        e.tracks[0].set_macro(SLOT_STRIP_DEC, 0.5);
+        e.tracks[0].set_param(SLOT_STRIP_DEC, 0.5);
         approx::assert_abs_diff_eq!(e.tracks[0].strip.amp_decay_s, 5.005, epsilon = 1e-3);
     }
 
     #[test]
-    fn lfo_rate_macro_slow_fast_split() {
+    fn lfo_rate_param_slow_fast_split() {
         let mut e = DrumEngine::new();
         // 0.0 → slow range bottom (0.1 Hz)
-        e.tracks[0].set_macro(SLOT_LFO1_RATE, 0.0);
+        e.tracks[0].set_param(SLOT_LFO1_RATE, 0.0);
         approx::assert_abs_diff_eq!(
             e.tracks[0].mod_state.lfos[0].speed_hz(),
             0.1,
             epsilon = 1e-6
         );
         // 0.5 → fast range bottom (1 Hz)
-        e.tracks[0].set_macro(SLOT_LFO1_RATE, 0.5);
+        e.tracks[0].set_param(SLOT_LFO1_RATE, 0.5);
         approx::assert_abs_diff_eq!(
             e.tracks[0].mod_state.lfos[0].speed_hz(),
             1.0,
             epsilon = 1e-6
         );
         // 1.0 → fast range top (100 Hz)
-        e.tracks[0].set_macro(SLOT_LFO1_RATE, 1.0);
+        e.tracks[0].set_param(SLOT_LFO1_RATE, 1.0);
         approx::assert_abs_diff_eq!(
             e.tracks[0].mod_state.lfos[0].speed_hz(),
             100.0,
@@ -1633,20 +1633,20 @@ mod tests {
     }
 
     #[test]
-    fn lfo_depth_macro_sets_depth() {
+    fn lfo_depth_param_sets_depth() {
         let mut e = DrumEngine::new();
-        e.tracks[0].set_macro(SLOT_LFO1_DEPTH, 0.7);
+        e.tracks[0].set_param(SLOT_LFO1_DEPTH, 0.7);
         approx::assert_abs_diff_eq!(e.tracks[0].mod_state.lfos[0].depth(), 0.7, epsilon = 1e-6);
     }
 
     #[test]
-    fn lfo_dest_macro_quantises() {
+    fn lfo_dest_param_quantises() {
         let mut e = DrumEngine::new();
-        // 0.0 → Macro(0)
-        e.tracks[0].set_macro(SLOT_LFO1_DEST, 0.0);
-        assert_eq!(e.tracks[0].mod_state.lfos[0].dest(), dsp::ModDest::Macro(0));
+        // 0.0 → Param(0)
+        e.tracks[0].set_param(SLOT_LFO1_DEST, 0.0);
+        assert_eq!(e.tracks[0].mod_state.lfos[0].dest(), dsp::ModDest::Param(0));
         // ~0.56 → FilterCutoff (index 8 of 16 → 8/15 ≈ 0.533)
-        e.tracks[0].set_macro(SLOT_LFO1_DEST, 0.56);
+        e.tracks[0].set_param(SLOT_LFO1_DEST, 0.56);
         assert_eq!(
             e.tracks[0].mod_state.lfos[0].dest(),
             dsp::ModDest::FilterCutoff
@@ -1654,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_cutoff_macro_round_trips_through_set_strip() {
+    fn strip_cutoff_param_round_trips_through_set_strip() {
         let mut e = DrumEngine::new();
         let strip = StripParams {
             f_mode: StripParams::default().f_mode,
@@ -1666,8 +1666,8 @@ mod tests {
             ..StripParams::default()
         };
         e.tracks[0].set_strip(&strip);
-        // The macro slot should mirror the inverse mapping.
-        let m = e.tracks[0].base_macros[SLOT_STRIP_CUT];
+        // The param slot should mirror the inverse mapping.
+        let m = e.tracks[0].base_params[SLOT_STRIP_CUT];
         let expected = libm::logf(5000.0 / 20.0) / libm::logf(1000.0);
         approx::assert_abs_diff_eq!(m, expected, epsilon = 1e-5);
     }

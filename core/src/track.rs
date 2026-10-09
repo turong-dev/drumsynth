@@ -2,11 +2,11 @@
 //!
 //! A [`Track`] is generic over a [`Slot`](crate::slot::Slot) so the same
 //! strip (filter, amp envelope, drive, pan, level, sends), modulation (LFOs +
-//! velocity mods), CC-macro smoothing, choke/layer logic and de-click/choke
+//! velocity mods), CC-param smoothing, choke/layer logic and de-click/choke
 //! fades can host drum machines, FM voices, or any other no-alloc voice.
 
 use crate::dsp::{fast, AhdEnv, Lfo, ModDest, Svf};
-use crate::macros::{
+use crate::params::{
     SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST,
     SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
     SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
@@ -48,7 +48,7 @@ pub struct ModState {
     /// Two independent LFOs, each with its own destination + depth.
     pub lfos: [Lfo; 2],
     /// Velocity-mod slots. Applied at trigger time; contribute to the
-    /// effective macros/strip for the duration of the hit.
+    /// effective params/strip for the duration of the hit.
     pub vel_mods: [VelMod; MAX_VEL_MODS],
     /// Last velocity received, kept for `control()` to apply velocity mod.
     last_velocity: f32,
@@ -123,16 +123,16 @@ where
 {
     /// Underlying synthesis model. Reassignable via [`Track::load_machine`].
     pub slot: S,
-    /// Base macro values (user-configured, pre-modulation).
-    pub base_macros: [f32; N],
-    /// CC macro targets: [`Track::control`] slews `base_macros` toward these
-    /// at block rate. Only macros touched by [`Track::set_macro_target`] are
-    /// tracked (see `macro_pending`); everything else is direct.
-    macro_targets: [f32; N],
-    /// One-pole state used to slew a pending macro toward its target.
-    macro_smooth: [f32; N],
-    /// Bitmask: bit `i` set = macro `i` is mid-ramp toward `macro_targets[i]`.
-    pub macro_pending: u32,
+    /// Base param values (user-configured, pre-modulation).
+    pub base_params: [f32; N],
+    /// CC param targets: [`Track::control`] slews `base_params` toward these
+    /// at block rate. Only params touched by [`Track::set_param_target`] are
+    /// tracked (see `param_pending`); everything else is direct.
+    param_targets: [f32; N],
+    /// One-pole state used to slew a pending param toward its target.
+    param_smooth: [f32; N],
+    /// Bitmask: bit `i` set = param `i` is mid-ramp toward `param_targets[i]`.
+    pub param_pending: u32,
     /// Strip configuration (filter, amp env, drive, pan, level, choke, layer).
     pub strip: StripParams,
     /// LFOs + velocity modulation.
@@ -182,27 +182,27 @@ impl<S, const N: usize> Track<S, N>
 where
     S: Slot<N>,
 {
-    /// Build a track loaded with the given slot and that slot's default macros
+    /// Build a track loaded with the given slot and that slot's default params
     /// + the default strip.
     pub fn new(id: S::Id) -> Self {
-        let base_macros = S::Id::default_macros(id);
+        let base_params = S::Id::default_params(id);
         let strip = StripParams::default();
-        let slot = S::new(id, &base_macros);
+        let slot = S::new(id, &base_params);
         let mut filter = Svf::new(strip.f_mode);
         filter.recalc(strip.f_cutoff_hz, strip.f_reso_q, SAMPLE_RATE);
         let mut amp_env = AhdEnv::new();
         amp_env.set_params(strip.amp_attack_s, strip.amp_hold_s, strip.amp_decay_s);
         let (pan_l, pan_r) = pan_law(strip.pan);
         // The MACH slot always mirrors the loaded slot.
-        let mut base_macros = base_macros;
+        let mut base_params = base_params;
         let divisor = S::Id::count().saturating_sub(1).max(1) as f32;
-        base_macros[SLOT_MACHINE] = id.index() as f32 / divisor;
+        base_params[SLOT_MACHINE] = id.index() as f32 / divisor;
         Self {
             slot,
-            base_macros,
-            macro_targets: base_macros,
-            macro_smooth: base_macros,
-            macro_pending: 0,
+            base_params,
+            param_targets: base_params,
+            param_smooth: base_params,
+            param_pending: 0,
             strip,
             mod_state: ModState::new(),
             filter,
@@ -235,14 +235,14 @@ where
     /// `ptr` must be valid for writes and properly aligned for `Track<S, N>`.
     #[allow(unsafe_code)]
     pub unsafe fn new_in_place(id: S::Id, ptr: *mut Track<S, N>) {
-        let base_macros = S::Id::default_macros(id);
+        let base_params = S::Id::default_params(id);
         let strip = StripParams::default();
 
         // Construct the slot in-place at its final address. This must happen
         // before any move of the surrounding Track, because some slots own
         // self-referential C++ state.
         let slot_ptr = core::ptr::addr_of_mut!((*ptr).slot);
-        S::new_in_place(id, &base_macros, slot_ptr);
+        S::new_in_place(id, &base_params, slot_ptr);
 
         // Now write every other field of the track at its final address.
         let mut filter = Svf::new(strip.f_mode);
@@ -251,14 +251,14 @@ where
         amp_env.set_params(strip.amp_attack_s, strip.amp_hold_s, strip.amp_decay_s);
         let (pan_l, pan_r) = pan_law(strip.pan);
 
-        let mut base_macros = base_macros;
+        let mut base_params = base_params;
         let divisor = S::Id::count().saturating_sub(1).max(1) as f32;
-        base_macros[SLOT_MACHINE] = id.index() as f32 / divisor;
+        base_params[SLOT_MACHINE] = id.index() as f32 / divisor;
 
-        core::ptr::addr_of_mut!((*ptr).base_macros).write(base_macros);
-        core::ptr::addr_of_mut!((*ptr).macro_targets).write(base_macros);
-        core::ptr::addr_of_mut!((*ptr).macro_smooth).write(base_macros);
-        core::ptr::addr_of_mut!((*ptr).macro_pending).write(0);
+        core::ptr::addr_of_mut!((*ptr).base_params).write(base_params);
+        core::ptr::addr_of_mut!((*ptr).param_targets).write(base_params);
+        core::ptr::addr_of_mut!((*ptr).param_smooth).write(base_params);
+        core::ptr::addr_of_mut!((*ptr).param_pending).write(0);
         core::ptr::addr_of_mut!((*ptr).strip).write(strip);
         core::ptr::addr_of_mut!((*ptr).mod_state).write(ModState::new());
         core::ptr::addr_of_mut!((*ptr).filter).write(filter);
@@ -280,20 +280,20 @@ where
         core::ptr::addr_of_mut!((*ptr).strip_bypass).write(false);
     }
 
-    /// Replace the slot on this track, resetting macros to its defaults. Strip
+    /// Replace the slot on this track, resetting params to its defaults. Strip
     /// and modulation are untouched.
     #[allow(unsafe_code)]
     pub fn load_machine(&mut self, id: S::Id) {
-        self.base_macros = S::Id::default_macros(id);
+        self.base_params = S::Id::default_params(id);
         // Sends are track-level, not slot-level: keep the strip's aux levels
-        // and mirror them back into the macro slots so the two stay consistent.
-        self.base_macros[SLOT_SEND_DELAY] = self.strip.send_delay;
-        self.base_macros[SLOT_SEND_REVERB] = self.strip.send_reverb;
-        // Pan is track-level too: keep the strip's pan mirrored in the macro.
-        self.base_macros[SLOT_PAN] = self.strip.pan * 0.5 + 0.5;
+        // and mirror them back into the param slots so the two stay consistent.
+        self.base_params[SLOT_SEND_DELAY] = self.strip.send_delay;
+        self.base_params[SLOT_SEND_REVERB] = self.strip.send_reverb;
+        // Pan is track-level too: keep the strip's pan mirrored in the param.
+        self.base_params[SLOT_PAN] = self.strip.pan * 0.5 + 0.5;
         // The MACH slot always mirrors the loaded slot (see `load_sound`).
         let divisor = S::Id::count().saturating_sub(1).max(1) as f32;
-        self.base_macros[SLOT_MACHINE] = id.index() as f32 / divisor;
+        self.base_params[SLOT_MACHINE] = id.index() as f32 / divisor;
         // Construct the new slot in-place at its existing address. Slots that
         // own self-referential state (e.g. C++ voices with internal buffer
         // pointers) cannot survive a stack-to-heap move.
@@ -307,34 +307,34 @@ where
         // SAFETY: `&mut self.slot` is a valid, aligned pointer to the slot's
         // existing storage, and the slot was built by a previous
         // `new_in_place`, so `load_in_place`'s contract holds.
-        unsafe { S::load_in_place(id, &self.base_macros, &mut self.slot) };
-        // Macros reset wholesale: the CC smoother must follow, not ramp from
+        unsafe { S::load_in_place(id, &self.base_params, &mut self.slot) };
+        // Params reset wholesale: the CC smoother must follow, not ramp from
         // a value that no longer means anything on the new voice.
-        self.sync_macro_smoothing();
+        self.sync_param_smoothing();
     }
 
-    /// Load a complete sound (slot + macros + strip) onto this track.
+    /// Load a complete sound (slot + params + strip) onto this track.
     pub fn load_sound(&mut self, sound: &Sound<S, N>) {
         self.load_machine(sound.id);
         self.set_strip(&sound.strip);
-        // The sound's macros are authoritative for its sends (they round-trip
+        // The sound's params are authoritative for its sends (they round-trip
         // verbatim between host and device); derive the strip aux levels from
         // them so the two stay consistent.
-        self.base_macros = sound.macros;
+        self.base_params = sound.params;
         // The MACH slot always mirrors the loaded slot, whatever the sound's
-        // macro array carried.
+        // param array carried.
         let divisor = S::Id::count().saturating_sub(1).max(1) as f32;
-        self.base_macros[SLOT_MACHINE] = sound.id.index() as f32 / divisor;
-        self.strip.send_delay = self.base_macros[SLOT_SEND_DELAY];
-        self.strip.send_reverb = self.base_macros[SLOT_SEND_REVERB];
-        self.eff_send_delay = self.base_macros[SLOT_SEND_DELAY];
-        self.eff_send_reverb = self.base_macros[SLOT_SEND_REVERB];
+        self.base_params[SLOT_MACHINE] = sound.id.index() as f32 / divisor;
+        self.strip.send_delay = self.base_params[SLOT_SEND_DELAY];
+        self.strip.send_reverb = self.base_params[SLOT_SEND_REVERB];
+        self.eff_send_delay = self.base_params[SLOT_SEND_DELAY];
+        self.eff_send_reverb = self.base_params[SLOT_SEND_REVERB];
         if !self.mod_state.has_active_mod() {
-            self.slot.set_macros(&self.base_macros);
+            self.slot.set_params(&self.base_params);
         }
-        // base_macros was overwritten by hand after load_machine's sync;
+        // base_params was overwritten by hand after load_machine's sync;
         // re-sync the CC smoother to the final array.
-        self.sync_macro_smoothing();
+        self.sync_param_smoothing();
     }
 
     /// Which slot this track holds.
@@ -342,16 +342,16 @@ where
         self.slot.id()
     }
 
-    /// Set one base macro. Coefficient recompute is included.
-    pub fn set_macro(&mut self, idx: usize, value: f32) {
+    /// Set one base param. Coefficient recompute is included.
+    pub fn set_param(&mut self, idx: usize, value: f32) {
         if idx >= N {
             return;
         }
         let v = value.clamp(0.0, 1.0);
         // Slot selector (PITCH slot 5): quantise 0..1 onto the slot
         // catalogue. Track-routed, so CC 25 swaps engines without a program
-        // change. Loading a different slot resets macros to its defaults —
-        // the old voice's macro values mean nothing on the new one.
+        // change. Loading a different slot resets params to its defaults —
+        // the old voice's param values mean nothing on the new one.
         if idx == SLOT_MACHINE {
             let count = S::Id::count();
             if count <= 1 {
@@ -369,27 +369,27 @@ where
         // variants and write `strip.out`. Same instant-jump discipline as the
         // slot selector — routing is a discrete choice, smoothing it across
         // blocks would route a track to a half-pair. Stores the quantised
-        // macro value back so MIDI feedback / round-trip reads return the
+        // param value back so MIDI feedback / round-trip reads return the
         // canonical centre of the variant.
         if idx == SLOT_OUT {
             let i = (v * (OutPair::COUNT - 1) as f32 + 0.5) as usize;
             self.strip.out = OutPair::ALL[i];
             let q = i as f32 / (OutPair::COUNT - 1) as f32;
-            self.base_macros[SLOT_OUT] = q;
-            self.macro_smooth[SLOT_OUT] = q;
-            self.macro_pending &= !(1 << SLOT_OUT);
+            self.base_params[SLOT_OUT] = q;
+            self.param_smooth[SLOT_OUT] = q;
+            self.param_pending &= !(1 << SLOT_OUT);
             return;
         }
-        // Track-routed strip/LFO macros. These drive the per-track strip and
+        // Track-routed strip/LFO params. These drive the per-track strip and
         // modulation state, not the slot DSP, so they are intercepted before
-        // the generic slot-macro path below. Each stores the macro value and
+        // the generic slot-param path below. Each stores the param value and
         // applies the derived parameter immediately.
         //
         // A track with `strip_bypass` set runs its own strip and its own
         // modulation inside the slot, and reinterprets these same slots for
         // that chain (mi-drum maps FILT 2..5 to Warps/Ripples and MOD 0..7 to
         // Stages depths). So the interception is skipped there and the value
-        // falls through to `slot.set_macros` like any other machine macro —
+        // falls through to `slot.set_params` like any other machine param —
         // otherwise the slot would never see its own controls.
         if !self.strip_bypass {
             if idx == SLOT_STRIP_CUT
@@ -398,10 +398,10 @@ where
                 || idx == SLOT_STRIP_HOLD
                 || idx == SLOT_STRIP_DEC
             {
-                self.base_macros[idx] = v;
-                self.macro_smooth[idx] = v;
-                self.macro_pending &= !(1 << idx);
-                self.apply_strip_macros();
+                self.base_params[idx] = v;
+                self.param_smooth[idx] = v;
+                self.param_pending &= !(1 << idx);
+                self.apply_strip_params();
                 return;
             }
             if idx == SLOT_LFO1_RATE
@@ -411,19 +411,19 @@ where
                 || idx == SLOT_LFO2_DEPTH
                 || idx == SLOT_LFO2_DEST
             {
-                self.base_macros[idx] = v;
-                self.macro_smooth[idx] = v;
-                self.macro_pending &= !(1 << idx);
-                self.apply_lfo_macros();
+                self.base_params[idx] = v;
+                self.param_smooth[idx] = v;
+                self.param_pending &= !(1 << idx);
+                self.apply_lfo_params();
                 return;
             }
         }
-        self.base_macros[idx] = v;
+        self.base_params[idx] = v;
         // Keep the CC smoother in sync: a direct set is the new current
         // value, and any pending ramp to a stale target is cancelled.
-        self.macro_smooth[idx] = v;
-        self.macro_pending &= !(1 << idx);
-        // The send macros are track-routed: editing SEND.DLY / SEND.RVB
+        self.param_smooth[idx] = v;
+        self.param_pending &= !(1 << idx);
+        // The send params are track-routed: editing SEND.DLY / SEND.RVB
         // drives the strip's aux levels (and the effective values read in
         // the per-sample path), not the slot DSP.
         if idx == SLOT_SEND_DELAY {
@@ -433,7 +433,7 @@ where
             self.strip.send_reverb = v;
             self.eff_send_reverb = v;
         } else if idx == SLOT_PAN {
-            // Macro 0..1 maps onto the bipolar -1..+1 strip pan (0.5 = centre).
+            // Param 0..1 maps onto the bipolar -1..+1 strip pan (0.5 = centre).
             // `tick` reads the cached pan gains, so recompute them here or the
             // change is inaudible.
             self.strip.pan = v * 2.0 - 1.0;
@@ -442,75 +442,75 @@ where
             self.pan_r = r;
         }
         if !self.mod_state.has_active_mod() {
-            self.slot.set_macros(&self.base_macros);
+            self.slot.set_params(&self.base_params);
         }
     }
 
-    /// Set the *target* for a CC-driven macro.
+    /// Set the *target* for a CC-driven param.
     ///
     /// The value ramps to it at block rate via [`Track::control`] (see
-    /// [`MACRO_SMOOTH_K`]), so a burst of CC messages never triggers a
-    /// coefficient recompute per message — `set_macro`, the recompute call,
-    /// runs at most once per block per moving macro. The slot selector jumps
+    /// [`PARAM_SMOOTH_K`]), so a burst of CC messages never triggers a
+    /// coefficient recompute per message — `set_param`, the recompute call,
+    /// runs at most once per block per moving param. The slot selector jumps
     /// instantly: swapping engines must be immediate, and loading a slot
-    /// resets macros to its defaults anyway.
+    /// resets params to its defaults anyway.
     ///
     /// Control rate, main loop only — never the audio interrupt.
-    pub fn set_macro_target(&mut self, idx: usize, value: f32) {
+    pub fn set_param_target(&mut self, idx: usize, value: f32) {
         if idx >= N {
             return;
         }
         if idx == SLOT_MACHINE || idx == SLOT_OUT {
-            self.set_macro(idx, value);
+            self.set_param(idx, value);
             return;
         }
         let v = value.clamp(0.0, 1.0);
-        self.macro_targets[idx] = v;
-        // Seed the ramp from wherever the macro actually is now, so a
+        self.param_targets[idx] = v;
+        // Seed the ramp from wherever the param actually is now, so a
         // retarget mid-ramp (a knob being turned) continues smoothly from
         // the current value rather than jumping back to the block base.
-        self.macro_smooth[idx] = self.base_macros[idx];
-        self.macro_pending |= 1 << idx;
+        self.param_smooth[idx] = self.base_params[idx];
+        self.param_pending |= 1 << idx;
     }
 
-    /// Reset the CC smoother to match the current macro array: pending ramps
+    /// Reset the CC smoother to match the current param array: pending ramps
     /// cancelled, targets and smoother seeded from base values.
-    fn sync_macro_smoothing(&mut self) {
-        self.macro_targets = self.base_macros;
-        self.macro_smooth = self.base_macros;
-        self.macro_pending = 0;
+    fn sync_param_smoothing(&mut self) {
+        self.param_targets = self.base_params;
+        self.param_smooth = self.base_params;
+        self.param_pending = 0;
     }
 
-    /// Advance every pending macro one block toward its target. At most one
-    /// `set_macro` per moving macro per block, so a CC burst costs one
-    /// coefficient recompute per macro per block instead of one per message.
-    fn advance_macro_smoothing(&mut self) {
+    /// Advance every pending param one block toward its target. At most one
+    /// `set_param` per moving param per block, so a CC burst costs one
+    /// coefficient recompute per param per block instead of one per message.
+    fn advance_param_smoothing(&mut self) {
         let mut i = 0;
         while i < N {
-            if self.macro_pending & (1 << i) != 0 {
-                let target = self.macro_targets[i];
-                let next = self.macro_smooth[i] + (target - self.macro_smooth[i]) * MACRO_SMOOTH_K;
-                if (target - next).abs() < MACRO_SMOOTH_EPS {
-                    // Converged: snap; `set_macro` clears the pending bit.
-                    self.set_macro(i, target);
+            if self.param_pending & (1 << i) != 0 {
+                let target = self.param_targets[i];
+                let next = self.param_smooth[i] + (target - self.param_smooth[i]) * PARAM_SMOOTH_K;
+                if (target - next).abs() < PARAM_SMOOTH_EPS {
+                    // Converged: snap; `set_param` clears the pending bit.
+                    self.set_param(i, target);
                 } else {
-                    // Still moving: `set_macro` clears the pending bit as
+                    // Still moving: `set_param` clears the pending bit as
                     // part of syncing the smoother, so re-arm it.
-                    self.set_macro(i, next);
-                    self.macro_pending |= 1 << i;
+                    self.set_param(i, next);
+                    self.param_pending |= 1 << i;
                 }
             }
             i += 1;
         }
     }
 
-    /// Apply the strip-filter and AHD-envelope macro slots to the strip.
+    /// Apply the strip-filter and AHD-envelope param slots to the strip.
     ///
     /// Cutoff is log-mapped 20 Hz..20 kHz; resonance is linear 0.5..20 Q;
     /// attack 0..1 s, hold 0..2 s, decay 0.01..3 s. Only the coefficients that
     /// changed are recomputed, via [`set_strip`]'s dirty-flag logic.
-    fn apply_strip_macros(&mut self) {
-        let m = self.base_macros;
+    fn apply_strip_params(&mut self) {
+        let m = self.base_params;
         let new_strip = StripParams {
             f_cutoff_hz: 20.0 * libm::powf(1000.0, m[SLOT_STRIP_CUT]),
             f_reso_q: 0.5 + 19.5 * m[SLOT_STRIP_RESO],
@@ -522,20 +522,20 @@ where
         self.set_strip(&new_strip);
     }
 
-    /// Apply the LFO macro slots to the two LFOs.
+    /// Apply the LFO param slots to the two LFOs.
     ///
     /// Rate is split: 0..0.5 = slow range (0.1..10 Hz), 0.5..1 = fast range
     /// (1..100 Hz), log-mapped within each half. Depth is 0..1. Destination is
-    /// quantised over [`ModDest`] via [`ModDest::from_macro`].
-    fn apply_lfo_macros(&mut self) {
-        let m = self.base_macros;
-        apply_one_lfo_macro(
+    /// quantised over [`ModDest`] via [`ModDest::from_param`].
+    fn apply_lfo_params(&mut self) {
+        let m = self.base_params;
+        apply_one_lfo_param(
             &mut self.mod_state.lfos[0],
             m[SLOT_LFO1_RATE],
             m[SLOT_LFO1_DEPTH],
             m[SLOT_LFO1_DEST],
         );
-        apply_one_lfo_macro(
+        apply_one_lfo_param(
             &mut self.mod_state.lfos[1],
             m[SLOT_LFO2_RATE],
             m[SLOT_LFO2_DEPTH],
@@ -543,41 +543,41 @@ where
         );
     }
 
-    /// Replace all base macros in one call.
-    pub fn set_macros(&mut self, all: &[f32; N]) {
-        self.base_macros = *all;
-        // Sends are track-routed from the macro array (see `set_macro`).
+    /// Replace all base params in one call.
+    pub fn set_params(&mut self, all: &[f32; N]) {
+        self.base_params = *all;
+        // Sends are track-routed from the param array (see `set_param`).
         self.strip.send_delay = all[SLOT_SEND_DELAY];
         self.strip.send_reverb = all[SLOT_SEND_REVERB];
         self.eff_send_delay = all[SLOT_SEND_DELAY];
         self.eff_send_reverb = all[SLOT_SEND_REVERB];
-        // Pan is track-routed too (see `set_macro`): the macro owns the value,
+        // Pan is track-routed too (see `set_param`): the param owns the value,
         // the strip pan is the derived -1..+1 form and the gains feed `tick`.
         self.strip.pan = all[SLOT_PAN] * 2.0 - 1.0;
         let (l, r) = pan_law(self.strip.pan);
         self.pan_l = l;
         self.pan_r = r;
-        // Output routing is track-routed too (see `set_macro`): quantise the
-        // macro value over the 4 `OutPair` variants and store the quantised
+        // Output routing is track-routed too (see `set_param`): quantise the
+        // param value over the 4 `OutPair` variants and store the quantised
         // form back so round-trip reads return the canonical centre.
         let i = (all[SLOT_OUT] * (OutPair::COUNT - 1) as f32 + 0.5) as usize;
         self.strip.out = OutPair::ALL[i];
-        self.base_macros[SLOT_OUT] = i as f32 / (OutPair::COUNT - 1) as f32;
-        // Strip filter / AHD env / LFO macros are track-routed too (see
-        // `set_macro`): apply them to the strip and mod state.
-        self.apply_strip_macros();
-        self.apply_lfo_macros();
+        self.base_params[SLOT_OUT] = i as f32 / (OutPair::COUNT - 1) as f32;
+        // Strip filter / AHD env / LFO params are track-routed too (see
+        // `set_param`): apply them to the strip and mod state.
+        self.apply_strip_params();
+        self.apply_lfo_params();
         if !self.mod_state.has_active_mod() {
-            self.slot.set_macros(&self.base_macros);
+            self.slot.set_params(&self.base_params);
         }
-        // Bulk macro replace resets the CC smoother (same rationale as
+        // Bulk param replace resets the CC smoother (same rationale as
         // `load_machine`).
-        self.sync_macro_smoothing();
+        self.sync_param_smoothing();
     }
 
-    /// Transpose the slot by `semis` semitones relative to its macro pitch.
+    /// Transpose the slot by `semis` semitones relative to its param pitch.
     /// Absolute, not incremental — the whole voice (sweep, FM ratio, detune)
-    /// moves. Survives later macro recomputes via each slot's internal
+    /// moves. Survives later param recomputes via each slot's internal
     /// frequency scaling. Slots without pitch no-op. Control rate.
     pub fn retune(&mut self, semis: f32) {
         self.slot.retune(semis);
@@ -610,36 +610,36 @@ where
             self.pan_l = l;
             self.pan_r = r;
         }
-        // Mirror the aux levels into the send macros so a strip edit keeps the
-        // macro view (MIDI CC 41/42) consistent. The send macros are the
+        // Mirror the aux levels into the send params so a strip edit keeps the
+        // param view (MIDI CC 41/42) consistent. The send params are the
         // routing authority; the strip fields are derived storage.
-        self.base_macros[SLOT_SEND_DELAY] = params.send_delay;
-        self.base_macros[SLOT_SEND_REVERB] = params.send_reverb;
-        // Mirror the strip pan into the PAN macro slot so a strip edit keeps
-        // the macro view (MIDI CC 37) consistent, like the sends.
-        self.base_macros[SLOT_PAN] = params.pan * 0.5 + 0.5;
-        // Mirror routing into the OUT macro slot (MIDI CC 46). Same shape as
-        // `set_macro(SLOT_OUT)`: the macro view shows the canonical centre of
+        self.base_params[SLOT_SEND_DELAY] = params.send_delay;
+        self.base_params[SLOT_SEND_REVERB] = params.send_reverb;
+        // Mirror the strip pan into the PAN param slot so a strip edit keeps
+        // the param view (MIDI CC 37) consistent, like the sends.
+        self.base_params[SLOT_PAN] = params.pan * 0.5 + 0.5;
+        // Mirror routing into the OUT param slot (MIDI CC 46). Same shape as
+        // `set_param(SLOT_OUT)`: the param view shows the canonical centre of
         // the variant, so MIDI feedback reports the value the user expects.
-        self.base_macros[SLOT_OUT] = params.out.index() as f32 / (OutPair::COUNT - 1) as f32;
-        // Mirror the strip filter / AHD env params into their macro slots so a
-        // strip edit keeps the macro view consistent. Inverse of
-        // `apply_strip_macros`.
-        self.base_macros[SLOT_STRIP_CUT] =
+        self.base_params[SLOT_OUT] = params.out.index() as f32 / (OutPair::COUNT - 1) as f32;
+        // Mirror the strip filter / AHD env params into their param slots so a
+        // strip edit keeps the param view consistent. Inverse of
+        // `apply_strip_params`.
+        self.base_params[SLOT_STRIP_CUT] =
             libm::logf(params.f_cutoff_hz / 20.0) / libm::logf(1000.0);
-        self.base_macros[SLOT_STRIP_RESO] = (params.f_reso_q - 0.5) / 19.5;
-        self.base_macros[SLOT_STRIP_ATK] = params.amp_attack_s;
-        self.base_macros[SLOT_STRIP_HOLD] = params.amp_hold_s / 10.0;
-        self.base_macros[SLOT_STRIP_DEC] = (params.amp_decay_s - 0.01) / 9.99;
+        self.base_params[SLOT_STRIP_RESO] = (params.f_reso_q - 0.5) / 19.5;
+        self.base_params[SLOT_STRIP_ATK] = params.amp_attack_s;
+        self.base_params[SLOT_STRIP_HOLD] = params.amp_hold_s / 10.0;
+        self.base_params[SLOT_STRIP_DEC] = (params.amp_decay_s - 0.01) / 9.99;
         if !self.mod_state.has_active_mod() {
             self.eff_drive = params.drive;
             self.eff_level = params.level;
             self.eff_send_delay = params.send_delay;
             self.eff_send_reverb = params.send_reverb;
         }
-        // The strip edit just rewrote the send/pan macro mirrors; resync the
+        // The strip edit just rewrote the send/pan param mirrors; resync the
         // CC smoother so a pending ramp doesn't yank them back.
-        self.sync_macro_smoothing();
+        self.sync_param_smoothing();
     }
 
     /// Begin a hit at `velocity` (0..=1.0). Fires LFO triggers and stores
@@ -712,15 +712,15 @@ where
     }
 
     /// Per-block control pass. Advances LFOs, sums modulation onto base
-    /// macros + strip params, and recomputes coefficients. Called from the
+    /// params + strip params, and recomputes coefficients. Called from the
     /// engine before the sample loop. If no modulation is active and no CC
-    /// macros are mid-ramp, this is a single-branch early return.
+    /// params are mid-ramp, this is a single-branch early return.
     pub fn control(&mut self) {
-        // 0. CC macro smoothing first, before the mod-state borrow: slew
-        //    pending macros toward their targets and recompute coefficients
+        // 0. CC param smoothing first, before the mod-state borrow: slew
+        //    pending params toward their targets and recompute coefficients
         //    as they move, so a CC edit is audible even with no modulation.
-        if self.macro_pending != 0 {
-            self.advance_macro_smoothing();
+        if self.param_pending != 0 {
+            self.advance_param_smoothing();
         }
 
         let mod_state = &mut self.mod_state;
@@ -736,7 +736,7 @@ where
         let vel = mod_state.last_velocity;
 
         // 2. Start from base values.
-        let mut eff_macros = self.base_macros;
+        let mut eff_params = self.base_params;
         let mut eff_cutoff = self.strip.f_cutoff_hz;
         let mut eff_reso = self.strip.f_reso_q;
         let mut eff_drive = self.strip.drive;
@@ -745,7 +745,7 @@ where
         let mut eff_amp_decay = self.strip.amp_decay_s;
         let mut eff_send_delay = self.strip.send_delay;
         let mut eff_send_reverb = self.strip.send_reverb;
-        let mut macro_dirty = false;
+        let mut param_dirty = false;
         let mut strip_dirty = false;
 
         // 3. Apply LFO modulations.
@@ -755,9 +755,9 @@ where
             }
             let v = lfo.value() * lfo.depth();
             match lfo.dest() {
-                ModDest::Macro(i) if i < N => {
-                    eff_macros[i] = (eff_macros[i] + v).clamp(0.0, 1.0);
-                    macro_dirty = true;
+                ModDest::Param(i) if i < N => {
+                    eff_params[i] = (eff_params[i] + v).clamp(0.0, 1.0);
+                    param_dirty = true;
                 }
                 ModDest::FilterCutoff => {
                     eff_cutoff = (eff_cutoff * (1.0 + v * 3.0)).clamp(1.0, 20_000.0);
@@ -805,9 +805,9 @@ where
             }
             let v = vel * vm.depth;
             match vm.dest {
-                ModDest::Macro(i) if i < N => {
-                    eff_macros[i] = (eff_macros[i] + v).clamp(0.0, 1.0);
-                    macro_dirty = true;
+                ModDest::Param(i) if i < N => {
+                    eff_params[i] = (eff_params[i] + v).clamp(0.0, 1.0);
+                    param_dirty = true;
                 }
                 ModDest::FilterCutoff => {
                     eff_cutoff = (eff_cutoff * (1.0 + v * 3.0)).clamp(1.0, 20_000.0);
@@ -844,12 +844,12 @@ where
         }
 
         // 5. Push effective values to the DSP.
-        if macro_dirty {
-            self.slot.set_macros(&eff_macros);
-            // Sends are track-routed from the macro array, so modulating
+        if param_dirty {
+            self.slot.set_params(&eff_params);
+            // Sends are track-routed from the param array, so modulating
             // SEND.DLY / SEND.RVB moves the aux levels too.
-            eff_send_delay = eff_macros[SLOT_SEND_DELAY];
-            eff_send_reverb = eff_macros[SLOT_SEND_REVERB];
+            eff_send_delay = eff_params[SLOT_SEND_DELAY];
+            eff_send_reverb = eff_params[SLOT_SEND_REVERB];
         }
         if strip_dirty {
             self.filter.recalc(eff_cutoff, eff_reso, SAMPLE_RATE);
@@ -1014,19 +1014,19 @@ where
     }
 }
 
-/// One-pole coefficient for CC macro smoothing, block rate.
+/// One-pole coefficient for CC param smoothing, block rate.
 ///
 /// Time constant 7.5 ms (mid-range of the 5–10 ms design guidance), block
 /// rate 1500 Hz (SAMPLE_RATE / BLOCK). k = 1 − exp(−1 / (0.0075·1500)).
-const MACRO_SMOOTH_K: f32 = 0.0851;
+const PARAM_SMOOTH_K: f32 = 0.0851;
 
-/// Convergence threshold for CC macro smoothing. A pending macro snaps to
+/// Convergence threshold for CC param smoothing. A pending param snaps to
 /// its target once the residual is below this; ~0.01% of full scale is
 /// comfortably inaudible.
-const MACRO_SMOOTH_EPS: f32 = 1.0e-4;
+const PARAM_SMOOTH_EPS: f32 = 1.0e-4;
 
-/// Apply one LFO's macro slots: rate (slow/fast split), depth, destination.
-fn apply_one_lfo_macro(lfo: &mut Lfo, rate_v: f32, depth_v: f32, dest_v: f32) {
+/// Apply one LFO's param slots: rate (slow/fast split), depth, destination.
+fn apply_one_lfo_param(lfo: &mut Lfo, rate_v: f32, depth_v: f32, dest_v: f32) {
     let (mode, norm) = if rate_v < 0.5 {
         (crate::dsp::LfoRateMode::Slow, rate_v * 2.0)
     } else {
@@ -1038,7 +1038,7 @@ fn apply_one_lfo_macro(lfo: &mut Lfo, rate_v: f32, depth_v: f32, dest_v: f32) {
         lfo.wave(),
         lfo.mode(),
         depth_v,
-        ModDest::from_macro(dest_v),
+        ModDest::from_param(dest_v),
         lfo.start_phase(),
     );
 }

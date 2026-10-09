@@ -14,7 +14,7 @@
 //! Coefficients are split across two update rates, matching how
 //! [`crate::dsp::Svf`] is shaped:
 //!
-//! - [`set_q`](BridgedT::set_q) at control rate (machine `set_macros`,
+//! - [`set_q`](BridgedT::set_q) at control rate (machine `set_params`,
 //!   LFO/CC push, trigger) — does the divide and stores the Q-dependent
 //!   coefficient family: `alpha`, `a0_inv`, `b0`, `a2`. The caller passes
 //!   an `anchor_hz` (typically the resonator's settled pitch) so `alpha`'s

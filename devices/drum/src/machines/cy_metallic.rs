@@ -9,7 +9,7 @@
 //! we do the same. Two `sin_turns` lookups × one multiply = the metallic
 //! core. Noise + HPF = the transient.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -31,7 +31,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, fast, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
+    NUM_PARAMS, SLOT_FILT_0, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_5, SLOT_MACH_6,
 };
 use crate::SAMPLE_RATE;
 
@@ -44,14 +44,14 @@ pub struct CyMetallic {
     noise: Noise,
     noise_hp: OnePoleHp,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     level: f32,
 }
 
 impl CyMetallic {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             osc_a: SineOsc::new(),
             osc_b: SineOsc::new(),
@@ -62,18 +62,18 @@ impl CyMetallic {
             freq_scale: 1.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let osc_a_hz = 200.0 + 1000.0 * macros[SLOT_MACH_0]; // TUNE 200..1200 Hz
-        let ratio = 1.3 + 1.7 * macros[SLOT_MACH_1]; // TONE 1.3..3.0
-        let transient_decay_s = 0.005 + 0.095 * macros[SLOT_MACH_6]; // TDEC 5..100 ms
-        let main_decay_s = 0.1 + 1.9 * macros[SLOT_MACH_5]; // DEC 100..2000 ms
-        let noise_hp_hz = 1000.0 + 17000.0 * macros[SLOT_FILT_0]; // NCOL 1..18 kHz
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let osc_a_hz = 200.0 + 1000.0 * params[SLOT_MACH_0]; // TUNE 200..1200 Hz
+        let ratio = 1.3 + 1.7 * params[SLOT_MACH_1]; // TONE 1.3..3.0
+        let transient_decay_s = 0.005 + 0.095 * params[SLOT_MACH_6]; // TDEC 5..100 ms
+        let main_decay_s = 0.1 + 1.9 * params[SLOT_MACH_5]; // DEC 100..2000 ms
+        let noise_hp_hz = 1000.0 + 17000.0 * params[SLOT_FILT_0]; // NCOL 1..18 kHz
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.osc_a.set_freq(osc_a_hz * self.freq_scale);
         self.osc_b.set_freq(osc_a_hz * ratio * self.freq_scale);
@@ -85,7 +85,7 @@ impl CyMetallic {
         self.level = level;
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both oscillators, preserving the ring-modulation ratio (the
     /// metallic character). The noise transient is pitchless and untouched.
@@ -162,16 +162,16 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::CyMetallic;
-        let macros = id.default_macros();
-        let mut s = CyMetallic::new(&macros);
+        let params = id.default_params();
+        let mut s = CyMetallic::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
     }
 
     #[test]
     fn produces_sound() {
         let id = MachineId::CyMetallic;
-        let macros = id.default_macros();
-        let mut s = CyMetallic::new(&macros);
+        let params = id.default_params();
+        let mut s = CyMetallic::new(&params);
         s.trigger(1.0);
         assert!(peak_over(&mut s, 2400) > 0.05, "cymbal too quiet");
     }
@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::CyMetallic;
-        let macros = id.default_macros();
-        let mut s = CyMetallic::new(&macros);
+        let params = id.default_params();
+        let mut s = CyMetallic::new(&params);
         s.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             s.tick();
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn output_is_bounded() {
         let id = MachineId::CyMetallic;
-        let macros = id.default_macros();
-        let mut s = CyMetallic::new(&macros);
+        let params = id.default_params();
+        let mut s = CyMetallic::new(&params);
         for _ in 0..100 {
             s.trigger(1.0);
             for _ in 0..1024 {

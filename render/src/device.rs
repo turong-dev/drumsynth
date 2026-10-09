@@ -142,7 +142,7 @@ where
         }
     );
     // Taken from the engine, not written out: the two devices differ (8 drum
-    // tracks with 8 macros vs 6 mi-drum tracks with 32), and a banner that
+    // tracks with 8 params vs 6 mi-drum tracks with 32), and a banner that
     // names the wrong channel count sends people tuning the wrong track.
     println!(
         "one channel per track: MIDI channel N (0..{}) drives track N",
@@ -150,7 +150,7 @@ where
     );
     println!("notes are chromatic — any note plays that track, middle C (60) = default pitch, 1 semitone per note step");
     println!(
-        "CC {}..{} on channel N sets track N's macros ({} per track); CC {} = master gain (any channel)",
+        "CC {}..{} on channel N sets track N's params ({} per track); CC {} = master gain (any channel)",
         CC_TRACK_BASE,
         CC_TRACK_BASE as usize + N - 1,
         N,

@@ -68,7 +68,7 @@ pub(crate) enum Command {
     /// Render the Warps drive sweep: one held note per drive setting, from the
     /// clean bypass to full destruction.
     ///
-    /// This is the listenable version of `WARPS_DRIVE_INFO`. Warps' own drive
+    /// This is the listenable version of `SHAPER_DRIVE_INFO`. Warps' own drive
     /// knob is `0.5·drive` blended towards `24·drive⁵`, so its top half covers
     /// 48× of gain and `drive = 0` is silence rather than clean — neither is
     /// visible in a number, and both are the difference between a kit that
@@ -114,10 +114,10 @@ pub(crate) enum Command {
         #[arg(short, long, default_value_t = 6.0)]
         seconds: f32,
     },
-    /// Render one file per value of a swept macro knob.
+    /// Render one file per value of a swept param knob.
     ///
     /// `<machine>` is one of `bd-classic`, `sd-natural`, `hat-classic`.
-    /// `<macro>` is the macro's name uppercased (`TUNE`, `SWEEP`, `DEC`, ...).
+    /// `<param>` is the param's name uppercased (`TUNE`, `SWEEP`, `DEC`, ...).
     ///
     /// Each step logs its integrated RMS in dBFS, so you can see how a knob
     /// changes loudness as well as sound — the Phase 10 tuning workflow.
@@ -127,9 +127,9 @@ pub(crate) enum Command {
         /// Machine to sweep a knob of.
         #[arg(value_enum, default_value = "bd-classic")]
         machine: MachineArg,
-        /// Macro knob to sweep, by name (case-insensitive).
-        #[arg(value_name = "macro", default_value = "DEC")]
-        macro_name: String,
+        /// Param knob to sweep, by name (case-insensitive).
+        #[arg(value_name = "param", default_value = "DEC")]
+        param_name: String,
         /// Lowest value.
         #[arg(long, default_value_t = 0.0)]
         from: f32,
@@ -146,25 +146,25 @@ pub(crate) enum Command {
         #[arg(long)]
         lufs: bool,
     },
-    /// Sweep a macro, measure each step, and derive its loudness trim.
+    /// Sweep a param, measure each step, and derive its loudness trim.
     ///
     /// Prints a per-step table of RMS (dBFS) and the inverse gain that would
     /// flatten loudness across the travel, plus a paste-ready Rust `const`
-    /// array you can drop into the machine's `set_macros` to compensate.
-    /// The reference is the step nearest the macro's *default* value: the
+    /// array you can drop into the machine's `set_params` to compensate.
+    /// The reference is the step nearest the param's *default* value: the
     /// factory sound stays exactly as-is (gain 1.0), louder steps are
     /// attenuated safely, and quieter steps report a boost gain so you can
     /// see where compensation would push toward clipping.
     ///
-    /// This is the automated half of "macros are loudness-compensated along
+    /// This is the automated half of "params are loudness-compensated along
     /// their travel": the tool derives the numbers, you paste them in.
     Trim {
         /// Machine to sweep a knob of.
         #[arg(value_enum)]
         machine: MachineArg,
-        /// Macro knob to trim, by name (case-insensitive).
-        #[arg(value_name = "macro")]
-        macro_name: String,
+        /// Param knob to trim, by name (case-insensitive).
+        #[arg(value_name = "param")]
+        param_name: String,
         /// Lowest value.
         #[arg(long, default_value_t = 0.0)]
         from: f32,
@@ -183,7 +183,7 @@ pub(crate) enum Command {
     },
     /// Sweep every knob on every machine and check monotonicity.
     ///
-    /// The design rule is "macros are tuned paths, not renamed params — no
+    /// The design rule is "params are tuned paths, not renamed params — no
     /// dead zones, monotonic, loudness-compensated". This is the automated
     /// form of that: for each machine × voice knob it sweeps 0..1, measures
     /// the hit's integrated RMS and tail length at each step, and flags
@@ -205,14 +205,14 @@ pub(crate) enum Command {
         #[arg(long, num_args = 2)]
         dump: Vec<String>,
     },
-    /// Render a single one-shot of the given machine with custom macros.
+    /// Render a single one-shot of the given machine with custom params.
     Machine {
         /// Machine to render.
         #[arg(value_enum)]
         machine: MachineArg,
-        /// Override macros, in the form `TUNE=0.5 DEC=0.2 ...`.
-        #[arg(long = "macro", value_name = "NAME=VALUE", num_args = 1)]
-        macros: Vec<String>,
+        /// Override params, in the form `TUNE=0.5 DEC=0.2 ...`.
+        #[arg(long = "param", value_name = "NAME=VALUE", num_args = 1)]
+        params: Vec<String>,
         /// Output WAV path.
         #[arg(short, long, default_value = "out.wav")]
         output: String,
@@ -232,7 +232,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 1.5)]
         per_machine: f32,
     },
-    /// Print a cheat-sheet of every macro slot, split into one table for the
+    /// Print a cheat-sheet of every param slot, split into one table for the
     /// common (track-routed) parameters and one table per machine for the
     /// machine-internal parameters. Generated from `MACHINE_INFO` in the
     /// engine, so it can't drift from the code.

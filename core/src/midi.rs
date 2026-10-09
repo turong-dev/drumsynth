@@ -7,18 +7,18 @@
 //!
 //! [`handle_midi`], [`apply_cc`] and [`schedule_midi`] are generic over
 //! [`DeviceEngine`](crate::engine::DeviceEngine) so every device interprets
-//! MIDI bytes the same way. Device-specific routing (for example, which macro
-//! slot swaps the machine) is handled inside the engine's `set_macro_target`;
-//! the router itself only knows the flat macro index and the track count.
+//! MIDI bytes the same way. Device-specific routing (for example, which param
+//! slot swaps the machine) is handled inside the engine's `set_param_target`;
+//! the router itself only knows the flat param index and the track count.
 
 use crate::engine::DeviceEngine;
 
-/// MIDI note that plays a track at its macro-configured pitch. Middle C.
+/// MIDI note that plays a track at its param-configured pitch. Middle C.
 /// Every semitone away transposes the voice by that many semitones.
 pub const CHROMATIC_REFERENCE_NOTE: u8 = 60;
 
-/// First CC number reserved for track macros. On channel `N`, CC
-/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_MACROS` sets track `N`'s macros.
+/// First CC number reserved for track params. On channel `N`, CC
+/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_PARAMS` sets track `N`'s params.
 pub const CC_TRACK_BASE: u8 = 20;
 
 /// CC for the master gain. Following MIDI convention. Global on any channel.
@@ -30,7 +30,7 @@ pub const CC_MASTER_GAIN: u8 = 7;
 /// picks the track, the note picks the pitch. `NoteOff` routes through
 /// [`DeviceEngine::release_channel`], the same channel-to-track mapping, so a
 /// voice that sustains ends when the key comes up.
-/// `ControlChange` reaches that channel's track-macro block or the master
+/// `ControlChange` reaches that channel's track-param block or the master
 /// gain. `Panic` silences everything.
 pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: MidiEvent) {
     match event {
@@ -55,11 +55,11 @@ pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: Mi
     }
 }
 
-/// Map CC numbers onto engine parameters — channel-scoped track macros +
+/// Map CC numbers onto engine parameters — channel-scoped track params +
 /// master.
 ///
 /// A CC on channel `N` edits track `N`, matching the note routing. `CC 7`
-/// stays global. Macros are set through the track's `set_macro_target` so
+/// stays global. Params are set through the track's `set_param_target` so
 /// the value ramps to its target at block rate inside the audio callback's
 /// control pass.
 pub fn apply_cc<E: DeviceEngine<N>, const N: usize>(
@@ -74,11 +74,11 @@ pub fn apply_cc<E: DeviceEngine<N>, const N: usize>(
     }
 
     if controller >= CC_TRACK_BASE {
-        let macro_idx = (controller - CC_TRACK_BASE) as usize;
+        let param_idx = (controller - CC_TRACK_BASE) as usize;
         let track = channel as usize;
         let n_tracks = engine.tracks().len();
-        if track < n_tracks && macro_idx < N {
-            engine.tracks_mut()[track].set_macro_target(macro_idx, value);
+        if track < n_tracks && param_idx < N {
+            engine.tracks_mut()[track].set_param_target(param_idx, value);
         }
     }
 }

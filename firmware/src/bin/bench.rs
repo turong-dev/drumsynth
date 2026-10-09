@@ -42,9 +42,9 @@
 //! fits while the peak does not is a click you will hear.
 //!
 //! `8+FX+CC` is the Phase 8-M regate: the first four scenarios are
-//! steady-state, with macros parked at their values so `control()` takes its
-//! single-branch early return every block. Real MIDI moves macros, and every
-//! moving macro costs one coefficient recompute per block (the block-rate CC
+//! steady-state, with params parked at their values so `control()` takes its
+//! single-branch early return every block. Real MIDI moves params, and every
+//! moving param costs one coefficient recompute per block (the block-rate CC
 //! smoother re-arms itself on every message). The regate drives `apply_cc` —
 //! the exact main-loop API — every block on top of the full playing + FX
 //! case, so the number it reports is what the Deluge actually asks for.
@@ -225,7 +225,7 @@ fn main() -> ! {
 
         // --- Phase 8-M regate: playing + FX + CC automation ---
         // Everything the groove box does at once: all 8 tracks retriggered,
-        // sends routed, and a filter-macro automation lane moved every block
+        // sends routed, and a filter-param automation lane moved every block
         // through `apply_cc`. This is the case the "must fit in the remaining
         // ~32%" gate is really about (see the first four scenarios, which are
         // steady-state and never exercise the CC recompute path).
@@ -365,7 +365,7 @@ fn measure(
 /// Set a track's delay/reverb send levels, refreshing the engine's
 /// `eff_send_*` caches via `set_strip`. Writing `strip.send_*` directly is
 /// not enough — `process_dry_wet` reads the cached `eff_send_*` values, which
-/// are only re-derived by `set_strip` (or the macro path). Every scenario
+/// are only re-derived by `set_strip` (or the param path). Every scenario
 /// uses this so its send state is explicit and self-contained; without it a
 /// prior scenario's sends leak into every later measurement.
 fn set_send(engine: &mut DrumEngine, track: usize, delay: f32, reverb: f32) {
@@ -428,16 +428,16 @@ fn measure_with_fx(
 
 /// The Phase 8-M regate: playing + FX + CC automation, all at once.
 ///
-/// The steady-state scenarios above park macros at their values, so
+/// The steady-state scenarios above park params at their values, so
 /// `control()` early-returns every block and the CC recompute path is never
-/// exercised. Real MIDI moves macros, and every moving macro costs one
-/// coefficient recompute per block — `set_macro_target` re-arms the
+/// exercised. Real MIDI moves params, and every moving param costs one
+/// coefficient recompute per block — `set_param_target` re-arms the
 /// block-rate smoother on each message, so a lane that is driven every block
 /// recomputes every block, forever.
 ///
 /// This drives `apply_cc` — the exact main-loop API, routing through the
 /// shared `midi` module just like the firmware and the host harness — on
-/// track 0's filter-cutoff macro while all 8 tracks retrigger and the sends
+/// track 0's filter-cutoff param while all 8 tracks retrigger and the sends
 /// stay routed, the composite case the "remaining ~32%" gate in the plan is
 /// really about.
 fn measure_with_cc_automation(
@@ -456,7 +456,7 @@ fn measure_with_cc_automation(
 
     engine.process(left, right);
 
-    // One filter-cutoff automation lane (macro 12 → CC 32 on the track's
+    // One filter-cutoff automation lane (param 12 → CC 32 on the track's
     // channel). The value sweeps 0.1..0.9 in 1/127 steps — CC resolution,
     // bouncing at the ends — so the smoother is re-armed and mid-ramp on
     // every block, one recompute per block, exactly what a knob being spun
@@ -522,13 +522,13 @@ fn measure_with_bdva(
     // — the next loop iteration expects the default kit.
     let original = engine.tracks[0].id();
 
-    // Swap to BdVa and configure the worst case. Macros applied via
-    // `set_macro` so the strip and the engine both see the change.
+    // Swap to BdVa and configure the worst case. Params applied via
+    // `set_param` so the strip and the engine both see the change.
     engine.tracks[0].load_machine(MachineId::BdVa);
-    engine.tracks[0].set_macro(SLOT_MACH_1, 1.0); // 0..120 Hz pitch deflection
-    engine.tracks[0].set_macro(SLOT_MACH_2, 1.0); // 55 ms (sustains the sweep)
-    engine.tracks[0].set_macro(SLOT_MACH_5, 1.0); // 1500 ms amp decay
-    engine.tracks[0].set_macro(SLOT_FILT_1, 1.0); // Q = 10 (max resonance)
+    engine.tracks[0].set_param(SLOT_MACH_1, 1.0); // 0..120 Hz pitch deflection
+    engine.tracks[0].set_param(SLOT_MACH_2, 1.0); // 55 ms (sustains the sweep)
+    engine.tracks[0].set_param(SLOT_MACH_5, 1.0); // 1500 ms amp decay
+    engine.tracks[0].set_param(SLOT_FILT_1, 1.0); // Q = 10 (max resonance)
 
     let mut total: u64 = 0;
     let mut peak: u32 = 0;
@@ -597,11 +597,11 @@ fn measure_with_sweepfx_sustained(
     // (MODE=1), start cutoff at the top of its range (START=1, 8 kHz),
     // and a long gesture (DEC=1, ≈6 s) so it never idles mid-run.
     engine.tracks[0].load_machine(MachineId::SweepFx);
-    engine.tracks[0].set_macro(SLOT_MACH_1, 1.0); // DEPTH 4 oct
-    engine.tracks[0].set_macro(SLOT_FILT_1, 1.0); // RESO Q≈8
-    engine.tracks[0].set_macro(SLOT_MACH_7, 1.0); // MODE HP
-    engine.tracks[0].set_macro(SLOT_MACH_2, 1.0); // START 8 kHz
-    engine.tracks[0].set_macro(SLOT_MACH_5, 1.0); // DEC ≈6 s gesture
+    engine.tracks[0].set_param(SLOT_MACH_1, 1.0); // DEPTH 4 oct
+    engine.tracks[0].set_param(SLOT_FILT_1, 1.0); // RESO Q≈8
+    engine.tracks[0].set_param(SLOT_MACH_7, 1.0); // MODE HP
+    engine.tracks[0].set_param(SLOT_MACH_2, 1.0); // START 8 kHz
+    engine.tracks[0].set_param(SLOT_MACH_5, 1.0); // DEC ≈6 s gesture
 
     // Punch in the same sends as the other FX scenarios: snare (1) →
     // reverb, clap (4) → delay.

@@ -1,4 +1,4 @@
-use drum_engine::machines::{MachineId, MACROS_PER_BANK, NUM_MACROS};
+use drum_engine::machines::{MachineId, NUM_PARAMS, PARAMS_PER_BANK};
 
 /// One row in the cheat-sheet table.
 pub(crate) struct CheatRow {
@@ -58,15 +58,15 @@ pub(crate) fn generate_cheatsheet(format: &str) -> String {
 
     // Classify each slot as track-routed (same name on every machine, not
     // RESV) or machine-internal.
-    let mut is_track = [false; NUM_MACROS];
+    let mut is_track = [false; NUM_PARAMS];
     for (slot, track) in is_track.iter_mut().enumerate() {
-        let first = machines[0].macros()[slot].name;
-        if first != "RESV" && machines.iter().all(|m| m.macros()[slot].name == first) {
+        let first = machines[0].params()[slot].name;
+        if first != "RESV" && machines.iter().all(|m| m.params()[slot].name == first) {
             *track = true;
         }
     }
 
-    let bank_name = |slot: usize| match slot / MACROS_PER_BANK {
+    let bank_name = |slot: usize| match slot / PARAMS_PER_BANK {
         0 => "MACH",
         1 => "FILT",
         2 => "TRACK",
@@ -79,7 +79,7 @@ pub(crate) fn generate_cheatsheet(format: &str) -> String {
             .iter()
             .map(|&slot| {
                 let m = machine.unwrap_or(machines[0]);
-                let info = m.macros()[slot];
+                let info = m.params()[slot];
                 CheatRow {
                     slot,
                     cc: 20 + slot,
@@ -93,8 +93,8 @@ pub(crate) fn generate_cheatsheet(format: &str) -> String {
             .collect()
     };
 
-    let track_slots: Vec<usize> = (0..NUM_MACROS).filter(|&s| is_track[s]).collect();
-    let machine_slots: Vec<usize> = (0..NUM_MACROS).filter(|&s| !is_track[s]).collect();
+    let track_slots: Vec<usize> = (0..NUM_PARAMS).filter(|&s| is_track[s]).collect();
+    let machine_slots: Vec<usize> = (0..NUM_PARAMS).filter(|&s| !is_track[s]).collect();
 
     let common_rows = rows_for(None, &track_slots);
 
@@ -114,7 +114,7 @@ fn generate_cheatsheet_markdown(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str("# Drum Synth Macro Cheat-Sheet\n\n");
+    out.push_str("# Drum Synth Param Cheat-Sheet\n\n");
     out.push_str("Generated from `MACHINE_INFO` in the engine.\n\n");
 
     // Common table
@@ -183,14 +183,14 @@ fn generate_cheatsheet_html(
     out.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
     out.push_str("<meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    out.push_str("<title>Drum Synth Macro Cheat-Sheet</title>\n");
+    out.push_str("<title>Drum Synth Param Cheat-Sheet</title>\n");
     out.push_str("<style>\n");
     out.push_str(CHEATSHEET_CSS);
     out.push_str("</style>\n");
     out.push_str("</head>\n<body>\n");
 
     out.push_str("<header>\n");
-    out.push_str("<h1>Drum Synth Macro Cheat-Sheet</h1>\n");
+    out.push_str("<h1>Drum Synth Param Cheat-Sheet</h1>\n");
     out.push_str("<p>Generated from <code>MACHINE_INFO</code> in the engine.</p>\n");
     out.push_str("</header>\n\n");
 

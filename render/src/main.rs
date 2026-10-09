@@ -20,8 +20,8 @@
 //! one than turning a knob in real time.
 //!
 //! Performance counters are taken against a generic 8-track kit on track 0:
-//! since machines are normalised over the same flat 32-macro map, you sweep
-//! any knob of any machine the same way — `<machine> <macro-name> --from
+//! since machines are normalised over the same flat 32-param map, you sweep
+//! any knob of any machine the same way — `<machine> <param-name> --from
 //! --to --steps`.
 
 use clap::Parser;
@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Phase 14.2 replaced the spike stage selector with the Warps
             // algorithm on SLOT_FILT_0. Keep the CLI argument name but map it
             // to the new chain.
-            let warps_algorithm = match stage.as_str() {
+            let shaper_algorithm = match stage.as_str() {
                 "none" => 0.0,
                 "lpg" => 0.25,
                 "overdrive" => 0.5,
@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into())
                 }
             };
-            let (samples, marks) = render_mi_drum_marked(warps_algorithm);
+            let (samples, marks) = render_mi_drum_marked(shaper_algorithm);
             write_wav(&output, &samples)?;
             let seconds = samples.len() as f32 / 2.0 / SAMPLE_RATE;
             println!("wrote {output} ({seconds:.2}s)");
@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Sweep {
             machine,
-            macro_name,
+            param_name,
             from,
             to,
             steps,
@@ -194,8 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let id = machine.id();
             let (idx, _) = id
-                .macro_by_name(&macro_name)
-                .ok_or_else(|| format!("machine {id:?} has no macro named '{macro_name}'"))?;
+                .param_by_name(&param_name)
+                .ok_or_else(|| format!("machine {id:?} has no param named '{param_name}'"))?;
             check_finite("--from", from)?;
             check_finite("--to", to)?;
             std::fs::create_dir_all(&output_dir)?;
@@ -206,11 +206,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let value = from + (to - from) * t;
 
                 // Use track 0 to host the sweep, load that track with the
-                // chosen machine, and set the chosen macro. Everything else
+                // chosen machine, and set the chosen param. Everything else
                 // stays at kit defaults.
                 let mut engine = DrumEngine::new();
                 engine.tracks[0].load_machine(id);
-                engine.tracks[0].set_macro(idx, value);
+                engine.tracks[0].set_param(idx, value);
 
                 let samples = render_one_shot(&mut engine, 0, 2.0);
                 let path = format!("{output_dir}/{}_{:02}_{value:.4}.wav", id.name(), i);
@@ -229,13 +229,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "\n{steps} files in {output_dir}/ — flip between them to compare \
                  (swept {} {} from {from:.4} to {to:.4})",
                 id.name(),
-                macro_name,
+                param_name,
             );
         }
 
         Command::Trim {
             machine,
-            macro_name,
+            param_name,
             from,
             to,
             steps,
@@ -244,8 +244,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let id = machine.id();
             let (idx, info) = id
-                .macro_by_name(&macro_name)
-                .ok_or_else(|| format!("machine {id:?} has no macro named '{macro_name}'"))?;
+                .param_by_name(&param_name)
+                .ok_or_else(|| format!("machine {id:?} has no param named '{param_name}'"))?;
             check_finite("--from", from)?;
             check_finite("--to", to)?;
             let steps = steps.max(2);
@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut engine = DrumEngine::new();
                 engine.tracks[0].load_machine(id);
-                engine.tracks[0].set_macro(idx, value);
+                engine.tracks[0].set_param(idx, value);
 
                 let samples = render_one_shot(&mut engine, 0, seconds);
                 let m = measure::measure_buffer(&samples, lufs);
@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 levels.push(level);
             }
 
-            // The reference is the step nearest the macro's default value —
+            // The reference is the step nearest the param's default value —
             // the factory sound keeps gain 1.0 and the rest of the travel is
             // compensated around it. Steps louder than the reference are
             // attenuated (safe); the table shows the boost needed elsewhere.
@@ -288,7 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "{} {} loudness trim ({} steps)",
                 id.name(),
-                macro_name,
+                param_name,
                 steps
             );
             println!(
@@ -314,8 +314,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
-            // Paste-ready Rust for the machine's set_macros: an array of
-            // linear gains indexed by quantised macro value (step 0 = `from`,
+            // Paste-ready Rust for the machine's set_params: an array of
+            // linear gains indexed by quantised param value (step 0 = `from`,
             // last = `to`).
             println!(
                 "\npaste-ready `const` for {} ({} linear gains):",
@@ -325,13 +325,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "// {}_{} loudness trim ({}): reference {reference:.2} {unit}",
                 id.name().to_uppercase().replace('-', "_"),
-                macro_name.to_uppercase(),
+                param_name.to_uppercase(),
                 info.name,
             );
-            // Macro names can carry punctuation (`SEND.DLY`), which is not
+            // Param names can carry punctuation (`SEND.DLY`), which is not
             // legal in an identifier — flatten it so the block really is
             // paste-ready.
-            let const_base = macro_name
+            let const_base = param_name
                 .to_uppercase()
                 .replace(|c: char| !(c.is_ascii_alphanumeric() || c == '_'), "_");
             print!("const {const_base}_TRIM: [f32; {steps}] = [");
@@ -354,13 +354,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The sweep divides by `steps - 1`; enforce the help text's
             // ">= 2" floor the same way Sweep and Trim do.
             let steps = steps.max(2);
-            if let [machine, macro_name] = &dump[..] {
+            if let [machine, param_name] = &dump[..] {
                 let arg = MachineArg::from_name(machine)
                     .ok_or_else(|| format!("unknown machine '{machine}'"))?;
                 let id = arg.id();
                 let (idx, _) = id
-                    .macro_by_name(macro_name)
-                    .ok_or_else(|| format!("machine {id:?} has no macro '{macro_name}'"))?;
+                    .param_by_name(param_name)
+                    .ok_or_else(|| format!("machine {id:?} has no param '{param_name}'"))?;
                 verify::dump_knob(id, idx, steps);
                 return Ok(());
             }
@@ -382,15 +382,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Machine {
             machine,
-            macros,
+            params,
             output,
             seconds,
         } => {
             let id = machine.id();
             let mut engine = DrumEngine::new();
             engine.tracks[0].load_machine(id);
-            for spec in macros {
-                apply_macro_arg(&mut engine, &spec)?;
+            for spec in params {
+                apply_param_arg(&mut engine, &spec)?;
             }
             let samples = render_one_shot(&mut engine, 0, seconds);
             write_wav(&output, &samples)?;
@@ -497,19 +497,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Parse `NAME=VALUE` and apply to track 0 of the engine.
-fn apply_macro_arg(engine: &mut DrumEngine, spec: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_param_arg(engine: &mut DrumEngine, spec: &str) -> Result<(), Box<dyn std::error::Error>> {
     let (name, val) = spec
         .split_once('=')
-        .ok_or_else(|| format!("bad --macro '{spec}', expected NAME=VALUE"))?;
+        .ok_or_else(|| format!("bad --param '{spec}', expected NAME=VALUE"))?;
     let id = engine.tracks[0].id();
     let (idx, _) = id
-        .macro_by_name(name)
-        .ok_or_else(|| format!("machine {id:?} has no macro named '{name}'"))?;
+        .param_by_name(name)
+        .ok_or_else(|| format!("machine {id:?} has no param named '{name}'"))?;
     let value: f32 = val.parse()?;
     if !value.is_finite() {
-        return Err(format!("--macro {name} must be a finite number, got {value}").into());
+        return Err(format!("--param {name} must be a finite number, got {value}").into());
     }
-    engine.tracks[0].set_macro(idx, value);
+    engine.tracks[0].set_param(idx, value);
     Ok(())
 }
 

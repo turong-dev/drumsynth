@@ -38,7 +38,7 @@
 //! [`Svf::recalc`] — the Option B split the bench's `8+FX+SWFX` row
 //! gated (83.4% on the full `recalc`, over the 70% ceiling).
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -69,7 +69,7 @@
 
 use crate::dsp::{fast, AhdEnv, HoldMode, Noise, Svf, SvfMode};
 use crate::machines::{
-    NUM_MACROS, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5,
+    NUM_PARAMS, SLOT_FILT_1, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5,
     SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
@@ -83,7 +83,7 @@ const GATED_MAX_HOLD_S: f32 = 10.0;
 /// ramp — it should start and build.
 const ATTACK_S: f32 = 0.02;
 
-/// SVF mode selected by the MODE macro.
+/// SVF mode selected by the MODE param.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SweepMode {
     Lp,
@@ -92,10 +92,10 @@ enum SweepMode {
 }
 
 impl SweepMode {
-    /// Quantise a 0..1 macro value to one of three modes in equal
-    /// thirds. The default macro (0.0) lands in the first band →
+    /// Quantise a 0..1 param value to one of three modes in equal
+    /// thirds. The default param (0.0) lands in the first band →
     /// [`Bp`], the classic riser shape.
-    const fn from_macro(v: f32) -> Self {
+    const fn from_param(v: f32) -> Self {
         if v < 1.0 / 3.0 {
             Self::Bp
         } else if v < 2.0 / 3.0 {
@@ -129,12 +129,12 @@ pub struct SweepFx {
     lfo_phase: f32,
     /// LFO phase increment per sample = `rate / SAMPLE_RATE`.
     lfo_inc: f32,
-    /// SVF mode, set by the MODE macro.
+    /// SVF mode, set by the MODE param.
     mode: SweepMode,
-    /// SVF resonance (Q). Cached so `tick` never reads the macro.
+    /// SVF resonance (Q). Cached so `tick` never reads the param.
     q: f32,
     /// Highest cutoff the SVF can take at this Q before the Chamberlin
-    /// integrators go unstable (see `set_macros`). Cached per gesture —
+    /// integrators go unstable (see `set_params`). Cached per gesture —
     /// Q only changes at setup rate, so `tick` costs a single `min`.
     cutoff_max: f32,
     /// Per-machine output level, 0..1.
@@ -142,8 +142,8 @@ pub struct SweepFx {
 }
 
 impl SweepFx {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             filter: Svf::new(SvfMode::Bp),
             env: AhdEnv::new(),
@@ -157,20 +157,20 @@ impl SweepFx {
             cutoff_max: SAMPLE_RATE / 6.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let rate_hz = 0.1 + 4.9 * macros[SLOT_MACH_0]; // RATE 0.1..5 Hz
-        let depth_oct = 4.0 * macros[SLOT_MACH_1]; // DEPTH 0..4 oct
-        let start_hz = 80.0 + 7920.0 * macros[SLOT_MACH_2]; // START 80..8000 Hz
-        let q = 0.5 + 11.5 * macros[SLOT_FILT_1]; // RESO 0.5..12 Q (FILTER resonance slot)
-        let total_s = 0.05 + 0.55 * macros[SLOT_MACH_5]; // DEC 0.05..0.6 s
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let rate_hz = 0.1 + 4.9 * params[SLOT_MACH_0]; // RATE 0.1..5 Hz
+        let depth_oct = 4.0 * params[SLOT_MACH_1]; // DEPTH 0..4 oct
+        let start_hz = 80.0 + 7920.0 * params[SLOT_MACH_2]; // START 80..8000 Hz
+        let q = 0.5 + 11.5 * params[SLOT_FILT_1]; // RESO 0.5..12 Q (FILTER resonance slot)
+        let total_s = 0.05 + 0.55 * params[SLOT_MACH_5]; // DEC 0.05..0.6 s
         let release_s = total_s;
-        let mode = SweepMode::from_macro(macros[SLOT_MACH_7]); // MODE LP/BP/HP
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+        let mode = SweepMode::from_param(params[SLOT_MACH_7]); // MODE LP/BP/HP
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = start_hz;
         self.depth_oct = depth_oct;
@@ -185,7 +185,7 @@ impl SweepFx {
         // `fc < fs/π · asin((√(k²+4) − k)/2)`. For RESO=0 (Q=0.5, k=2)
         // the ceiling is ≈ 6.5 kHz; for RESO=1 (Q=12, k=1/12) it is
         // ≈ 19.4 kHz. Above it the integrators pump to NaN, which the
-        // earlier fixed 12 kHz clamp did not catch (the extreme-macros
+        // earlier fixed 12 kHz clamp did not catch (the extreme-params
         // test found it at RESO=0.1). Q is setup-rate, so the ceiling is
         // cached here and `tick` only pays a `min`.
         let k = (1.0 / q.max(0.5)).min(2.0);
@@ -208,7 +208,7 @@ impl SweepFx {
         self.env.set_params(ATTACK_S, 0.0, release_s);
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Noise-only machine — no pitch to transpose. This is a no-op per
     /// the Hat Classic precedent (`machines/mod.rs:1019`). Implemented
@@ -274,17 +274,17 @@ impl SweepFx {
         // Cutoff multiplier from LFO × depth-in-octaves, exp2 family.
         let lfo = self.tick_lfo();
         // Clamp the swept cutoff to the Q-dependent stability ceiling
-        // computed in `set_macros` (a single `min`; the ceiling varies
+        // computed in `set_params` (a single `min`; the ceiling varies
         // from ≈6.5 kHz at RESO=0 to ≈19.4 kHz at RESO=1). The lower
-        // bound of 80 Hz matches the START macro's floor. Above the
+        // bound of 80 Hz matches the START param's floor. Above the
         // ceiling the Chamberlin integrators go unstable and pump to
-        // NaN (see the extreme-macros test).
+        // NaN (see the extreme-params test).
         let cutoff =
             (self.start_hz * fast::exp2_approx(lfo * self.depth_oct)).clamp(80.0, self.cutoff_max);
 
         // The per-sample path only refreshes `c1` (the cutoff-dependent
         // integrator coefficient) via the sine table — `k` (damping from
-        // Q) is setup-rate and stays cached from `set_macros`. A full
+        // Q) is setup-rate and stays cached from `set_params`. A full
         // `Svf::recalc` here would pay `libm::sinf` (~1,200 cycles on the
         // M7) every sample; `set_cutoff` is one `sin_turns` lookup (~10),
         // the same split `BridgedT::set_hz` makes for the bridged-T.
@@ -294,7 +294,7 @@ impl SweepFx {
         let n = self.noise.tick();
         // Saturate before the level multiplier. A high-Q SVF with a
         // cutoff sweep can ring far past unity when noise pumps the
-        // resonance for seconds (the worst-case macros in the NaN
+        // resonance for seconds (the worst-case params in the NaN
         // test) — `soft_clip` keeps the per-sample output finite
         // without changing the audible character at normal levels,
         // the same disposition as `CyMetallic::tick`.
@@ -318,8 +318,8 @@ mod tests {
     #[test]
     fn silent_until_struck() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
         assert_eq!(peak_over(&mut s, 1000), 0.0);
         assert!(!s.is_active());
     }
@@ -327,9 +327,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut s = SweepFx::new(&macros);
+            let mut s = SweepFx::new(&params);
             s.trigger(vel);
             peak_over(&mut s, 4800)
         };
@@ -341,8 +341,8 @@ mod tests {
     #[test]
     fn decays_to_silence_after_release() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
         s.trigger(1.0);
         s.release();
         for _ in 0..(7.0 * SAMPLE_RATE) as usize {
@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn sustained_gesture_stays_active_past_one_second() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
         s.trigger(1.0);
         for _ in 0..(1.0 * SAMPLE_RATE) as usize {
             s.tick();
@@ -373,8 +373,8 @@ mod tests {
     #[test]
     fn note_off_ends_the_note_early() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
 
         s.trigger(1.0);
         for _ in 0..(2.0 * SAMPLE_RATE) as usize {
@@ -395,8 +395,8 @@ mod tests {
     #[test]
     fn watchdog_ends_a_note_that_is_never_released() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
         s.trigger(1.0);
         for _ in 0..((GATED_MAX_HOLD_S + 2.0) * SAMPLE_RATE) as usize {
             s.tick();
@@ -407,8 +407,8 @@ mod tests {
     #[test]
     fn stray_releases_are_inert() {
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut s = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut s = SweepFx::new(&params);
 
         s.release();
         assert!(!s.is_active());
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_macro_changes_cutoff_speed() {
+    fn rate_param_changes_cutoff_speed() {
         // RATE sets the sweep LFO speed, so it shows up as how fast the
         // *brightness* of the noise output moves. The per-window zero-crossing
         // rate is a good proxy for that: a bandpass whose centre is moving
@@ -439,16 +439,16 @@ mod tests {
         // sweep — and stopped discriminating once the machine became gated
         // and the amplitude sat flat at peak.
         let id = MachineId::SweepFx;
-        let mut slow = id.default_macros();
+        let mut slow = id.default_params();
         slow[SLOT_MACH_0] = 0.0; // RATE 0.1 Hz
         slow[SLOT_MACH_1] = 0.5; // 2 oct depth — audible sweep
-        let mut fast_macros = id.default_macros();
-        fast_macros[SLOT_MACH_0] = 1.0; // RATE 5 Hz
-        fast_macros[SLOT_MACH_1] = 0.5;
+        let mut fast_params = id.default_params();
+        fast_params[SLOT_MACH_0] = 1.0; // RATE 5 Hz
+        fast_params[SLOT_MACH_1] = 0.5;
 
         let win = 2400; // 50 ms
-        let crossings_per_window = |macros: &[f32; NUM_MACROS]| -> [u32; 8] {
-            let mut s = SweepFx::new(macros);
+        let crossings_per_window = |params: &[f32; NUM_PARAMS]| -> [u32; 8] {
+            let mut s = SweepFx::new(params);
             s.trigger(1.0);
             let mut out = [0u32; 8];
             for slot in out.iter_mut() {
@@ -478,10 +478,10 @@ mod tests {
         };
 
         let slow_spread = spread(crossings_per_window(&slow));
-        let fast_spread = spread(crossings_per_window(&fast_macros));
+        let fast_spread = spread(crossings_per_window(&fast_params));
         assert!(
             fast_spread > slow_spread,
-            "RATE macro should change sweep speed: slow={slow_spread}, fast={fast_spread}"
+            "RATE param should change sweep speed: slow={slow_spread}, fast={fast_spread}"
         );
     }
 
@@ -491,9 +491,9 @@ mod tests {
         // shape as Hat Classic. A retune followed by trigger produces
         // bit-identical output to a plain trigger.
         let id = MachineId::SweepFx;
-        let macros = id.default_macros();
-        let mut a = SweepFx::new(&macros);
-        let mut b = SweepFx::new(&macros);
+        let params = id.default_params();
+        let mut a = SweepFx::new(&params);
+        let mut b = SweepFx::new(&params);
         b.retune(7.0);
         a.trigger(1.0);
         b.trigger(1.0);
@@ -503,15 +503,15 @@ mod tests {
     }
 
     #[test]
-    fn extreme_macros_do_not_produce_nans() {
+    fn extreme_params_do_not_produce_nans() {
         let id = MachineId::SweepFx;
-        let base = id.default_macros();
+        let base = id.default_params();
         for &v in &[0.0f32, 1.0f32] {
-            let mut macros = base;
-            for m in macros.iter_mut() {
+            let mut params = base;
+            for m in params.iter_mut() {
                 *m = v;
             }
-            let mut s = SweepFx::new(&macros);
+            let mut s = SweepFx::new(&params);
             s.trigger(1.0);
             for _ in 0..(3.0 * SAMPLE_RATE) as usize {
                 let v = s.tick();
@@ -520,7 +520,7 @@ mod tests {
         }
     }
 
-    /// The all-macros 0.0 / 1.0 extremes above both land at RESO 0 or 1,
+    /// The all-params 0.0 / 1.0 extremes above both land at RESO 0 or 1,
     /// but the stability ceiling is *worst* in between: the Chamberlin
     /// SVF pole leaves the unit circle below 12 kHz for RESO ≈ 0.1
     /// (Q ≈ 1.25). Sweep RESO through its whole travel against a full
@@ -529,14 +529,14 @@ mod tests {
     #[test]
     fn every_reso_value_stays_stable_at_full_depth() {
         let id = MachineId::SweepFx;
-        let base = id.default_macros();
+        let base = id.default_params();
         for &reso in &[0.0f32, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.7, 1.0] {
-            let mut macros = base;
-            macros[SLOT_FILT_1] = reso;
-            macros[SLOT_MACH_2] = 1.0; // START 8 kHz
-            macros[SLOT_MACH_1] = 1.0; // DEPTH 4 oct
-            macros[SLOT_MACH_7] = 1.0; // HP — the highest output node
-            let mut s = SweepFx::new(&macros);
+            let mut params = base;
+            params[SLOT_FILT_1] = reso;
+            params[SLOT_MACH_2] = 1.0; // START 8 kHz
+            params[SLOT_MACH_1] = 1.0; // DEPTH 4 oct
+            params[SLOT_MACH_7] = 1.0; // HP — the highest output node
+            let mut s = SweepFx::new(&params);
             s.trigger(1.0);
             for _ in 0..(3.0 * SAMPLE_RATE) as usize {
                 let v = s.tick();

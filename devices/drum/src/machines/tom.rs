@@ -6,7 +6,7 @@
 //! layer that's noise-through-highpass rather than saturation. No drive —
 //! the body is clean, so the strip filter is where tone shaping lives.
 //!
-//! # Macros
+//! # Params
 //!
 //! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
 //! MIDI CC `20 + flat` on the track's channel:
@@ -28,7 +28,7 @@
 use crate::dsp::filter::cutoff_coeff;
 use crate::dsp::{decay_coeff, DecayEnv, Noise, OnePoleHp, SineOsc};
 use crate::machines::{
-    NUM_MACROS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
+    NUM_PARAMS, SLOT_LEVEL, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_5, SLOT_MACH_7,
 };
 use crate::SAMPLE_RATE;
 
@@ -44,15 +44,15 @@ pub struct Tom {
     end_hz: f32,
     sweep_range: f32,
     /// Semitone multiplier applied to every frequency. Set by [`retune`],
-    /// re-applied by `set_macros` so a later macro recompute keeps the note.
+    /// re-applied by `set_params` so a later param recompute keeps the note.
     freq_scale: f32,
     stick_amount: f32,
     level: f32,
 }
 
 impl Tom {
-    /// Build the machine with the given macro values applied.
-    pub fn new(macros: &[f32; NUM_MACROS]) -> Self {
+    /// Build the machine with the given param values applied.
+    pub fn new(params: &[f32; NUM_PARAMS]) -> Self {
         let mut m = Self {
             osc: SineOsc::new(),
             amp_env: DecayEnv::new(0.0),
@@ -67,18 +67,18 @@ impl Tom {
             stick_amount: 0.0,
             level: 0.0,
         };
-        m.set_macros(macros);
+        m.set_params(params);
         m
     }
 
-    /// Recompute coefficients from macros. Setup rate.
-    pub fn set_macros(&mut self, macros: &[f32; NUM_MACROS]) {
-        let end_hz = 45.0 + 175.0 * macros[SLOT_MACH_0]; // TUNE 45..220 Hz
-        let pitch_ratio = 1.0 + 4.0 * macros[SLOT_MACH_1]; // SWEEP 1×..5×
-        let pitch_decay_s = 0.02 + 0.18 * macros[SLOT_MACH_2]; // SWP_T 20..200 ms
-        let amp_decay_s = 0.1 + 0.8 * macros[SLOT_MACH_5]; // DEC 100..900 ms
-        let stick_amount = macros[SLOT_MACH_7]; // STICK 0..1
-        let level = macros[SLOT_LEVEL]; // LEVEL 0..1
+    /// Recompute coefficients from params. Setup rate.
+    pub fn set_params(&mut self, params: &[f32; NUM_PARAMS]) {
+        let end_hz = 45.0 + 175.0 * params[SLOT_MACH_0]; // TUNE 45..220 Hz
+        let pitch_ratio = 1.0 + 4.0 * params[SLOT_MACH_1]; // SWEEP 1×..5×
+        let pitch_decay_s = 0.02 + 0.18 * params[SLOT_MACH_2]; // SWP_T 20..200 ms
+        let amp_decay_s = 0.1 + 0.8 * params[SLOT_MACH_5]; // DEC 100..900 ms
+        let stick_amount = params[SLOT_MACH_7]; // STICK 0..1
+        let level = params[SLOT_LEVEL]; // LEVEL 0..1
 
         self.start_hz = end_hz * pitch_ratio * self.freq_scale;
         self.end_hz = end_hz * self.freq_scale;
@@ -99,7 +99,7 @@ impl Tom {
         self.hp.set_coeff(cutoff_coeff(3000.0, SAMPLE_RATE));
     }
 
-    /// Transpose by `semis` semitones relative to the macro pitch.
+    /// Transpose by `semis` semitones relative to the param pitch.
     ///
     /// Scales both sweep endpoints so the whole pitch drop moves with the
     /// note. The stick click is pitchless noise and is untouched. Absolute,
@@ -150,7 +150,7 @@ impl Tom {
         let body = self.osc.tick() * amp;
 
         // Stick click: highpassed noise with its own short env. Gates off the
-        // STICK macro implicitly via the env decay time (more stick = longer
+        // STICK param implicitly via the env decay time (more stick = longer
         // click) and explicitly via the level gain below.
         let stick_amp = self.stick_env.tick();
         let stick = if stick_amp != 0.0 {
@@ -173,12 +173,12 @@ mod tests {
 
     #[test]
     fn silent_until_struck() {
-        let macros = MachineId::ALL
+        let params = MachineId::ALL
             .iter()
             .find(|m| **m == MachineId::Tom)
             .unwrap()
-            .default_macros();
-        let mut t = Tom::new(&macros);
+            .default_params();
+        let mut t = Tom::new(&params);
         for _ in 0..1000 {
             assert_eq!(t.tick(), 0.0);
         }
@@ -187,9 +187,9 @@ mod tests {
     #[test]
     fn velocity_scales_output() {
         let id = MachineId::Tom;
-        let macros = id.default_macros();
+        let params = id.default_params();
         let peak_at = |vel: f32| {
-            let mut t = Tom::new(&macros);
+            let mut t = Tom::new(&params);
             t.trigger(vel);
             let mut peak = 0.0f32;
             for _ in 0..4800 {
@@ -203,8 +203,8 @@ mod tests {
     #[test]
     fn pitch_falls_over_time() {
         let id = MachineId::Tom;
-        let macros = id.default_macros();
-        let mut t = Tom::new(&macros);
+        let params = id.default_params();
+        let mut t = Tom::new(&params);
         t.trigger(1.0);
         let window = (0.01 * SAMPLE_RATE) as usize;
         let count_crossings = |t: &mut Tom, n: usize| {
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn decays_to_silence() {
         let id = MachineId::Tom;
-        let macros = id.default_macros();
-        let mut t = Tom::new(&macros);
+        let params = id.default_params();
+        let mut t = Tom::new(&params);
         t.trigger(1.0);
         for _ in 0..(5.0 * SAMPLE_RATE) as usize {
             t.tick();
