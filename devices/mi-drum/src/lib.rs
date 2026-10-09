@@ -751,11 +751,13 @@ static MACROS: [MacroInfo; NUM_MACROS] = [
 /// Both voices are held and `is_peaks` picks between them, rather than an enum
 /// of the two. Two reasons, both practical:
 ///
-/// - `PlaitsVoice` owns self-referential C++ state and must be placement-new'd
-///   into its final address, which an enum gives no way to express for a
-///   variant that does not exist yet. `PeaksVoice` has no such state — the
-///   models are PODs with inline arrays and no internal pointers — so it is
-///   freely movable and needs no `new_in_place`.
+/// - `PlaitsVoice` is placement-new'd into its final address because the C++
+///   object is 12,304 B, which is far too large for the stack an enum variant
+///   would have to be built in on the way to its slot — not because it is
+///   self-referential: `mi-dsp`'s `EngineRegistry` stores offsets from itself,
+///   so a `PlaitsVoice` is relocatable and is now `Send`. `PeaksVoice` has no
+///   such state either — the models are PODs with inline arrays and no internal
+///   pointers — so it is freely movable and needs no `new_in_place`.
 /// - The crate is `#![deny(unsafe_code)]`. Owning both as plain fields keeps
 ///   the single unavoidable `unsafe` confined to `new_in_place`, where the
 ///   Plaits voice is already constructed that way.

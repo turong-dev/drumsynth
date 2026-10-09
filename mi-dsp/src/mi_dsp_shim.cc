@@ -22,6 +22,17 @@ static_assert(
     alignof(plaits::Voice) <= PLAITS_VOICE_STORAGE_ALIGN,
     "PLAITS_VOICE_STORAGE_ALIGN too small for plaits::Voice");
 
+// The engine registry holds offsets rather than cached member pointers, so that
+// a `plaits::Voice` can be relocated — which is what makes `PlaitsVoice` `Send`
+// and the host's live mi-drum device mode possible. It must not have grown while
+// doing so: on target a pointer was already 4 bytes, so this is where the RAM
+// budget would have paid for the fix. Double-width offsets on a 64-bit host
+// would be caught here too.
+static_assert(
+    sizeof(plaits::EngineRegistry<plaits::kMaxEngines>) ==
+        static_cast<size_t>(plaits::kMaxEngines) * sizeof(int32_t) + sizeof(int),
+    "EngineRegistry must stay 4 bytes per entry plus the count");
+
 // Ensure the scratch buffer is the size the original Plaits firmware expects.
 static_assert(
     PLAITS_VOICE_BUFFER_SIZE == 16384,

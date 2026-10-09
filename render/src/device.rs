@@ -32,7 +32,7 @@
 use std::error::Error;
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use drum_engine::midi::{handle_midi, MidiEvent, MidiParser};
+use drum_engine::midi::{handle_midi, MidiEvent, MidiParser, CC_MASTER_GAIN, CC_TRACK_BASE};
 use drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE};
 use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput};
@@ -110,23 +110,6 @@ where
         (MidiParser::new(), producer),
     )?;
 
-    println!("Drumkit Engine — listening for MIDI on '{port}'");
-    println!(
-        "audio out on '{device_name}' at {} Hz ({} ch{})",
-        config.sample_rate().0,
-        channels,
-        if multi_out {
-            ", multi-out: ch 0/1 master, 2/3 aux1, 4/5 aux2, 6/7 aux3"
-        } else {
-            ", stereo sum on ch 0/1"
-        }
-    );
-    println!("one channel per track: MIDI channel N (0..7) drives track N");
-    println!("notes are chromatic — any note plays that track, middle C (60) = default pitch, 1 semitone per note step");
-    println!("CC 20..27 on channel N sets track N's 8 macros; CC 7 = master gain (any channel)");
-    println!("per-track routing: strip.out = Master | Aux1 | Aux2 | Aux3");
-    println!("ctrl-c to stop");
-
     let (err_tx, err_rx) = std::sync::mpsc::channel();
 
     // Per-block render state, kept across callbacks. The multi-out buses
@@ -145,6 +128,36 @@ where
     let mut engine = engine;
     let master_gain = engine.master_gain();
     let fx_drive = engine.fx_drive();
+    let n_tracks = engine.tracks().len();
+
+    println!("Drumkit Engine — listening for MIDI on '{port}'");
+    println!(
+        "audio out on '{device_name}' at {} Hz ({} ch{})",
+        config.sample_rate().0,
+        channels,
+        if multi_out {
+            ", multi-out: ch 0/1 master, 2/3 aux1, 4/5 aux2, 6/7 aux3"
+        } else {
+            ", stereo sum on ch 0/1"
+        }
+    );
+    // Taken from the engine, not written out: the two devices differ (8 drum
+    // tracks with 8 macros vs 6 mi-drum tracks with 32), and a banner that
+    // names the wrong channel count sends people tuning the wrong track.
+    println!(
+        "one channel per track: MIDI channel N (0..{}) drives track N",
+        n_tracks - 1
+    );
+    println!("notes are chromatic — any note plays that track, middle C (60) = default pitch, 1 semitone per note step");
+    println!(
+        "CC {}..{} on channel N sets track N's macros ({} per track); CC {} = master gain (any channel)",
+        CC_TRACK_BASE,
+        CC_TRACK_BASE as usize + N - 1,
+        N,
+        CC_MASTER_GAIN
+    );
+    println!("per-track routing: strip.out = Master | Aux1 | Aux2 | Aux3");
+    println!("ctrl-c to stop");
 
     let stream = device.build_output_stream(
         &config.into(),

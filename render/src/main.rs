@@ -447,20 +447,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             multi_out,
         } => match device.as_str() {
             "drum" => device::run(Box::new(DrumEngine::new()), &out, &port, list, multi_out)?,
-            // `device::run` hands the engine to the cpal audio-callback thread,
-            // so it requires `E: Send`. `MiDrumEngine` is not: `PlaitsVoice`
-            // holds a `*mut u8` into `mi-dsp`'s static scratch pool, whose
-            // `static mut` free-bitmap is documented as single-threaded. Wiring
-            // this up means making that pool thread-safe first — see issue
-            // #9. Every other mi-drum path (render,
-            // play, WAV) works today; only live device mode is blocked.
+            // The mi-drum engine is `Send` now: `plaits::EngineRegistry` holds
+            // offsets into its own object rather than cached member pointers
+            // (`mi-dsp/vendor/plaits/dsp/engine/engine.h`), so the voice — and
+            // the engine holding six of them — survives being handed to the
+            // audio callback thread. The engine is still built in place on the
+            // heap rather than on this stack, because 6 × 12,304 B of Plaits
+            // voice is not a thing to put on a thread's stack.
+            //
+            // One constraint survives: `stmlib::Random` is a single
+            // process-global LCG shared by every Plaits engine, so only the
+            // audio thread may render. Nothing here does — the CoreMIDI callback
+            // parses and queues, and `device::run` applies events between blocks,
+            // exactly as the firmware does.
             "mi-drum" => {
-                return Err(
-                    "mi-drum device mode is not available yet: MiDrumEngine is not \
-                            Send, because mi-dsp's Plaits scratch pool is single-threaded. \
-                            Use `render device drum`, or the WAV render path for mi-drum."
-                        .into(),
-                )
+                mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+                device::run(render::mi_drum_in_place(), &out, &port, list, multi_out)?
             }
             other => {
                 return Err(format!("unknown device '{other}'. available: drum, mi-drum").into())

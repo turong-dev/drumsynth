@@ -29,6 +29,8 @@
 #ifndef PLAITS_DSP_ENGINE_ENGINE_H_
 #define PLAITS_DSP_ENGINE_ENGINE_H_
 
+#include <stdint.h>
+
 #include "plaits/dsp/dsp.h"
 
 #include "stmlib/dsp/units.h"
@@ -102,7 +104,18 @@ class EngineRegistry {
   }
 
   inline Engine* get(int index) {
-    return engine_[index];
+    // Offsets from `this`, not cached absolute addresses. The registry and every
+    // engine it holds are members of the same `plaits::Voice`, so the offset is
+    // invariant under any translation of that object. An absolute pointer is
+    // not: it dangles as soon as the Voice is relocated, which is what left
+    // `PlaitsVoice` unmovable — and therefore `MiDrumEngine`, because `Send`
+    // is a promise that a value *can* be moved to another thread.
+    //
+    // Sign-extend, don't zero-extend: in `plaits::Voice` the engines are laid
+    // out *before* the registry, so most offsets are negative and a `this`
+    // widened to 64 bits plus an unsigned 32-bit offset addresses nothing.
+    const uintptr_t offset = static_cast<uintptr_t>(static_cast<intptr_t>(offset_[index]));
+    return reinterpret_cast<Engine*>(reinterpret_cast<uintptr_t>(this) + offset);
   }
   
   void RegisterInstance(
@@ -113,7 +126,9 @@ class EngineRegistry {
     if (num_engines_ >= max_size) {
       return;
     }
-    engine_[num_engines_] = instance;
+    const intptr_t delta =
+        reinterpret_cast<intptr_t>(instance) - reinterpret_cast<intptr_t>(this);
+    offset_[num_engines_] = static_cast<int32_t>(delta);
     PostProcessingSettings* s = &instance->post_processing_settings;
     s->already_enveloped = already_enveloped;
     s->out_gain = out_gain;
@@ -124,7 +139,12 @@ class EngineRegistry {
   inline int size() const { return num_engines_; }
 
  private:
-  Engine* engine_[max_size];
+  // `int32_t` on every target, not the native word: `plaits::Voice` is
+  // placement-new'd into a fixed 12288-byte storage box, and the registry must
+  // not change the object's size on target, where a pointer is already 4 bytes.
+  // Every member engine is within a few KB of the registry, so 32 bits is ample
+  // — in either direction, hence the signed type.
+  int32_t offset_[max_size];
   int num_engines_;
 };
 

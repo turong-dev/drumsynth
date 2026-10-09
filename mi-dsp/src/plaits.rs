@@ -151,13 +151,38 @@ fn free_buffer(index: u8) {
 ///
 /// `storage` holds the C++ `plaits::Voice` object. The scratch memory it needs
 /// is borrowed from a static pool; the voice struct itself can be moved after
-/// construction because the buffer never moves.
+/// construction because the buffer never moves and the C++ object holds no
+/// self-pointers — `EngineRegistry` stores offsets from itself, not cached
+/// addresses of its own members. That is what makes this `Send`, and with it
+/// `MiDrumEngine`, which the host's live device mode requires.
 pub struct PlaitsVoice {
     storage: MaybeUninit<MiPlaitsVoice>,
     buffer: *mut u8,
     buffer_index: u8,
     initialized: bool,
 }
+
+// SAFETY: `Send` promises that *moving* a value of this type to another thread is
+// safe, and two independent things make that true here.
+//
+// 1. The scratch buffer. `alloc_buffer` claims a pool bit with a compare-exchange
+//    before returning the pointer, so no other `PlaitsVoice` can be handed the
+//    same 16 KB, and the pool is `static`, so the address stays valid wherever
+//    this struct goes. `Drop` returns the same bit, so a moved voice still frees
+//    the slot it owns.
+// 2. The C++ object. It is placement-new'd into `storage`, which travels *with*
+//    the struct, and it holds no self-pointers: `EngineRegistry` stores offsets
+//    from itself rather than cached member addresses (see
+//    `vendor/plaits/dsp/engine/engine.h`, and the `voice_survives_relocation`
+//    test below), and `stmlib::DelayLine` holds an inline array rather than a
+//    pointer (`vendor/stmlib/dsp/delay_line.h`). The only external address it
+//    keeps is the pool buffer covered by (1).
+//
+// `Send` deliberately and not `Sync`: sharing a `&PlaitsVoice` between threads
+// would let two callers race inside one `plaits::Voice`, and `stmlib::Random`,
+// which several engines draw from, is one process-global LCG. A voice may move;
+// it may not be rendered from two threads at once.
+unsafe impl Send for PlaitsVoice {}
 
 impl PlaitsVoice {
     /// Create and initialize a Plaits voice.
@@ -413,5 +438,178 @@ mod tests {
             modulations.trigger = 0.0;
         }
         assert!(peak > 0.001, "rendered blocks are silent: peak={peak}");
+    }
+
+    /// One 24-sample block of a fixed patch, for comparing two renders.
+    ///
+    /// Engine 8 (virtual-analog oscillator) is chosen because it draws nothing
+    /// from `stmlib::Random`. That generator is a single process-global LCG, so
+    /// an engine that used it would make the two render paths in the test below
+    /// diverge for reasons that have nothing to do with relocation — the second
+    /// voice inherits the first voice's draws.
+    fn engine_8_block(voice: &mut PlaitsVoice, trigger: f32) -> [i16; 24] {
+        let patch = MiPlaitsPatch {
+            note: 60.0,
+            harmonics: 0.5,
+            timbre: 0.25,
+            morph: 0.5,
+            frequency_modulation_amount: 0.0,
+            timbre_modulation_amount: 0.0,
+            morph_modulation_amount: 0.0,
+            engine: 8,
+            decay: 0.5,
+            lpg_colour: 0.5,
+        };
+        let modulations = MiPlaitsModulations {
+            engine: 0.0,
+            note: 0.0,
+            frequency: 0.0,
+            harmonics: 0.0,
+            timbre: 0.0,
+            morph: 0.0,
+            trigger,
+            level: 0.8,
+            frequency_patched: 0,
+            timbre_patched: 0,
+            morph_patched: 0,
+            trigger_patched: 1,
+            level_patched: 0,
+        };
+        let mut out = [0i16; 24];
+        let mut aux = [0i16; 24];
+        voice.render(&patch, &modulations, &mut out, &mut aux, 24);
+        out
+    }
+
+    /// Build a voice where it will stay.
+    ///
+    /// `PlaitsVoice::new()` returns by value, and in an unoptimised build that is
+    /// a real `memcpy`: the voice is built in a temporary and then moved, so the
+    /// C++ object's engine registry ends up pointing at a temporary that is dead
+    /// by the time anyone renders. It works, because nothing reuses that stack.
+    /// With offsets in the registry it also works *because it is correct*, which
+    /// is the point — but a test about relocation cannot measure itself against
+    /// a voice that was already relocated behind its back, so it builds in place.
+    ///
+    /// Returns the voice's address, which the test needs in order to build a copy
+    /// somewhere else.
+    ///
+    /// # Safety
+    ///
+    /// `storage` must be a live, writable `MaybeUninit<PlaitsVoice>` — its size
+    /// and alignment are the type's own, so the caller only has to mean it.
+    unsafe fn voice_in_place(storage: &mut MaybeUninit<PlaitsVoice>) -> *mut PlaitsVoice {
+        let voice = storage.as_mut_ptr();
+        PlaitsVoice::new_in_place(voice);
+        voice
+    }
+
+    /// A voice renders identically after its bytes have been copied to a new
+    /// address, with the source moved on behind it.
+    ///
+    /// This is the invariant `EngineRegistry`'s offsets buy and cached member
+    /// pointers would not: `plaits::Voice::Init` hands the registry the addresses
+    /// of its own member engines, and an absolute address points wherever the
+    /// voice used to be. `unsafe impl Send for PlaitsVoice` — and with it
+    /// `MiDrumEngine`, which the host's live device mode needs — rests on this
+    /// holding, so it is asserted rather than argued.
+    ///
+    /// Two details are load-bearing, and both were found by watching this test
+    /// pass against the buggy version:
+    ///
+    /// - The source must be built with [`voice_in_place`]. A voice built with
+    ///   `PlaitsVoice::new()` has already been relocated before the test starts.
+    /// - The source must be *advanced* after the copy. A copy that kept the
+    ///   source's addresses would then render the source's later state instead of
+    ///   the state it was copied with. Without that step both versions render the
+    ///   same untouched state and the test proves nothing.
+    #[test]
+    fn voice_survives_relocation() {
+        const BLOCKS: usize = 8;
+        const SPLIT: usize = 3;
+        // Alternate the gate so the voice's state moves every block; a constant
+        // trigger would leave a decaying tail that hides a stale pointer.
+        fn trigger(i: usize) -> f32 {
+            if i.is_multiple_of(2) {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        // Engine 8 (virtual analog) keeps its state in the object and takes only
+        // a scratch buffer from the allocator, so advancing one voice does not
+        // disturb the other through the pool they share. It also draws nothing
+        // from `stmlib::Random`, the process-global LCG that would otherwise make
+        // two renders diverge for reasons unrelated to relocation.
+        const {
+            assert!(
+                BLOCKS > SPLIT,
+                "the copy must be followed by at least one block"
+            );
+        }
+
+        // The whole render, with the voice never moved.
+        let mut reference_store = MaybeUninit::<PlaitsVoice>::uninit();
+        let want: Vec<_> = {
+            // SAFETY: see `voice_in_place`.
+            let reference = unsafe { voice_in_place(&mut reference_store) };
+            (0..BLOCKS)
+                .map(|i| engine_8_block(unsafe { &mut *reference }, trigger(i)))
+                .collect()
+        };
+
+        // The same render, interrupted by a byte copy to another address — what a
+        // `memcpy` of the containing engine does when it crosses threads.
+        let mut source_store = MaybeUninit::<PlaitsVoice>::uninit();
+        let mut copy_store = MaybeUninit::<PlaitsVoice>::uninit();
+        let want_tail = {
+            // SAFETY: see `voice_in_place`.
+            let source = unsafe { voice_in_place(&mut source_store) };
+            for i in 0..SPLIT {
+                engine_8_block(unsafe { &mut *source }, trigger(i));
+            }
+
+            // SAFETY: `source_store` holds an initialised `PlaitsVoice` and
+            // `copy_store` is `size_of::<PlaitsVoice>()` bytes of aligned,
+            // writable storage, so this is a plain byte move into valid storage.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    source.cast::<u8>(),
+                    copy_store.as_mut_ptr().cast::<u8>(),
+                    core::mem::size_of::<PlaitsVoice>(),
+                );
+            }
+            // The copy is never dropped: it shares the source's pool slot, which
+            // is returned once, below. `source` stays mortal and is freed there.
+            let mut moved = core::mem::ManuallyDrop::new(unsafe { copy_store.assume_init() });
+            assert_ne!(
+                source as usize,
+                core::ptr::addr_of!(*moved) as usize,
+                "relocated voice landed where it was copied from"
+            );
+
+            // Advance the source past the copy point, then render the copy from
+            // where the source left it.
+            for i in SPLIT..BLOCKS {
+                engine_8_block(unsafe { &mut *source }, trigger(i));
+            }
+            (SPLIT..BLOCKS)
+                .map(|i| engine_8_block(&mut moved, trigger(i)))
+                .collect::<Vec<_>>()
+        };
+
+        for (i, (want, got)) in want[SPLIT..].iter().zip(want_tail.iter()).enumerate() {
+            assert_eq!(
+                want,
+                got,
+                "block {} differs after the voice was relocated",
+                SPLIT + i
+            );
+        }
+
+        // SAFETY: both voices are built by `new_in_place` above; the copy never
+        // dropped, so the source is the only owner of the pool slot.
+        unsafe { PlaitsVoice::free_in_place(reference_store.as_mut_ptr()) };
+        unsafe { PlaitsVoice::free_in_place(source_store.as_mut_ptr()) };
     }
 }

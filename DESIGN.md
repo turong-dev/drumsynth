@@ -150,6 +150,30 @@ objects, no allocation.
 - Core and device crates stay `#![deny(unsafe_code)]`.
 - Wrap one engine, bench `8×` worst case before adding breadth.
 
+### mi-dsp objects must be relocatable
+
+A `PlaitsVoice` holds its scratch buffer in a static pool and its C++
+`plaits::Voice` in the struct's own `MaybeUninit`, so it can be `memcpy`'d like
+any other value. That is what makes `MiDrumEngine` `Send`, and `Send` is what
+the host's `render device mi-drum` needs: cpal hands the engine to the audio
+callback thread.
+
+- `plaits::EngineRegistry` stores **offsets from itself**, not cached addresses
+  of `Voice`'s member engines. The registry and the engines are members of the
+  same object, so the offset survives a translation; an absolute address points
+  at wherever the voice used to be. Same 4 bytes per entry as a target pointer,
+  so the RAM budget is unchanged. `mi-dsp/src/plaits.rs`'s
+  `voice_survives_relocation` test pins it — a reloaded voice renders
+  identically after its bytes have been copied and the source moved on.
+- `Send` only, never `Sync`: a voice may move, but two threads rendering inside
+  one `plaits::Voice` would race, and `stmlib::Random` is a single process-global
+  LCG. On target this is moot (one engine, one audio ISR); on the host it is why
+  the CoreMIDI callback parses and queues instead of rendering.
+- Placement-new (`PlaitsVoice::new_in_place`) is about **stack size**, not
+  address stability: 12,304 B × 6 voices is not a stack object. `new()` returns
+  by value and, unoptimised, that is a real `memcpy` — safe now, and the reason
+  an ordinary constructor is not used to build the engines that matter.
+
 ### mi-drum strip rate
 
 MI stage classes are written block-wise (`Process(…, size)`), while the core

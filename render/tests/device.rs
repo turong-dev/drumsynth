@@ -8,11 +8,88 @@
 
 use drum_engine::midi::{handle_midi, MidiEvent, MidiParser};
 use drum_engine::{DrumEngine, MachineId};
+use mi_drum_engine::{seed_random, DeviceEngine, MiDrumEngine, DEFAULT_RANDOM_SEED};
 use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput, MidiOutput};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+
+/// The reason `render device mi-drum` runs at all.
+///
+/// `device::run` hands the engine to cpal's audio-callback thread, so it
+/// requires `E: Send`. `MiDrumEngine` only became `Send` when
+/// `plaits::EngineRegistry` stopped caching pointers to its own members and
+/// started storing offsets (`mi-dsp/vendor/plaits/dsp/engine/engine.h`). This
+/// is a compile-time assertion on purpose: if a voice ever goes back to holding
+/// a self-pointer, this file stops building rather than the host binary
+/// crashing on the audio thread.
+///
+/// Deliberately not `Sync`. A voice may move between threads; two threads may not
+/// share one.
+#[test]
+fn both_devices_are_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<DrumEngine>();
+    assert_send::<MiDrumEngine>();
+}
+
+/// Heap-allocate the mi-drum engine; six Plaits voices is far more than a test
+/// thread's stack has room for.
+fn mi_engine_box() -> Box<MiDrumEngine> {
+    use std::alloc::{alloc, Layout};
+    unsafe {
+        let layout = Layout::new::<MiDrumEngine>();
+        let ptr = alloc(layout) as *mut MiDrumEngine;
+        assert!(!ptr.is_null(), "failed to allocate MiDrumEngine");
+        MiDrumEngine::new_in_place(ptr);
+        Box::from_raw(ptr)
+    }
+}
+
+#[test]
+fn daw_note_on_triggers_the_mi_drum_engine() {
+    let port_name = port_name("mi-note");
+    let (_in_conn, mut consumer) = spawn_device_input(&port_name);
+
+    let out = MidiOutput::new("drumkit-engine-test-out").unwrap();
+    let port = out
+        .ports()
+        .into_iter()
+        .find(|p| out.port_name(p).map(|n| n == port_name).unwrap_or(false))
+        .expect("virtual input port should be visible to outputs");
+    let mut conn = out.connect(&port, "drumkit-engine-test-sender").unwrap();
+
+    // Channel 5 → track 5, one of the two Plaits tracks in the default kit, so
+    // this exercises the C++ voice rather than a Peaks drum model.
+    conn.send(&[0x95, 60, 110]).unwrap();
+
+    let ev = pop_timeout(&mut consumer, Duration::from_secs(2))
+        .expect("mi-drum note-on never reached the ring");
+    let MidiEvent::NoteOn { channel, .. } = ev else {
+        panic!("expected NoteOn, got {ev:?}");
+    };
+    assert_eq!(channel, 5);
+
+    seed_random(DEFAULT_RANDOM_SEED);
+    let mut engine = mi_engine_box();
+    handle_midi(&mut *engine, ev);
+    assert!(
+        engine.tracks()[5].is_active(),
+        "track 5 should be sounding after its note-on"
+    );
+
+    // The whole point of the route: the triggered track must actually render
+    // audio through the Plaits FFI, not merely be flagged active.
+    let mut l = [0.0f32; 32];
+    let mut r = [0.0f32; 32];
+    let mut peak = 0.0f32;
+    for _ in 0..64 {
+        engine.process(&mut l, &mut r);
+        peak = peak.max(l.iter().fold(0.0f32, |m, &s| m.max(s.abs())));
+    }
+    assert!(peak > 0.001, "track 5 rendered silence: peak={peak}");
+}
 
 static PORT_SEQ: AtomicU32 = AtomicU32::new(0);
 
