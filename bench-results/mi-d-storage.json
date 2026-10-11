@@ -1,0 +1,166 @@
+{
+  "budget": 400000,
+  "label": "mi-d-storage",
+  "order": [
+    "idle",
+    "3 sounding",
+    "6 sounding",
+    "1 sounding",
+    "2 sounding",
+    "4 sounding",
+    "6 no SHAPE",
+    "6 FX idle",
+    "6 + FX",
+    "ALG0 xfade",
+    "ALG1 fold",
+    "ALG2 diode",
+    "ALG3 ring",
+    "6 + RES SND",
+    "6 + MOD off",
+    "6 + MOD on"
+  ],
+  "ports_before": [
+    "/dev/cu.usbmodem11301"
+  ],
+  "scenarios": {
+    "1 sounding": {
+      "avg": 64287,
+      "cy_per_frame": 2608,
+      "pct": 20.9,
+      "peak": 83464
+    },
+    "2 sounding": {
+      "avg": 101757,
+      "cy_per_frame": 4007,
+      "pct": 32.1,
+      "peak": 128243
+    },
+    "3 sounding": {
+      "avg": 127366,
+      "cy_per_frame": 5087,
+      "pct": 40.7,
+      "peak": 162791
+    },
+    "4 sounding": {
+      "avg": 198604,
+      "cy_per_frame": 9122,
+      "pct": 73.0,
+      "peak": 291921
+    },
+    "6 + FX": {
+      "avg": 301191,
+      "cy_per_frame": 10926,
+      "pct": 87.4,
+      "peak": 349643
+    },
+    "6 + MOD off": {
+      "avg": 301721,
+      "cy_per_frame": 11105,
+      "pct": 88.8,
+      "peak": 355382
+    },
+    "6 + MOD on": {
+      "avg": 343152,
+      "cy_per_frame": 12278,
+      "pct": 98.2,
+      "peak": 392925
+    },
+    "6 + RES SND": {
+      "avg": 321631,
+      "cy_per_frame": 11581,
+      "pct": 92.7,
+      "peak": 370612
+    },
+    "6 FX idle": {
+      "avg": 300313,
+      "cy_per_frame": 11299,
+      "pct": 90.4,
+      "peak": 361569
+    },
+    "6 no SHAPE": {
+      "avg": 214274,
+      "cy_per_frame": 8947,
+      "pct": 71.6,
+      "peak": 286310
+    },
+    "6 sounding": {
+      "avg": 295342,
+      "cy_per_frame": 12689,
+      "pct": 101.5,
+      "peak": 406052
+    },
+    "ALG0 xfade": {
+      "avg": 298007,
+      "cy_per_frame": 11266,
+      "pct": 90.1,
+      "peak": 360514
+    },
+    "ALG1 fold": {
+      "avg": 299678,
+      "cy_per_frame": 10886,
+      "pct": 87.1,
+      "peak": 348377
+    },
+    "ALG2 diode": {
+      "avg": 300568,
+      "cy_per_frame": 10891,
+      "pct": 87.1,
+      "peak": 348540
+    },
+    "ALG3 ring": {
+      "avg": 301445,
+      "cy_per_frame": 10789,
+      "pct": 86.3,
+      "peak": 345274
+    },
+    "idle": {
+      "avg": 30227,
+      "cy_per_frame": 951,
+      "pct": 7.6,
+      "peak": 30451
+    }
+  },
+  "sizes": {
+    "regions": {
+      "DTCM": {
+        "capacity": 262144,
+        "used": 165088
+      },
+      "FLASH": {
+        "capacity": 2031616,
+        "used": 123068
+      },
+      "ITCM": {
+        "capacity": 262144,
+        "used": 210252
+      },
+      "OCRAM": {
+        "capacity": 524288,
+        "used": 368336
+      }
+    },
+    "sections": {
+      ".ARM.attributes": 65,
+      ".boot": 8192,
+      ".bss": 145512,
+      ".comment": 223,
+      ".data": 2496,
+      ".debug_abbrev": 84209,
+      ".debug_aranges": 4872,
+      ".debug_frame": 16396,
+      ".debug_info": 1389888,
+      ".debug_line": 406101,
+      ".debug_loc": 200853,
+      ".debug_loclists": 349188,
+      ".debug_ranges": 100496,
+      ".debug_rnglists": 79678,
+      ".debug_str": 529495,
+      ".heap": 16384,
+      ".rodata": 114876,
+      ".stack": 16384,
+      ".text": 210252,
+      ".uninit": 351952,
+      ".vector_table": 696
+    }
+  }
+}

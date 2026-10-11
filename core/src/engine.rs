@@ -623,8 +623,10 @@ pub fn configure_default_notes(map: &mut [Option<u8>; 128]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{resv, ParamInfo, ParamRoute, NUM_PARAMS};
+    use crate::params::{resv, ParamInfo, ParamRoute};
     use crate::slot::{DeviceModel, Slot, SlotId};
+
+    const NUM_PARAMS: usize = 32;
 
     /// A dummy slot for testing the generic engine without pulling in the drum
     /// catalogue.
@@ -660,6 +662,83 @@ mod tests {
         fn label(self) -> &'static str {
             "Dummy"
         }
+    }
+
+    /// A 64-param device, wide enough to ramp a param past the first word of
+    /// the track's pending mask.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct WideId(usize);
+
+    impl SlotId<64> for WideId {
+        fn index(self) -> usize {
+            self.0
+        }
+        fn from_index(i: usize) -> Option<Self> {
+            if i < 2 {
+                Some(WideId(i))
+            } else {
+                None
+            }
+        }
+        fn count() -> usize {
+            2
+        }
+        fn default_params(self) -> [f32; 64] {
+            [0.0; 64]
+        }
+    }
+
+    impl DeviceModel<64> for WideId {
+        fn param_table(self) -> [ParamInfo; 64] {
+            [resv(); 64]
+        }
+        fn param_route(self, _idx: usize) -> ParamRoute {
+            ParamRoute::Slot
+        }
+        fn label(self) -> &'static str {
+            "Wide"
+        }
+    }
+
+    struct WideSlot;
+
+    impl Slot<64> for WideSlot {
+        type Id = WideId;
+        fn new(_id: Self::Id, _params: &[f32; 64]) -> Self {
+            WideSlot
+        }
+        fn id(&self) -> Self::Id {
+            WideId(0)
+        }
+        fn set_params(&mut self, _params: &[f32; 64]) {}
+        fn trigger(&mut self, _velocity: f32) {}
+        fn retune(&mut self, _semis: f32) {}
+        fn reset(&mut self) {}
+        fn is_active(&self) -> bool {
+            false
+        }
+        fn tick(&mut self) -> f32 {
+            0.0
+        }
+    }
+
+    /// Params 40 and 63 sit past the first pending-mask word. Both must ramp
+    /// to their targets and land exactly on them.
+    #[test]
+    fn params_past_the_first_mask_word_ramp_and_settle() {
+        let mut engine = Engine::<WideSlot, 64, 1>::new_with_kit(&[WideId(0)]);
+        let track = &mut engine.tracks_mut()[0];
+        track.set_param_target(40, 0.6);
+        track.set_param_target(63, 0.2);
+        assert!(track.is_param_pending(40));
+        assert!(track.is_param_pending(63));
+        for _ in 0..500 {
+            track.control();
+        }
+        assert_eq!(track.base_params[40], 0.6);
+        assert_eq!(track.base_params[63], 0.2);
+        assert!(!track.is_param_pending(40));
+        assert!(!track.is_param_pending(63));
     }
 
     struct DummySlot {

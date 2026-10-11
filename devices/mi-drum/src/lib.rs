@@ -50,9 +50,9 @@ use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::params::{
     level_info, mi, param_index, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO,
-    NUM_PARAMS, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE,
-    SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6,
-    SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0,
+    SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7,
+    SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
@@ -711,6 +711,10 @@ const LFO_FILTER_DEPTH_INFO: ParamInfo = mi("LFO.FIL", "LFI", 0.0);
 const LFO_SHAPER_DEPTH_INFO: ParamInfo = mi("LFO.WRP", "LWR", 0.0);
 const AD_FILTER_DEPTH_INFO: ParamInfo = mi("AD.FIL", "AFI", 0.0);
 const AD_SHAPER_DEPTH_INFO: ParamInfo = mi("AD.WRP", "AWR", 0.0);
+
+/// Param knobs the MI devices expose: the width of the shared parameter table,
+/// and of the track's smoothing state.
+pub const NUM_PARAMS: usize = 32;
 
 /// Shared param metadata table for all MI machines.
 static PARAMS: [ParamInfo; NUM_PARAMS] = [

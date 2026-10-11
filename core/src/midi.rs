@@ -18,7 +18,8 @@ use crate::engine::DeviceEngine;
 pub const CHROMATIC_REFERENCE_NOTE: u8 = 60;
 
 /// First CC number reserved for track params. On channel `N`, CC
-/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_PARAMS` sets track `N`'s params.
+/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_PARAMS` sets track `N`'s params, where
+/// `NUM_PARAMS` is the device's own count.
 pub const CC_TRACK_BASE: u8 = 20;
 
 /// CC for the master gain. Following MIDI convention. Global on any channel.

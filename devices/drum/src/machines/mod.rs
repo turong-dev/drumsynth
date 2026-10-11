@@ -7,6 +7,10 @@
 
 pub use device_core::params::*;
 
+/// Param knobs each machine on this device exposes: the width of every
+/// machine's parameter table, and of the track's smoothing state.
+pub const NUM_PARAMS: usize = 32;
+
 pub mod bd_classic;
 pub mod bd_fm;
 pub mod bd_va;

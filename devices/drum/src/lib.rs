@@ -741,13 +741,11 @@ mod tests {
             );
         }
 
-        // `set_param_target` jumps instantly — no smoothing.
-        e.tracks[0].param_pending = !0; // poison: any pending should be cleared
+        // `set_param_target` jumps instantly — no smoothing, nothing pending.
         e.tracks[0].set_param_target(SLOT_OUT, 1.0);
         assert_eq!(e.tracks[0].strip.out, OutPair::Aux3);
-        assert_eq!(
-            e.tracks[0].param_pending & (1 << SLOT_OUT),
-            0,
+        assert!(
+            !e.tracks[0].is_param_pending(SLOT_OUT),
             "SLOT_OUT left pending"
         );
 

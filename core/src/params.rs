@@ -1,7 +1,8 @@
 //! Param/CC slot system.
 //!
-//! Every device machine exposes [`NUM_PARAMS`] normalised (0..1) param knobs
-//! laid out as [`NUM_BANKS`] banks of [`PARAMS_PER_BANK`], mirroring the
+//! Every device exposes its own count of normalised (0..1) param knobs, its
+//! `NUM_PARAMS`, which may not exceed [`MAX_PARAMS`]. The current devices lay
+//! theirs out as [`NUM_BANKS`] banks of [`PARAMS_PER_BANK`], mirroring the
 //! Syntakt PITCH/FILTER/AMP/MOD pages. The flat slot index is
 //! `bank * 8 + index` ([`param_index`]); MIDI CC is `CC_TRACK_BASE + flat`
 //! (20-based), so slot 0 maps to CC 20 and slot 31 maps to CC 51. A fixed
@@ -24,17 +25,23 @@
 //! runs that chain inside the voice, while the drum device's same positions
 //! route to the core strip.
 
-/// How many param knobs every machine exposes.
+/// Most param knobs a device may expose.
 ///
-/// Deliberately a `const` rather than per-machine so callers can size
-/// arrays against the type, not against the largest variant.
-pub const NUM_PARAMS: usize = 32;
+/// The track's pending-smoothing mask holds one bit per param in
+/// [`PARAM_MASK_WORDS`] words, so this is its ceiling. A device with more
+/// params fails to build the first time its track is instantiated.
+pub const MAX_PARAMS: usize = 256;
+
+/// Words in a track's pending-smoothing mask: one bit per param, up to
+/// [`MAX_PARAMS`].
+pub const PARAM_MASK_WORDS: usize = MAX_PARAMS / 32;
 
 /// Number of param banks, mirroring the Syntakt PITCH/FILTER/AMP/MOD pages.
 pub const NUM_BANKS: usize = 4;
 
-/// Params per bank. Each bank maps to a 0–7 group on the Syntakt UI.
-pub const PARAMS_PER_BANK: usize = NUM_PARAMS / NUM_BANKS;
+/// Params per bank. Each bank maps to a 0–7 group on the Syntakt UI. Four
+/// banks of eight is the 32-slot layout both devices use today.
+pub const PARAMS_PER_BANK: usize = 8;
 
 /// Flat slot index for a param, from its bank and in-bank position.
 ///

@@ -7,10 +7,10 @@
 
 use crate::dsp::{fast, AhdEnv, Lfo, ModDest, Svf};
 use crate::params::{
-    ParamRoute, SendBus, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
-    SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
-    SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
-    SLOT_STRIP_RESO,
+    ParamRoute, SendBus, MAX_PARAMS, PARAM_MASK_WORDS, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST,
+    SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT,
+    SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC,
+    SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
 };
 use crate::slot::{DeviceModel, Slot, SlotId};
 use crate::sound::Sound;
@@ -117,6 +117,38 @@ const DECLICK_STEP: f32 = 1.0 / DECLICK_SAMPLES as f32;
 /// instantly, then is hard-reset.
 pub const CHOKE_SAMPLES: usize = 240;
 
+/// Which params have a smoothing ramp pending, one bit per param.
+///
+/// Word-wise, so the advance walks only the words a track can use and visits
+/// only the bits that are set, and so a device can expose more than 32 params.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ParamMask {
+    words: [u32; PARAM_MASK_WORDS],
+}
+
+impl ParamMask {
+    const EMPTY: Self = Self {
+        words: [0; PARAM_MASK_WORDS],
+    };
+
+    fn set(&mut self, idx: usize) {
+        self.words[idx / 32] |= 1 << (idx % 32);
+    }
+
+    fn clear(&mut self, idx: usize) {
+        self.words[idx / 32] &= !(1 << (idx % 32));
+    }
+
+    fn is_set(&self, idx: usize) -> bool {
+        self.words[idx / 32] & (1 << (idx % 32)) != 0
+    }
+
+    /// True if any bit is set in the first `words` words.
+    fn any(&self, words: usize) -> bool {
+        self.words[..words].iter().any(|&w| w != 0)
+    }
+}
+
 /// One channel of a device.
 pub struct Track<S, const N: usize>
 where
@@ -133,7 +165,7 @@ where
     /// One-pole state used to slew a pending param toward its target.
     param_smooth: [f32; N],
     /// Bitmask: bit `i` set = param `i` is mid-ramp toward `param_targets[i]`.
-    pub param_pending: u32,
+    param_pending: ParamMask,
     /// Strip configuration (filter, amp env, drive, pan, level, choke, layer).
     pub strip: StripParams,
     /// LFOs + velocity modulation.
@@ -183,6 +215,18 @@ impl<S, const N: usize> Track<S, N>
 where
     S: Slot<N>,
 {
+    /// Words of the pending mask that can hold one of this track's `N` params.
+    ///
+    /// Evaluating this asserts `N <= MAX_PARAMS`, so a device with too many
+    /// params fails to build the first time its track runs.
+    const MASK_WORDS: usize = {
+        assert!(
+            N <= MAX_PARAMS,
+            "a device exposes at most MAX_PARAMS params"
+        );
+        N.div_ceil(32)
+    };
+
     /// Build a track loaded with the given slot and that slot's default params
     /// + the default strip.
     pub fn new(id: S::Id) -> Self {
@@ -203,7 +247,7 @@ where
             base_params,
             param_targets: base_params,
             param_smooth: base_params,
-            param_pending: 0,
+            param_pending: ParamMask::EMPTY,
             strip,
             mod_state: ModState::new(),
             filter,
@@ -259,7 +303,7 @@ where
         core::ptr::addr_of_mut!((*ptr).base_params).write(base_params);
         core::ptr::addr_of_mut!((*ptr).param_targets).write(base_params);
         core::ptr::addr_of_mut!((*ptr).param_smooth).write(base_params);
-        core::ptr::addr_of_mut!((*ptr).param_pending).write(0);
+        core::ptr::addr_of_mut!((*ptr).param_pending).write(ParamMask::EMPTY);
         core::ptr::addr_of_mut!((*ptr).strip).write(strip);
         core::ptr::addr_of_mut!((*ptr).mod_state).write(ModState::new());
         core::ptr::addr_of_mut!((*ptr).filter).write(filter);
@@ -389,7 +433,7 @@ where
                 let q = i as f32 / (OutPair::COUNT - 1) as f32;
                 self.base_params[idx] = q;
                 self.param_smooth[idx] = q;
-                self.param_pending &= !(1 << idx);
+                self.param_pending.clear(idx);
                 return;
             }
             // Track-routed strip and modulation params: store, then apply the
@@ -398,14 +442,14 @@ where
             ParamRoute::Strip(_) => {
                 self.base_params[idx] = v;
                 self.param_smooth[idx] = v;
-                self.param_pending &= !(1 << idx);
+                self.param_pending.clear(idx);
                 self.apply_strip_params();
                 return;
             }
             ParamRoute::Lfo(_) => {
                 self.base_params[idx] = v;
                 self.param_smooth[idx] = v;
-                self.param_pending &= !(1 << idx);
+                self.param_pending.clear(idx);
                 self.apply_lfo_params();
                 return;
             }
@@ -416,7 +460,7 @@ where
         // Keep the CC smoother in sync: a direct set is the new current
         // value, and any pending ramp to a stale target is cancelled.
         self.param_smooth[idx] = v;
-        self.param_pending &= !(1 << idx);
+        self.param_pending.clear(idx);
         match route {
             // The send params drive the strip's aux levels (and the effective
             // values read in the per-sample path), not the slot DSP.
@@ -448,6 +492,11 @@ where
         }
     }
 
+    /// True while param `idx` is mid-ramp toward its target.
+    pub fn is_param_pending(&self, idx: usize) -> bool {
+        idx < N && self.param_pending.is_set(idx)
+    }
+
     /// Set the *target* for a CC-driven param.
     ///
     /// The value ramps to it at block rate via [`Track::control`] (see
@@ -472,7 +521,7 @@ where
         // retarget mid-ramp (a knob being turned) continues smoothly from
         // the current value rather than jumping back to the block base.
         self.param_smooth[idx] = self.base_params[idx];
-        self.param_pending |= 1 << idx;
+        self.param_pending.set(idx);
     }
 
     /// Reset the CC smoother to match the current param array: pending ramps
@@ -480,16 +529,20 @@ where
     fn sync_param_smoothing(&mut self) {
         self.param_targets = self.base_params;
         self.param_smooth = self.base_params;
-        self.param_pending = 0;
+        self.param_pending = ParamMask::EMPTY;
     }
 
     /// Advance every pending param one block toward its target. At most one
     /// `set_param` per moving param per block, so a CC burst costs one
     /// coefficient recompute per param per block instead of one per message.
     fn advance_param_smoothing(&mut self) {
-        let mut i = 0;
-        while i < N {
-            if self.param_pending & (1 << i) != 0 {
+        for w in 0..Self::MASK_WORDS {
+            // Walk a copy of the word: `set_param` clears and re-arms bits in
+            // the live mask, and each pending param steps exactly once.
+            let mut pending = self.param_pending.words[w];
+            while pending != 0 {
+                let i = w * 32 + pending.trailing_zeros() as usize;
+                pending &= pending - 1;
                 let target = self.param_targets[i];
                 let next = self.param_smooth[i] + (target - self.param_smooth[i]) * PARAM_SMOOTH_K;
                 if (target - next).abs() < PARAM_SMOOTH_EPS {
@@ -499,10 +552,9 @@ where
                     // Still moving: `set_param` clears the pending bit as
                     // part of syncing the smoother, so re-arm it.
                     self.set_param(i, next);
-                    self.param_pending |= 1 << i;
+                    self.param_pending.set(i);
                 }
             }
-            i += 1;
         }
     }
 
@@ -721,7 +773,7 @@ where
         // 0. CC param smoothing first, before the mod-state borrow: slew
         //    pending params toward their targets and recompute coefficients
         //    as they move, so a CC edit is audible even with no modulation.
-        if self.param_pending != 0 {
+        if self.param_pending.any(Self::MASK_WORDS) {
             self.advance_param_smoothing();
         }
 
@@ -1064,6 +1116,29 @@ pub fn pan_law(pan: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn param_mask_tracks_bits_across_words() {
+        let mut m = ParamMask::default();
+        assert!(!m.any(PARAM_MASK_WORDS));
+        for idx in [0, 31, 32, 63, 255] {
+            m.set(idx);
+        }
+        assert_eq!(m.words[0], 1u32 | 1u32 << 31);
+        assert_eq!(m.words[1], 1u32 | 1u32 << 31);
+        assert_eq!(m.words[7], 1u32 << 31);
+        // A 32-param device scans one word, so only word 0 can hold its bits.
+        assert!(m.any(1));
+        m.clear(0);
+        m.clear(31);
+        assert!(!m.any(1));
+        assert!(m.any(2));
+        for idx in [32, 63, 255] {
+            m.clear(idx);
+        }
+        assert!(!m.any(PARAM_MASK_WORDS));
+        assert_eq!(m, ParamMask::EMPTY);
+    }
 
     #[test]
     fn pan_law_is_equal_power() {
