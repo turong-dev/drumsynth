@@ -38,10 +38,7 @@ pub use device_core::{
     MAX_TIMED_EVENTS, SAMPLE_RATE,
 };
 
-pub use device_core::params::{
-    SLOT_FILT_0, SLOT_FILT_1, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
-    SLOT_STRIP_RESO,
-};
+pub use device_core::params::{SLOT_FILT_0, SLOT_FILT_1};
 
 use device_core::dsp::ahd::{AhdEnv, HoldMode};
 use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
@@ -49,10 +46,10 @@ use device_core::dsp::svf::stability_ceiling_hz;
 use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::params::{
-    level_info, mi, param_index, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO,
-    OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0,
-    SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7,
-    SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    level_info, mi, param_index, ParamGroup, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD,
+    BANK_TRACK, MACH_INFO, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL,
+    SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5,
+    SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
@@ -471,6 +468,11 @@ impl MiMachineId {
         m[SLOT_LFO_SHAPER_DEPTH] = 0.0;
         m[SLOT_AD_FILTER_DEPTH] = 0.0;
         m[SLOT_AD_SHAPER_DEPTH] = 0.0;
+        // Plaits' LPG colour, matching the 0.5 both voice constructors used to
+        // hard-code. Unconditional rather than per-machine: a Peaks track has
+        // no LPG and ignores the row, so the same value costs nothing and keeps
+        // the table's default and the engine's default from drifting apart.
+        m[SLOT_LPG_COLOUR] = 0.5;
 
         m
     }
@@ -523,8 +525,14 @@ impl DeviceModel<NUM_PARAMS> for MiMachineId {
 }
 
 // Param slot aliases for the Phase 14 fixed strip.
-const SLOT_SHAPER_ALGO: usize = SLOT_FILT_0;
-const SLOT_SHAPER_TIMBRE: usize = SLOT_FILT_1;
+/// FILT 0: Warps algorithm — the strip's stage selector. Stepped.
+///
+/// The same index the drum device gives its machine-internal filter, which is
+/// why it used to be reached as `SLOT_FILT_0`; see [`SLOT_SHAPER_DRIVE`] for
+/// why that borrow is gone.
+pub const SLOT_SHAPER_ALGO: usize = param_index(BANK_FILT, 0);
+/// FILT 1: Warps timbre. See [`SLOT_SHAPER_ALGO`].
+pub const SLOT_SHAPER_TIMBRE: usize = param_index(BANK_FILT, 1);
 /// FILT 6: shape of the strip's own oscillator, when `SHAPE.IN` selects it as
 /// Warps' modulator. Sine / triangle / saw / pulse / noise, pitched from the
 /// voice's note.
@@ -539,16 +547,30 @@ pub const SLOT_SHAPER_OSC_SHAPE: usize = param_index(BANK_FILT, 6);
 
 /// FILT 5: input drive into the shaping stage, and the bypass detent at 0.
 ///
-/// An alias for [`SLOT_STRIP_HOLD`], which is the same slot index — Phase 14
-/// spent the strip AHD's four slots on the fixed Warps -> Ripples strip and
-/// gave the generic names back to the generic names. Public because the host
-/// renderer reaches for "take the stage out" by name, and `SLOT_STRIP_HOLD`
-/// next to a printed `SHAPE.DRV 0` label reads like the bypass silently missed.
-pub const SLOT_SHAPER_DRIVE: usize = SLOT_STRIP_HOLD;
+/// Public because the host renderer reaches for "take the stage out" by name.
+///
+/// Phase 14 spent the strip AHD's four slots on the fixed Warps -> Ripples
+/// strip, so this index is the same one the drum device calls `SLOT_STRIP_HOLD`
+/// — but the name is no longer borrowed from it. The collision was only ever
+/// safe because `strip_bypass` keeps the core strip out of this device's audio
+/// path, and route dispatch (phase B′) made the alias redundant: `SHAPE.DRV`'s
+/// row says `Slot`, so the value reaches the voice on its own.
+pub const SLOT_SHAPER_DRIVE: usize = param_index(BANK_FILT, 5);
 
-const SLOT_RIPPLES_CUTOFF: usize = SLOT_STRIP_CUT;
-const SLOT_RIPPLES_RESONANCE: usize = SLOT_STRIP_RESO;
-const SLOT_RIPPLES_FM: usize = SLOT_STRIP_ATK;
+/// FILT 2: Ripples cutoff — the same index the drum device gives its strip
+/// SVF, reached here by the voice rather than the strip. See
+/// [`SLOT_SHAPER_DRIVE`] for why these are no longer aliases.
+pub const SLOT_RIPPLES_CUTOFF: usize = param_index(BANK_FILT, 2);
+/// FILT 3: Ripples resonance, in Q. See [`SLOT_RIPPLES_CUTOFF`].
+pub const SLOT_RIPPLES_RESONANCE: usize = param_index(BANK_FILT, 3);
+/// FILT 4: Ripples FM amount (the voltage-controlled FM input, not a
+/// modulation depth — that is `AD.FIL` / `LFO.FIL`). See
+/// [`SLOT_RIPPLES_CUTOFF`].
+const SLOT_RIPPLES_FM: usize = param_index(BANK_FILT, 4);
+
+/// MACH 8: Plaits' LPG colour. Past the CC map rather than sharing a row —
+/// see [`NUM_PARAMS`].
+pub const SLOT_LPG_COLOUR: usize = NUM_PARAMS - 1;
 
 /// FILT 7: dry/wet between the voice and the Warps stage.
 ///
@@ -612,9 +634,9 @@ pub const SLOT_AD_FILTER_DEPTH: usize = param_index(BANK_MOD, 6);
 /// MOD 7: AD env 2 depth into the Warps timbre parameter.
 pub const SLOT_AD_SHAPER_DEPTH: usize = param_index(BANK_MOD, 7);
 
-const SHAPER_ALGO_INFO: ParamInfo = mi("SHAPE.ALG", "SAL", 0.0);
-const SHAPER_TIMBRE_INFO: ParamInfo = mi("SHAPE.TIM", "STM", 0.5);
-const SHAPER_OSC_SHAPE_INFO: ParamInfo = mi("SHAPE.OSC", "SOS", 0.0);
+const SHAPER_ALGO_INFO: ParamInfo = mi("SHAPE.ALG", "SAL", 0.0, ParamGroup::Shaper);
+const SHAPER_TIMBRE_INFO: ParamInfo = mi("SHAPE.TIM", "STM", 0.5, ParamGroup::Shaper);
+const SHAPER_OSC_SHAPE_INFO: ParamInfo = mi("SHAPE.OSC", "SOS", 0.0, ParamGroup::Shaper);
 /// Input drive into the shaping stage, and the clean end of the strip.
 ///
 /// The stage is `core::dsp::shaper`, which takes an input gain rather than
@@ -655,7 +677,7 @@ const SHAPER_OSC_SHAPE_INFO: ParamInfo = mi("SHAPE.OSC", "SOS", 0.0);
 ///
 /// `0.0` is a discrete detent onto the bypass and the rest of the knob is
 /// strictly monotonic, so there is no dead zone between them.
-const SHAPER_DRIVE_INFO: ParamInfo = mi("SHAPE.DRV", "SDR", 0.2);
+const SHAPER_DRIVE_INFO: ParamInfo = mi("SHAPE.DRV", "SDR", 0.2, ParamGroup::Shaper);
 
 /// Map the `SHAPE.DRV` param onto the shaping stage's `drive` parameter.
 ///
@@ -688,8 +710,8 @@ fn shaper_drive_from_param(param_value: f32) -> (bool, f32) {
 /// as resonance comes down. Mapping to a nominal 20 kHz instead left the top
 /// sixth of the knob flat and put modulation out of reach of the live region;
 /// see `MiSlot::ripples_cutoff_from_param` and `core::dsp::svf`.
-const RIPPLES_CUTOFF_INFO: ParamInfo = mi("RIP.CUT", "RCT", 1.0);
-const RIPPLES_RESONANCE_INFO: ParamInfo = mi("RIP.RES", "RRS", 0.5);
+const RIPPLES_CUTOFF_INFO: ParamInfo = mi("RIP.CUT", "RCT", 1.0, ParamGroup::Filter);
+const RIPPLES_RESONANCE_INFO: ParamInfo = mi("RIP.RES", "RRS", 0.5, ParamGroup::Filter);
 /// Ripples FM: audio-rate modulation of the filter cutoff by the signal
 /// entering the filter.
 ///
@@ -699,57 +721,78 @@ const RIPPLES_RESONANCE_INFO: ParamInfo = mi("RIP.RES", "RRS", 0.5);
 /// it is self-FM: the classic growling filter rather than a tremolo, and
 /// distinct from the `LFO.FIL` and `AD.FIL` routes, which are control-rate.
 /// Full scale is +/-2 octaves of cutoff swing per unit of input.
-const RIPPLES_FM_INFO: ParamInfo = mi("RIP.FM", "RFM", 0.0);
-const SHAPER_MIX_INFO: ParamInfo = mi("SHAPE.MIX", "SMX", 0.35);
-const SHAPER_MOD_SRC_INFO: ParamInfo = mi("SHAPE.IN", "SIN", 0.5);
-const SHAPER_OUT_TAP_INFO: ParamInfo = mi("SHAPE.OUT", "SOU", 0.0);
-const LFO_RATE_INFO: ParamInfo = mi("LFO.RATE", "LRT", 0.5);
-const LFO_DEPTH_INFO: ParamInfo = mi("LFO.DEPTH", "LDPT", 1.0);
-const AD_ATTACK_INFO: ParamInfo = mi("AD.ATK", "AAT", 0.05);
-const AD_DECAY_INFO: ParamInfo = mi("AD.DEC", "ADEC", 0.3);
-const LFO_FILTER_DEPTH_INFO: ParamInfo = mi("LFO.FIL", "LFI", 0.0);
-const LFO_SHAPER_DEPTH_INFO: ParamInfo = mi("LFO.WRP", "LWR", 0.0);
-const AD_FILTER_DEPTH_INFO: ParamInfo = mi("AD.FIL", "AFI", 0.0);
-const AD_SHAPER_DEPTH_INFO: ParamInfo = mi("AD.WRP", "AWR", 0.0);
+const RIPPLES_FM_INFO: ParamInfo = mi("RIP.FM", "RFM", 0.0, ParamGroup::Filter);
+const SHAPER_MIX_INFO: ParamInfo = mi("SHAPE.MIX", "SMX", 0.35, ParamGroup::Shaper);
+const SHAPER_MOD_SRC_INFO: ParamInfo = mi("SHAPE.IN", "SIN", 0.5, ParamGroup::Shaper);
+const SHAPER_OUT_TAP_INFO: ParamInfo = mi("SHAPE.OUT", "SOU", 0.0, ParamGroup::Shaper);
+const LFO_RATE_INFO: ParamInfo = mi("LFO.RATE", "LRT", 0.5, ParamGroup::Lfo);
+const LFO_DEPTH_INFO: ParamInfo = mi("LFO.DEPTH", "LDPT", 1.0, ParamGroup::Lfo);
+const AD_ATTACK_INFO: ParamInfo = mi("AD.ATK", "AAT", 0.05, ParamGroup::Env);
+const AD_DECAY_INFO: ParamInfo = mi("AD.DEC", "ADEC", 0.3, ParamGroup::Env);
+const LFO_FILTER_DEPTH_INFO: ParamInfo = mi("LFO.FIL", "LFI", 0.0, ParamGroup::Lfo);
+const LFO_SHAPER_DEPTH_INFO: ParamInfo = mi("LFO.WRP", "LWR", 0.0, ParamGroup::Lfo);
+const AD_FILTER_DEPTH_INFO: ParamInfo = mi("AD.FIL", "AFI", 0.0, ParamGroup::Env);
+const AD_SHAPER_DEPTH_INFO: ParamInfo = mi("AD.WRP", "AWR", 0.0, ParamGroup::Env);
+
+/// MACH 8: Plaits' LPG colour — how much of the envelope goes to the lowpass
+/// versus the VCA, so it moves the *tone* of the decay and not just its level.
+///
+/// Plaits-only: a Peaks model has its own four params and no LPG, so this row
+/// is ignored there — the same way `SLOT_MACH_0` is. It used to be hard-coded
+/// at 0.5 in both voice constructors and never read from params, which is why
+/// the default is 0.5: the shipped sound is unchanged and only the address is
+/// new.
+const LPG_COLOUR_INFO: ParamInfo = mi("LPG.COL", "LPC", 0.5, ParamGroup::Voice);
 
 /// Param knobs the MI devices expose: the width of the shared parameter table,
 /// and of the track's smoothing state.
-pub const NUM_PARAMS: usize = 32;
+///
+/// 33 rather than the 32 the CC map was built for. Phase E′ gave `LPG.COL` its
+/// own row instead of folding it into an existing one, so index 32 sits past
+/// the `CC_TRACK_BASE + 31` the map documents.
+///
+/// It is still reachable by CC: `apply_cc` bounds on `param_idx < N`, not on
+/// the map's width, so CC 52 lands on index 32 here. That is not a break —
+/// CC 20..51 keep the meanings they had, and index 32 is a param that did not
+/// exist before, so no controller's existing mapping moves. NRPN (phase C)
+/// addresses it by group instead, and phase F removes the map.
+pub const NUM_PARAMS: usize = 33;
 
 /// Shared param metadata table for all MI machines.
 static PARAMS: [ParamInfo; NUM_PARAMS] = [
-    mi("TUNE", "TUN", 0.45),  // MACH 0
-    mi("HARM", "HRM", 0.5),   // MACH 1
-    mi("TIMBRE", "TIM", 0.5), // MACH 2
-    mi("MORPH", "MRP", 0.5),  // MACH 3
-    mi("FM.AMT", "FMA", 0.0), // MACH 4
-    mi("TM.MOD", "TMM", 0.0), // MACH 5
-    mi("MM.MOD", "MMM", 0.0), // MACH 6
-    mi("DECAY", "DEC", 0.5),  // MACH 7
-    SHAPER_ALGO_INFO,         // FILT 0 — Warps algorithm
-    SHAPER_TIMBRE_INFO,       // FILT 1 — Warps timbre
-    RIPPLES_CUTOFF_INFO,      // FILT 2 — Ripples cutoff
-    RIPPLES_RESONANCE_INFO,   // FILT 3 — Ripples resonance
-    RIPPLES_FM_INFO,          // FILT 4 — Ripples FM amount
-    SHAPER_DRIVE_INFO,        // FILT 5 — Warps input drive / VCA
-    SHAPER_OSC_SHAPE_INFO,    // FILT 6 — strip oscillator shape
-    SHAPER_MIX_INFO,          // FILT 7 — Warps dry/wet
-    MACH_INFO,                // TRACK 0
-    OUT_INFO,                 // TRACK 1
-    PAN_INFO,                 // TRACK 2
-    level_info(0.85),         // TRACK 3
-    SEND_DLY_INFO,            // TRACK 4
-    SEND_RVB_INFO,            // TRACK 5
-    SHAPER_MOD_SRC_INFO,      // TRACK 6 — Warps modulator source
-    SHAPER_OUT_TAP_INFO,      // TRACK 7 — Warps output tap
-    LFO_RATE_INFO,            // MOD 0
-    LFO_DEPTH_INFO,           // MOD 1
-    AD_ATTACK_INFO,           // MOD 2
-    AD_DECAY_INFO,            // MOD 3
-    LFO_FILTER_DEPTH_INFO,    // MOD 4
-    LFO_SHAPER_DEPTH_INFO,    // MOD 5
-    AD_FILTER_DEPTH_INFO,     // MOD 6
-    AD_SHAPER_DEPTH_INFO,     // MOD 7
+    mi("TUNE", "TUN", 0.45, ParamGroup::Voice),  // MACH 0
+    mi("HARM", "HRM", 0.5, ParamGroup::Voice),   // MACH 1
+    mi("TIMBRE", "TIM", 0.5, ParamGroup::Voice), // MACH 2
+    mi("MORPH", "MRP", 0.5, ParamGroup::Voice),  // MACH 3
+    mi("FM.AMT", "FMA", 0.0, ParamGroup::Voice), // MACH 4
+    mi("TM.MOD", "TMM", 0.0, ParamGroup::Voice), // MACH 5
+    mi("MM.MOD", "MMM", 0.0, ParamGroup::Voice), // MACH 6
+    mi("DECAY", "DEC", 0.5, ParamGroup::Voice),  // MACH 7
+    SHAPER_ALGO_INFO,                            // FILT 0 — Warps algorithm
+    SHAPER_TIMBRE_INFO,                          // FILT 1 — Warps timbre
+    RIPPLES_CUTOFF_INFO,                         // FILT 2 — Ripples cutoff
+    RIPPLES_RESONANCE_INFO,                      // FILT 3 — Ripples resonance
+    RIPPLES_FM_INFO,                             // FILT 4 — Ripples FM amount
+    SHAPER_DRIVE_INFO,                           // FILT 5 — Warps input drive / VCA
+    SHAPER_OSC_SHAPE_INFO,                       // FILT 6 — strip oscillator shape
+    SHAPER_MIX_INFO,                             // FILT 7 — Warps dry/wet
+    MACH_INFO,                                   // TRACK 0
+    OUT_INFO,                                    // TRACK 1
+    PAN_INFO,                                    // TRACK 2
+    level_info(0.85),                            // TRACK 3
+    SEND_DLY_INFO,                               // TRACK 4
+    SEND_RVB_INFO,                               // TRACK 5
+    SHAPER_MOD_SRC_INFO,                         // TRACK 6 — Warps modulator source
+    SHAPER_OUT_TAP_INFO,                         // TRACK 7 — Warps output tap
+    LFO_RATE_INFO,                               // MOD 0
+    LFO_DEPTH_INFO,                              // MOD 1
+    AD_ATTACK_INFO,                              // MOD 2
+    AD_DECAY_INFO,                               // MOD 3
+    LFO_FILTER_DEPTH_INFO,                       // MOD 4
+    LFO_SHAPER_DEPTH_INFO,                       // MOD 5
+    AD_FILTER_DEPTH_INFO,                        // MOD 6
+    AD_SHAPER_DEPTH_INFO,                        // MOD 7
+    LPG_COLOUR_INFO,                             // MACH 8 — Plaits LPG colour
 ];
 
 /// A block-buffered Plaits voice implementing the per-sample `Slot` trait.
@@ -1408,6 +1451,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             self.patch.timbre_modulation_amount = params[SLOT_MACH_5];
             self.patch.morph_modulation_amount = params[SLOT_MACH_6];
             self.patch.decay = params[SLOT_MACH_7];
+            self.patch.lpg_colour = params[SLOT_LPG_COLOUR];
         }
 
         self.shaper_algorithm = params[SLOT_SHAPER_ALGO];
@@ -2010,6 +2054,107 @@ mod tests {
         }
     }
 
+    /// `ParamId` resolution is what an NRPN address keys on. mi-drum's groups
+    /// are deliberately *not* contiguous — SHAPER sits at 8, 9, 13, 14, 15,
+    /// 22, 23 and LFO/ENV interleave across the MOD bank — so the scan is the
+    /// only thing that can find them. Pin by name rather than index: a row
+    /// regrouped by accident must fail here even if the flat layout shifts.
+    #[test]
+    fn groups_resolve_to_the_rows_they_name() {
+        use device_core::params::{resolve, ParamId};
+        let table = MiMachineId::SixOp1.params();
+
+        /// Resolve `(group, ordinal)` and hand back the row's name.
+        fn name_at(table: &[device_core::params::ParamInfo], group: ParamGroup, i: u8) -> &str {
+            let flat = resolve(table, ParamId { group, index: i })
+                .unwrap_or_else(|| panic!("{group:?} has no member {i}"));
+            table[flat].name
+        }
+
+        // VOICE: the eight Plaits patch fields, then LPG.COL — which lives at
+        // flat 32, past every other group, and is still voice member 8.
+        assert_eq!(name_at(&table, ParamGroup::Voice, 0), "TUNE");
+        assert_eq!(name_at(&table, ParamGroup::Voice, 7), "DECAY");
+        assert_eq!(name_at(&table, ParamGroup::Voice, 8), "LPG.COL");
+
+        // FILTER: Ripples, at the indices the drum device calls the strip SVF.
+        assert_eq!(name_at(&table, ParamGroup::Filter, 0), "RIP.CUT");
+        assert_eq!(name_at(&table, ParamGroup::Filter, 2), "RIP.FM");
+
+        // SHAPER: the scattered one. Seven members, none adjacent.
+        assert_eq!(name_at(&table, ParamGroup::Shaper, 0), "SHAPE.ALG");
+        assert_eq!(name_at(&table, ParamGroup::Shaper, 2), "SHAPE.DRV");
+        assert_eq!(name_at(&table, ParamGroup::Shaper, 6), "SHAPE.OUT");
+
+        // TRACK: the six track params, stopping before SHAPE.IN/OUT which are
+        // shaper rows sitting in the TRACK bank.
+        assert_eq!(name_at(&table, ParamGroup::Track, 0), "MACH");
+        assert_eq!(name_at(&table, ParamGroup::Track, 5), "SEND.RVB");
+
+        // LFO and ENV interleave across the MOD bank: 24, 25, 28, 29 against
+        // 26, 27, 30, 31.
+        assert_eq!(name_at(&table, ParamGroup::Lfo, 0), "LFO.RATE");
+        assert_eq!(name_at(&table, ParamGroup::Lfo, 3), "LFO.WRP");
+        assert_eq!(name_at(&table, ParamGroup::Env, 0), "AD.ATK");
+        assert_eq!(name_at(&table, ParamGroup::Env, 3), "AD.WRP");
+
+        // Nothing past the end, and the groups this device does not have.
+        assert!(resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Voice,
+                index: 9
+            }
+        )
+        .is_none());
+        assert!(resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Shaper,
+                index: 7
+            }
+        )
+        .is_none());
+        // mi-drum runs its envelope inside the voice, so it has no AMP rows
+        // and must not silently resolve the drum device's strip AHD.
+        assert!(resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Amp,
+                index: 0
+            }
+        )
+        .is_none());
+    }
+
+    /// `LPG.COL` is a new row at flat 32. Its default must be the 0.5 both
+    /// voice constructors hard-coded, or the shipped Plaits timbre moves —
+    /// and it must be Plaits-only, since a Peaks model has no LPG to colour.
+    #[test]
+    fn lpg_colour_is_a_plaits_row_at_its_documented_default() {
+        let table = MiMachineId::PeaksBassDrum.params();
+        let flat = device_core::params::resolve(
+            &table,
+            device_core::params::ParamId {
+                group: ParamGroup::Voice,
+                index: 8,
+            },
+        )
+        .expect("LPG.COL is voice member 8");
+        assert_eq!(
+            flat,
+            NUM_PARAMS - 1,
+            "appended past the 32 the CC map was built for"
+        );
+        assert_eq!(table[flat].name, "LPG.COL");
+        assert_eq!(table[flat].default, 0.5, "the hard-coded value, unchanged");
+        assert_eq!(
+            table[flat].default,
+            MiMachineId::PeaksBassDrum.default_params()[flat],
+            "table default and engine default must agree"
+        );
+    }
+
     /// Heap-allocate the engine so the huge struct is not placed on the test
     /// thread's stack. The firmware uses static `.uninit` placement instead.
     #[allow(unsafe_code)]
@@ -2171,7 +2316,7 @@ mod tests {
             // for a filter-envelope amount. Testing the route at the default
             // would be testing the default, not the route.
             if slot == SLOT_AD_FILTER_DEPTH {
-                t.set_param(SLOT_STRIP_CUT, 0.4);
+                t.set_param(SLOT_RIPPLES_CUTOFF, 0.4);
             }
         }
         e.trigger(0, 1.0);
@@ -2373,7 +2518,7 @@ mod tests {
     fn ripples_fm_is_live() {
         // The filter has to be somewhere it can be pushed from, and the strip
         // has to be audible, or this measures the default rather than the knob.
-        let base = [(SLOT_SHAPER_MIX, 0.0), (SLOT_STRIP_CUT, 0.4)];
+        let base = [(SLOT_SHAPER_MIX, 0.0), (SLOT_RIPPLES_CUTOFF, 0.4)];
         let mut off = base.to_vec();
         off.push((SLOT_RIPPLES_FM, 0.0));
         let mut on = base.to_vec();
@@ -2459,7 +2604,7 @@ mod tests {
                 let mut e = engine_box();
                 for t in e.tracks.iter_mut() {
                     t.set_param(SLOT_AD_FILTER_DEPTH, 0.0);
-                    t.set_param(SLOT_STRIP_CUT, cut);
+                    t.set_param(SLOT_RIPPLES_CUTOFF, cut);
                 }
                 e.trigger(0, 1.0);
                 let mut l = [0.0f32; BLOCK];
@@ -2477,7 +2622,7 @@ mod tests {
                 let mut e = engine_box();
                 for t in e.tracks.iter_mut() {
                     t.set_param(SLOT_AD_FILTER_DEPTH, 0.8);
-                    t.set_param(SLOT_STRIP_CUT, cut);
+                    t.set_param(SLOT_RIPPLES_CUTOFF, cut);
                 }
                 e.trigger(0, 1.0);
                 let mut l = [0.0f32; BLOCK];

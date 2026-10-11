@@ -117,7 +117,7 @@ use teensy4_panic as _;
 use cortex_m::peripheral::DWT;
 use mi_drum_engine::{
     DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0,
-    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH, SLOT_STRIP_HOLD, BLOCK, SAMPLE_RATE, TRACKS,
+    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_DRIVE, BLOCK, SAMPLE_RATE, TRACKS,
 };
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -561,10 +561,11 @@ fn measure_with_stage(
 
 /// Worst case with the shaping stage bypassed on every track.
 ///
-/// `SLOT_STRIP_HOLD` is `SHAPE.DRV` on this device -- the alias
-/// `SLOT_SHAPER_DRIVE` is private to `mi-drum-engine`, the same reason the
-/// algorithm scenarios above reach for `SLOT_FILT_0` rather than
-/// `SLOT_SHAPER_ALGO`.
+/// `SLOT_SHAPER_DRIVE` is `SHAPE.DRV` on this device, at the index the drum
+/// device calls `SLOT_STRIP_HOLD`. It used to be *reached* through that name
+/// — phase 14 built the fixed Warps -> Ripples strip on the strip AHD's four
+/// slots and borrowed them — so this read as if it were reaching for a
+/// bypassed strip. Phase E′ gave it its own constant at the same index.
 ///
 /// Restores the default drive (0.2, `SHAPER_DRIVE_INFO`) on the way out, so a
 /// later scenario in the same loop iteration does not silently measure a
@@ -576,13 +577,13 @@ fn measure_without_shaper(
     right: &mut [f32; BLOCK],
 ) -> Stats {
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_param(SLOT_STRIP_HOLD, SHAPER_DRIVE_BYPASS);
+        engine.tracks_mut()[t].set_param(SLOT_SHAPER_DRIVE, SHAPER_DRIVE_BYPASS);
     }
 
     let stats = measure(engine, left, right, TRACKS);
 
     for t in 0..TRACKS {
-        engine.tracks_mut()[t].set_param(SLOT_STRIP_HOLD, SHAPER_DRIVE_DEFAULT);
+        engine.tracks_mut()[t].set_param(SLOT_SHAPER_DRIVE, SHAPER_DRIVE_DEFAULT);
     }
 
     stats

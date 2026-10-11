@@ -148,18 +148,18 @@ fn apply_mi_kit_strips(
 ) {
     use mi_drum_engine::{
         DeviceEngine, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH,
-        SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE,
-        SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_OSC_SHAPE, SLOT_STRIP_CUT, SLOT_STRIP_HOLD,
-        SLOT_STRIP_RESO,
+        SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE, SLOT_LFO_SHAPER_DEPTH,
+        SLOT_RIPPLES_CUTOFF, SLOT_RIPPLES_RESONANCE, SLOT_SHAPER_ALGO, SLOT_SHAPER_DRIVE,
+        SLOT_SHAPER_OSC_SHAPE, SLOT_SHAPER_TIMBRE,
     };
 
     for (idx, &spec) in MI_KIT_STRIPS.iter().enumerate() {
         let track = &mut engine.tracks_mut()[idx];
-        track.set_param(SLOT_FILT_0, shaper_algorithm);
-        track.set_param(SLOT_FILT_1, spec.0);
-        track.set_param(SLOT_STRIP_CUT, spec.1);
-        track.set_param(SLOT_STRIP_RESO, spec.2);
-        track.set_param(SLOT_STRIP_HOLD, drive_override.unwrap_or(spec.3));
+        track.set_param(SLOT_SHAPER_ALGO, shaper_algorithm);
+        track.set_param(SLOT_SHAPER_TIMBRE, spec.0);
+        track.set_param(SLOT_RIPPLES_CUTOFF, spec.1);
+        track.set_param(SLOT_RIPPLES_RESONANCE, spec.2);
+        track.set_param(SLOT_SHAPER_DRIVE, drive_override.unwrap_or(spec.3));
         track.set_param(SLOT_LFO_RATE, spec.4);
         track.set_param(SLOT_LFO_DEPTH, spec.5);
         track.set_param(SLOT_LFO_FILTER_DEPTH, spec.6);
@@ -218,9 +218,9 @@ fn play_mi_kit_pattern(engine: &mut MiDrumEngine, out: &mut Vec<f32>, bars: usiz
 pub(crate) fn render_mi_drum_marked(shaper_algorithm: f32) -> (Vec<f32>, Vec<(f32, &'static str)>) {
     use mi_drum_engine::{
         DeviceEngine, MiMachineId, SLOT_AD_ATTACK, SLOT_AD_DECAY, SLOT_AD_FILTER_DEPTH,
-        SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_FILT_1, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH,
-        SLOT_LFO_RATE, SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_MOD_SRC, SLOT_SHAPER_OSC_SHAPE,
-        SLOT_STRIP_CUT, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
+        SLOT_AD_SHAPER_DEPTH, SLOT_LFO_DEPTH, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_RATE,
+        SLOT_LFO_SHAPER_DEPTH, SLOT_RIPPLES_CUTOFF, SLOT_RIPPLES_RESONANCE, SLOT_SHAPER_ALGO,
+        SLOT_SHAPER_DRIVE, SLOT_SHAPER_MOD_SRC, SLOT_SHAPER_OSC_SHAPE, SLOT_SHAPER_TIMBRE,
     };
 
     // Every Plaits engine draws noise from one process-global LCG, so the
@@ -246,11 +246,11 @@ pub(crate) fn render_mi_drum_marked(shaper_algorithm: f32) -> (Vec<f32>, Vec<(f3
     let blocks_per_hit = (0.75 * SAMPLE_RATE / BLOCK as f32) as usize;
     for &id in MiMachineId::ALL.iter() {
         engine.tracks_mut()[0].load_machine(id);
-        engine.tracks_mut()[0].set_param(SLOT_FILT_0, shaper_algorithm);
-        engine.tracks_mut()[0].set_param(SLOT_FILT_1, 0.5);
-        engine.tracks_mut()[0].set_param(SLOT_STRIP_CUT, 0.5);
-        engine.tracks_mut()[0].set_param(SLOT_STRIP_RESO, 0.25);
-        engine.tracks_mut()[0].set_param(SLOT_STRIP_HOLD, 0.7);
+        engine.tracks_mut()[0].set_param(SLOT_SHAPER_ALGO, shaper_algorithm);
+        engine.tracks_mut()[0].set_param(SLOT_SHAPER_TIMBRE, 0.5);
+        engine.tracks_mut()[0].set_param(SLOT_RIPPLES_CUTOFF, 0.5);
+        engine.tracks_mut()[0].set_param(SLOT_RIPPLES_RESONANCE, 0.25);
+        engine.tracks_mut()[0].set_param(SLOT_SHAPER_DRIVE, 0.7);
         // Modulation live, so the Stages path is inside the hash.
         engine.tracks_mut()[0].set_param(SLOT_LFO_RATE, 0.45);
         engine.tracks_mut()[0].set_param(SLOT_LFO_DEPTH, 0.8);
@@ -339,8 +339,8 @@ pub(crate) fn render_mi_drum_marked(shaper_algorithm: f32) -> (Vec<f32>, Vec<(f3
     // modulator is most plainly audible.
     engine.tracks_mut()[0].load_machine(mi_drum_engine::MiMachineId::PeaksBassDrum);
     engine.tracks_mut()[0].set_param(SLOT_SHAPER_MOD_SRC, 1.0); // oscillator
-    engine.tracks_mut()[0].set_param(SLOT_FILT_0, 0.25); // analog ring mod
-    engine.tracks_mut()[0].set_param(SLOT_STRIP_HOLD, 0.4);
+    engine.tracks_mut()[0].set_param(SLOT_SHAPER_ALGO, 0.25); // analog ring mod
+    engine.tracks_mut()[0].set_param(SLOT_SHAPER_DRIVE, 0.4);
     for step in 0..5 {
         engine.tracks_mut()[0].set_param(SLOT_SHAPER_OSC_SHAPE, step as f32 / 5.0 + 0.05);
         engine.trigger(0, 1.0);
@@ -1202,9 +1202,9 @@ pub(crate) fn render_shaper_alias_test() -> (Vec<f32>, Vec<(f32, String)>) {
         {
             let track = &mut engine.tracks_mut()[MELODIC_TRACK];
             // Hard drive, fully wet: the worst case for aliasing.
-            track.set_param(mi_drum_engine::SLOT_STRIP_HOLD, 0.9);
+            track.set_param(mi_drum_engine::SLOT_SHAPER_DRIVE, 0.9);
             track.set_param(mi_drum_engine::SLOT_SHAPER_MIX, 1.0);
-            track.set_param(mi_drum_engine::SLOT_FILT_0, algo);
+            track.set_param(mi_drum_engine::SLOT_SHAPER_ALGO, algo);
         }
         // Everything else silent: one voice, one variable.
         for t in 0..mi_drum_engine::TRACKS {

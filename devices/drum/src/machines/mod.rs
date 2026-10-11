@@ -205,556 +205,556 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 0: BD Classic
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.2),   // MACH 0
-            mi("SWEEP", "SWP", 0.36), // MACH 1
-            mi("SWP_T", "SWT", 0.15), // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("DEC", "DEC", 0.255),  // MACH 5
-            resv(),                   // MACH 6
-            mi("DRIVE", "DRV", 0.16), // MACH 7
-            resv(),                   // FILT 0
-            resv(),                   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            level_info(0.9),          // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("TUNE", "TUN", 0.2, ParamGroup::Voice),   // MACH 0
+            mi("SWEEP", "SWP", 0.36, ParamGroup::Voice), // MACH 1
+            mi("SWP_T", "SWT", 0.15, ParamGroup::Voice), // MACH 2
+            resv(),                                      // MACH 3
+            resv(),                                      // MACH 4
+            mi("DEC", "DEC", 0.255, ParamGroup::Voice),  // MACH 5
+            resv(),                                      // MACH 6
+            mi("DRIVE", "DRV", 0.16, ParamGroup::Voice), // MACH 7
+            resv(),                                      // FILT 0
+            resv(),                                      // FILT 1
+            STRIP_CUT_INFO,                              // FILT 2
+            STRIP_RESO_INFO,                             // FILT 3
+            STRIP_ATK_INFO,                              // FILT 4
+            STRIP_HOLD_INFO,                             // FILT 5
+            STRIP_DEC_INFO,                              // FILT 6
+            resv(),                                      // FILT 7
+            MACH_INFO,                                   // TRACK 0
+            OUT_INFO,                                    // TRACK 1
+            PAN_INFO,                                    // TRACK 2
+            level_info(0.9),                             // TRACK 3
+            SEND_DLY_INFO,                               // TRACK 4
+            SEND_RVB_INFO,                               // TRACK 5
+            resv(),                                      // TRACK 6
+            resv(),                                      // TRACK 7
+            resv(),                                      // MOD 0
+            resv(),                                      // MOD 1
+            LFO1_RATE_INFO,                              // MOD 2
+            LFO1_DEPTH_INFO,                             // MOD 3
+            LFO1_DEST_INFO,                              // MOD 4
+            LFO2_RATE_INFO,                              // MOD 5
+            LFO2_DEPTH_INFO,                             // MOD 6
+            LFO2_DEST_INFO,                              // MOD 7
         ],
     },
     // 1: BD FM
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.2),     // MACH 0
-            mi("SWEEP", "SWP", 0.3),    // MACH 1
-            mi("SWP_T", "SWT", 0.15),   // MACH 2
-            mi("MOD.HZ", "MDH", 0.43),  // MACH 3
-            mi("MOD.DC", "MDD", 0.15),  // MACH 4
-            mi("DEC", "DEC", 0.255),    // MACH 5
-            mi("MOD.AMT", "MDA", 0.35), // MACH 6
-            resv(),                     // MACH 7
-            resv(),                     // FILT 0
-            resv(),                     // FILT 1
-            STRIP_CUT_INFO,             // FILT 2
-            STRIP_RESO_INFO,            // FILT 3
-            STRIP_ATK_INFO,             // FILT 4
-            STRIP_HOLD_INFO,            // FILT 5
-            STRIP_DEC_INFO,             // FILT 6
-            resv(),                     // FILT 7
-            MACH_INFO,                  // TRACK 0
-            OUT_INFO,                   // TRACK 1
-            PAN_INFO,                   // TRACK 2
-            level_info(0.9),            // TRACK 3
-            SEND_DLY_INFO,              // TRACK 4
-            SEND_RVB_INFO,              // TRACK 5
-            resv(),                     // TRACK 6
-            resv(),                     // TRACK 7
-            resv(),                     // MOD 0
-            resv(),                     // MOD 1
-            LFO1_RATE_INFO,             // MOD 2
-            LFO1_DEPTH_INFO,            // MOD 3
-            LFO1_DEST_INFO,             // MOD 4
-            LFO2_RATE_INFO,             // MOD 5
-            LFO2_DEPTH_INFO,            // MOD 6
-            LFO2_DEST_INFO,             // MOD 7
+            mi("TUNE", "TUN", 0.2, ParamGroup::Voice),     // MACH 0
+            mi("SWEEP", "SWP", 0.3, ParamGroup::Voice),    // MACH 1
+            mi("SWP_T", "SWT", 0.15, ParamGroup::Voice),   // MACH 2
+            mi("MOD.HZ", "MDH", 0.43, ParamGroup::Voice),  // MACH 3
+            mi("MOD.DC", "MDD", 0.15, ParamGroup::Voice),  // MACH 4
+            mi("DEC", "DEC", 0.255, ParamGroup::Voice),    // MACH 5
+            mi("MOD.AMT", "MDA", 0.35, ParamGroup::Voice), // MACH 6
+            resv(),                                        // MACH 7
+            resv(),                                        // FILT 0
+            resv(),                                        // FILT 1
+            STRIP_CUT_INFO,                                // FILT 2
+            STRIP_RESO_INFO,                               // FILT 3
+            STRIP_ATK_INFO,                                // FILT 4
+            STRIP_HOLD_INFO,                               // FILT 5
+            STRIP_DEC_INFO,                                // FILT 6
+            resv(),                                        // FILT 7
+            MACH_INFO,                                     // TRACK 0
+            OUT_INFO,                                      // TRACK 1
+            PAN_INFO,                                      // TRACK 2
+            level_info(0.9),                               // TRACK 3
+            SEND_DLY_INFO,                                 // TRACK 4
+            SEND_RVB_INFO,                                 // TRACK 5
+            resv(),                                        // TRACK 6
+            resv(),                                        // TRACK 7
+            resv(),                                        // MOD 0
+            resv(),                                        // MOD 1
+            LFO1_RATE_INFO,                                // MOD 2
+            LFO1_DEPTH_INFO,                               // MOD 3
+            LFO1_DEST_INFO,                                // MOD 4
+            LFO2_RATE_INFO,                                // MOD 5
+            LFO2_DEPTH_INFO,                               // MOD 6
+            LFO2_DEST_INFO,                                // MOD 7
         ],
     },
     // 2: BD VA
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.28), // MACH 0
-            mi("SWEEP", "SWP", 1.0), // MACH 1
-            mi("SWP_T", "SWT", 0.1), // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.255), // MACH 5
-            resv(),                  // MACH 6
-            resv(),                  // MACH 7
-            resv(),                  // FILT 0
-            mi("Q", "Q", 0.42),      // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.9),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.28, ParamGroup::Voice), // MACH 0
+            mi("SWEEP", "SWP", 1.0, ParamGroup::Voice), // MACH 1
+            mi("SWP_T", "SWT", 0.1, ParamGroup::Voice), // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.255, ParamGroup::Voice), // MACH 5
+            resv(),                                     // MACH 6
+            resv(),                                     // MACH 7
+            resv(),                                     // FILT 0
+            mi("Q", "Q", 0.42, ParamGroup::Filter),     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.9),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 3: Tom
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.35), // MACH 0
-            mi("SWEEP", "SWP", 0.4), // MACH 1
-            mi("SWP_T", "SWT", 0.4), // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.4),   // MACH 5
-            resv(),                  // MACH 6
-            mi("STICK", "STK", 0.3), // MACH 7
-            resv(),                  // FILT 0
-            resv(),                  // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.85),        // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.35, ParamGroup::Voice), // MACH 0
+            mi("SWEEP", "SWP", 0.4, ParamGroup::Voice), // MACH 1
+            mi("SWP_T", "SWT", 0.4, ParamGroup::Voice), // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.4, ParamGroup::Voice),   // MACH 5
+            resv(),                                     // MACH 6
+            mi("STICK", "STK", 0.3, ParamGroup::Voice), // MACH 7
+            resv(),                                     // FILT 0
+            resv(),                                     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.85),                           // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 4: SD Natural
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.28),  // MACH 0
-            mi("RATIO", "RTO", 0.48), // MACH 1
-            resv(),                   // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("BDEC", "BDC", 0.13),  // MACH 5
-            mi("NDEC", "NDC", 0.209), // MACH 6
-            mi("NMIX", "NM", 0.62),   // MACH 7
-            mi("HPF", "HPF", 0.14),   // FILT 0
-            resv(),                   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            level_info(0.7),          // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("TUNE", "TUN", 0.28, ParamGroup::Voice),  // MACH 0
+            mi("RATIO", "RTO", 0.48, ParamGroup::Voice), // MACH 1
+            resv(),                                      // MACH 2
+            resv(),                                      // MACH 3
+            resv(),                                      // MACH 4
+            mi("BDEC", "BDC", 0.13, ParamGroup::Voice),  // MACH 5
+            mi("NDEC", "NDC", 0.209, ParamGroup::Voice), // MACH 6
+            mi("NMIX", "NM", 0.62, ParamGroup::Voice),   // MACH 7
+            mi("HPF", "HPF", 0.14, ParamGroup::Filter),  // FILT 0
+            resv(),                                      // FILT 1
+            STRIP_CUT_INFO,                              // FILT 2
+            STRIP_RESO_INFO,                             // FILT 3
+            STRIP_ATK_INFO,                              // FILT 4
+            STRIP_HOLD_INFO,                             // FILT 5
+            STRIP_DEC_INFO,                              // FILT 6
+            resv(),                                      // FILT 7
+            MACH_INFO,                                   // TRACK 0
+            OUT_INFO,                                    // TRACK 1
+            PAN_INFO,                                    // TRACK 2
+            level_info(0.7),                             // TRACK 3
+            SEND_DLY_INFO,                               // TRACK 4
+            SEND_RVB_INFO,                               // TRACK 5
+            resv(),                                      // TRACK 6
+            resv(),                                      // TRACK 7
+            resv(),                                      // MOD 0
+            resv(),                                      // MOD 1
+            LFO1_RATE_INFO,                              // MOD 2
+            LFO1_DEPTH_INFO,                             // MOD 3
+            LFO1_DEST_INFO,                              // MOD 4
+            LFO2_RATE_INFO,                              // MOD 5
+            LFO2_DEPTH_INFO,                             // MOD 6
+            LFO2_DEST_INFO,                              // MOD 7
         ],
     },
     // 5: SD FM
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.28),   // MACH 0
-            mi("RAT", "RAT", 0.33),    // MACH 1
-            mi("MOD.AMT", "MDA", 0.3), // MACH 2
-            mi("MENV", "MEN", 0.15),   // MACH 3
-            resv(),                    // MACH 4
-            mi("BDEC", "BDC", 0.13),   // MACH 5
-            mi("NDEC", "NDC", 0.209),  // MACH 6
-            mi("NMIX", "NM", 0.62),    // MACH 7
-            resv(),                    // FILT 0
-            resv(),                    // FILT 1
-            STRIP_CUT_INFO,            // FILT 2
-            STRIP_RESO_INFO,           // FILT 3
-            STRIP_ATK_INFO,            // FILT 4
-            STRIP_HOLD_INFO,           // FILT 5
-            STRIP_DEC_INFO,            // FILT 6
-            resv(),                    // FILT 7
-            MACH_INFO,                 // TRACK 0
-            OUT_INFO,                  // TRACK 1
-            PAN_INFO,                  // TRACK 2
-            level_info(0.7),           // TRACK 3
-            SEND_DLY_INFO,             // TRACK 4
-            SEND_RVB_INFO,             // TRACK 5
-            resv(),                    // TRACK 6
-            resv(),                    // TRACK 7
-            resv(),                    // MOD 0
-            resv(),                    // MOD 1
-            LFO1_RATE_INFO,            // MOD 2
-            LFO1_DEPTH_INFO,           // MOD 3
-            LFO1_DEST_INFO,            // MOD 4
-            LFO2_RATE_INFO,            // MOD 5
-            LFO2_DEPTH_INFO,           // MOD 6
-            LFO2_DEST_INFO,            // MOD 7
+            mi("TUNE", "TUN", 0.28, ParamGroup::Voice),   // MACH 0
+            mi("RAT", "RAT", 0.33, ParamGroup::Voice),    // MACH 1
+            mi("MOD.AMT", "MDA", 0.3, ParamGroup::Voice), // MACH 2
+            mi("MENV", "MEN", 0.15, ParamGroup::Voice),   // MACH 3
+            resv(),                                       // MACH 4
+            mi("BDEC", "BDC", 0.13, ParamGroup::Voice),   // MACH 5
+            mi("NDEC", "NDC", 0.209, ParamGroup::Voice),  // MACH 6
+            mi("NMIX", "NM", 0.62, ParamGroup::Voice),    // MACH 7
+            resv(),                                       // FILT 0
+            resv(),                                       // FILT 1
+            STRIP_CUT_INFO,                               // FILT 2
+            STRIP_RESO_INFO,                              // FILT 3
+            STRIP_ATK_INFO,                               // FILT 4
+            STRIP_HOLD_INFO,                              // FILT 5
+            STRIP_DEC_INFO,                               // FILT 6
+            resv(),                                       // FILT 7
+            MACH_INFO,                                    // TRACK 0
+            OUT_INFO,                                     // TRACK 1
+            PAN_INFO,                                     // TRACK 2
+            level_info(0.7),                              // TRACK 3
+            SEND_DLY_INFO,                                // TRACK 4
+            SEND_RVB_INFO,                                // TRACK 5
+            resv(),                                       // TRACK 6
+            resv(),                                       // TRACK 7
+            resv(),                                       // MOD 0
+            resv(),                                       // MOD 1
+            LFO1_RATE_INFO,                               // MOD 2
+            LFO1_DEPTH_INFO,                              // MOD 3
+            LFO1_DEST_INFO,                               // MOD 4
+            LFO2_RATE_INFO,                               // MOD 5
+            LFO2_DEPTH_INFO,                              // MOD 6
+            LFO2_DEST_INFO,                               // MOD 7
         ],
     },
     // 6: RS
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.4), // MACH 0
-            mi("DET", "DET", 0.25), // MACH 1
-            resv(),                 // MACH 2
-            resv(),                 // MACH 3
-            resv(),                 // MACH 4
-            mi("DEC", "DEC", 0.3),  // MACH 5
-            mi("NDEC", "NDC", 0.3), // MACH 6
-            mi("NLEV", "NLV", 0.4), // MACH 7
-            mi("HPF", "HPF", 0.3),  // FILT 0
-            resv(),                 // FILT 1
-            STRIP_CUT_INFO,         // FILT 2
-            STRIP_RESO_INFO,        // FILT 3
-            STRIP_ATK_INFO,         // FILT 4
-            STRIP_HOLD_INFO,        // FILT 5
-            STRIP_DEC_INFO,         // FILT 6
-            resv(),                 // FILT 7
-            MACH_INFO,              // TRACK 0
-            OUT_INFO,               // TRACK 1
-            PAN_INFO,               // TRACK 2
-            level_info(0.75),       // TRACK 3
-            SEND_DLY_INFO,          // TRACK 4
-            SEND_RVB_INFO,          // TRACK 5
-            resv(),                 // TRACK 6
-            resv(),                 // TRACK 7
-            resv(),                 // MOD 0
-            resv(),                 // MOD 1
-            LFO1_RATE_INFO,         // MOD 2
-            LFO1_DEPTH_INFO,        // MOD 3
-            LFO1_DEST_INFO,         // MOD 4
-            LFO2_RATE_INFO,         // MOD 5
-            LFO2_DEPTH_INFO,        // MOD 6
-            LFO2_DEST_INFO,         // MOD 7
+            mi("TUNE", "TUN", 0.4, ParamGroup::Voice), // MACH 0
+            mi("DET", "DET", 0.25, ParamGroup::Voice), // MACH 1
+            resv(),                                    // MACH 2
+            resv(),                                    // MACH 3
+            resv(),                                    // MACH 4
+            mi("DEC", "DEC", 0.3, ParamGroup::Voice),  // MACH 5
+            mi("NDEC", "NDC", 0.3, ParamGroup::Voice), // MACH 6
+            mi("NLEV", "NLV", 0.4, ParamGroup::Voice), // MACH 7
+            mi("HPF", "HPF", 0.3, ParamGroup::Filter), // FILT 0
+            resv(),                                    // FILT 1
+            STRIP_CUT_INFO,                            // FILT 2
+            STRIP_RESO_INFO,                           // FILT 3
+            STRIP_ATK_INFO,                            // FILT 4
+            STRIP_HOLD_INFO,                           // FILT 5
+            STRIP_DEC_INFO,                            // FILT 6
+            resv(),                                    // FILT 7
+            MACH_INFO,                                 // TRACK 0
+            OUT_INFO,                                  // TRACK 1
+            PAN_INFO,                                  // TRACK 2
+            level_info(0.75),                          // TRACK 3
+            SEND_DLY_INFO,                             // TRACK 4
+            SEND_RVB_INFO,                             // TRACK 5
+            resv(),                                    // TRACK 6
+            resv(),                                    // TRACK 7
+            resv(),                                    // MOD 0
+            resv(),                                    // MOD 1
+            LFO1_RATE_INFO,                            // MOD 2
+            LFO1_DEPTH_INFO,                           // MOD 3
+            LFO1_DEST_INFO,                            // MOD 4
+            LFO2_RATE_INFO,                            // MOD 5
+            LFO2_DEPTH_INFO,                           // MOD 6
+            LFO2_DEST_INFO,                            // MOD 7
         ],
     },
     // 7: CP
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.3),  // MACH 0
-            mi("RATIO", "RTO", 0.5), // MACH 1
-            resv(),                  // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("BDEC", "BDC", 0.2),  // MACH 5
-            mi("NDEC", "NDC", 0.3),  // MACH 6
-            mi("BAL", "BAL", 0.8),   // MACH 7
-            mi("HPF", "HPF", 0.2),   // FILT 0
-            mi("LPF", "LPF", 0.5),   // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.7),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.3, ParamGroup::Voice),  // MACH 0
+            mi("RATIO", "RTO", 0.5, ParamGroup::Voice), // MACH 1
+            resv(),                                     // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("BDEC", "BDC", 0.2, ParamGroup::Voice),  // MACH 5
+            mi("NDEC", "NDC", 0.3, ParamGroup::Voice),  // MACH 6
+            mi("BAL", "BAL", 0.8, ParamGroup::Voice),   // MACH 7
+            mi("HPF", "HPF", 0.2, ParamGroup::Filter),  // FILT 0
+            mi("LPF", "LPF", 0.5, ParamGroup::Filter),  // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.7),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 8: Hat Classic
     MachineInfo {
         params: [
-            resv(),                  // MACH 0
-            resv(),                  // MACH 1
-            resv(),                  // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.092), // MACH 5
-            resv(),                  // MACH 6
-            resv(),                  // MACH 7
-            mi("HPF", "HPF", 0.45),  // FILT 0
-            mi("LPF", "LPF", 0.75),  // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.4),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            resv(),                                     // MACH 0
+            resv(),                                     // MACH 1
+            resv(),                                     // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.092, ParamGroup::Voice), // MACH 5
+            resv(),                                     // MACH 6
+            resv(),                                     // MACH 7
+            mi("HPF", "HPF", 0.45, ParamGroup::Filter), // FILT 0
+            mi("LPF", "LPF", 0.75, ParamGroup::Filter), // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.4),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 9: HH Basic
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.3),  // MACH 0
-            mi("TONE", "TON", 0.5),  // MACH 1
-            resv(),                  // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.092), // MACH 5
-            mi("TDEC", "TDC", 0.3),  // MACH 6
-            mi("RST", "RST", 1.0),   // MACH 7
-            mi("BPF", "BPF", 0.5),   // FILT 0
-            resv(),                  // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.8),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.3, ParamGroup::Voice),  // MACH 0
+            mi("TONE", "TON", 0.5, ParamGroup::Voice),  // MACH 1
+            resv(),                                     // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.092, ParamGroup::Voice), // MACH 5
+            mi("TDEC", "TDC", 0.3, ParamGroup::Voice),  // MACH 6
+            mi("RST", "RST", 1.0, ParamGroup::Voice),   // MACH 7
+            mi("BPF", "BPF", 0.5, ParamGroup::Filter),  // FILT 0
+            resv(),                                     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.8),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 10: CY Metallic
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.2),  // MACH 0
-            mi("TONE", "TON", 0.3),  // MACH 1
-            resv(),                  // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.3),   // MACH 5
-            mi("TDEC", "TDC", 0.25), // MACH 6
-            resv(),                  // MACH 7
-            mi("NCOL", "NCL", 0.3),  // FILT 0
-            resv(),                  // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.5),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.2, ParamGroup::Voice),  // MACH 0
+            mi("TONE", "TON", 0.3, ParamGroup::Voice),  // MACH 1
+            resv(),                                     // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.3, ParamGroup::Voice),   // MACH 5
+            mi("TDEC", "TDC", 0.25, ParamGroup::Voice), // MACH 6
+            resv(),                                     // MACH 7
+            mi("NCOL", "NCL", 0.3, ParamGroup::Filter), // FILT 0
+            resv(),                                     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.5),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 11: CB Classic
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.4), // MACH 0
-            mi("DET", "DET", 0.86), // MACH 1
-            resv(),                 // MACH 2
-            resv(),                 // MACH 3
-            resv(),                 // MACH 4
-            mi("DEC", "DEC", 0.15), // MACH 5
-            resv(),                 // MACH 6
-            resv(),                 // MACH 7
-            mi("BPF", "BPF", 0.35), // FILT 0
-            resv(),                 // FILT 1
-            STRIP_CUT_INFO,         // FILT 2
-            STRIP_RESO_INFO,        // FILT 3
-            STRIP_ATK_INFO,         // FILT 4
-            STRIP_HOLD_INFO,        // FILT 5
-            STRIP_DEC_INFO,         // FILT 6
-            resv(),                 // FILT 7
-            MACH_INFO,              // TRACK 0
-            OUT_INFO,               // TRACK 1
-            PAN_INFO,               // TRACK 2
-            level_info(0.55),       // TRACK 3
-            SEND_DLY_INFO,          // TRACK 4
-            SEND_RVB_INFO,          // TRACK 5
-            resv(),                 // TRACK 6
-            resv(),                 // TRACK 7
-            resv(),                 // MOD 0
-            resv(),                 // MOD 1
-            LFO1_RATE_INFO,         // MOD 2
-            LFO1_DEPTH_INFO,        // MOD 3
-            LFO1_DEST_INFO,         // MOD 4
-            LFO2_RATE_INFO,         // MOD 5
-            LFO2_DEPTH_INFO,        // MOD 6
-            LFO2_DEST_INFO,         // MOD 7
+            mi("TUNE", "TUN", 0.4, ParamGroup::Voice),  // MACH 0
+            mi("DET", "DET", 0.86, ParamGroup::Voice),  // MACH 1
+            resv(),                                     // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.15, ParamGroup::Voice),  // MACH 5
+            resv(),                                     // MACH 6
+            resv(),                                     // MACH 7
+            mi("BPF", "BPF", 0.35, ParamGroup::Filter), // FILT 0
+            resv(),                                     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.55),                           // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 12: SY Tone
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.5),    // MACH 0
-            mi("RATIO", "RTO", 0.25),  // MACH 1
-            mi("FDBK", "FDB", 0.2),    // MACH 2
-            mi("MOD.AMT", "MDA", 0.4), // MACH 3
-            mi("MENV", "MEN", 0.25),   // MACH 4
-            mi("DEC", "DEC", 0.3),     // MACH 5
-            resv(),                    // MACH 6
-            resv(),                    // MACH 7
-            resv(),                    // FILT 0
-            resv(),                    // FILT 1
-            STRIP_CUT_INFO,            // FILT 2
-            STRIP_RESO_INFO,           // FILT 3
-            STRIP_ATK_INFO,            // FILT 4
-            STRIP_HOLD_INFO,           // FILT 5
-            STRIP_DEC_INFO,            // FILT 6
-            resv(),                    // FILT 7
-            MACH_INFO,                 // TRACK 0
-            OUT_INFO,                  // TRACK 1
-            PAN_INFO,                  // TRACK 2
-            level_info(0.7),           // TRACK 3
-            SEND_DLY_INFO,             // TRACK 4
-            SEND_RVB_INFO,             // TRACK 5
-            resv(),                    // TRACK 6
-            resv(),                    // TRACK 7
-            resv(),                    // MOD 0
-            resv(),                    // MOD 1
-            LFO1_RATE_INFO,            // MOD 2
-            LFO1_DEPTH_INFO,           // MOD 3
-            LFO1_DEST_INFO,            // MOD 4
-            LFO2_RATE_INFO,            // MOD 5
-            LFO2_DEPTH_INFO,           // MOD 6
-            LFO2_DEST_INFO,            // MOD 7
+            mi("TUNE", "TUN", 0.5, ParamGroup::Voice),    // MACH 0
+            mi("RATIO", "RTO", 0.25, ParamGroup::Voice),  // MACH 1
+            mi("FDBK", "FDB", 0.2, ParamGroup::Voice),    // MACH 2
+            mi("MOD.AMT", "MDA", 0.4, ParamGroup::Voice), // MACH 3
+            mi("MENV", "MEN", 0.25, ParamGroup::Voice),   // MACH 4
+            mi("DEC", "DEC", 0.3, ParamGroup::Voice),     // MACH 5
+            resv(),                                       // MACH 6
+            resv(),                                       // MACH 7
+            resv(),                                       // FILT 0
+            resv(),                                       // FILT 1
+            STRIP_CUT_INFO,                               // FILT 2
+            STRIP_RESO_INFO,                              // FILT 3
+            STRIP_ATK_INFO,                               // FILT 4
+            STRIP_HOLD_INFO,                              // FILT 5
+            STRIP_DEC_INFO,                               // FILT 6
+            resv(),                                       // FILT 7
+            MACH_INFO,                                    // TRACK 0
+            OUT_INFO,                                     // TRACK 1
+            PAN_INFO,                                     // TRACK 2
+            level_info(0.7),                              // TRACK 3
+            SEND_DLY_INFO,                                // TRACK 4
+            SEND_RVB_INFO,                                // TRACK 5
+            resv(),                                       // TRACK 6
+            resv(),                                       // TRACK 7
+            resv(),                                       // MOD 0
+            resv(),                                       // MOD 1
+            LFO1_RATE_INFO,                               // MOD 2
+            LFO1_DEPTH_INFO,                              // MOD 3
+            LFO1_DEST_INFO,                               // MOD 4
+            LFO2_RATE_INFO,                               // MOD 5
+            LFO2_DEPTH_INFO,                              // MOD 6
+            LFO2_DEST_INFO,                               // MOD 7
         ],
     },
     // 13: Dub Siren
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.3),  // MACH 0
-            mi("DEPTH", "DPT", 0.5), // MACH 1
-            mi("RATE", "RTE", 0.2),  // MACH 2
-            resv(),                  // MACH 3
-            resv(),                  // MACH 4
-            mi("DEC", "DEC", 0.255), // MACH 5
-            resv(),                  // MACH 6
-            mi("SHAPE", "SHP", 0.5), // MACH 7
-            resv(),                  // FILT 0
-            resv(),                  // FILT 1
-            STRIP_CUT_INFO,          // FILT 2
-            STRIP_RESO_INFO,         // FILT 3
-            STRIP_ATK_INFO,          // FILT 4
-            STRIP_HOLD_INFO,         // FILT 5
-            STRIP_DEC_INFO,          // FILT 6
-            resv(),                  // FILT 7
-            MACH_INFO,               // TRACK 0
-            OUT_INFO,                // TRACK 1
-            PAN_INFO,                // TRACK 2
-            level_info(0.8),         // TRACK 3
-            SEND_DLY_INFO,           // TRACK 4
-            SEND_RVB_INFO,           // TRACK 5
-            resv(),                  // TRACK 6
-            resv(),                  // TRACK 7
-            resv(),                  // MOD 0
-            resv(),                  // MOD 1
-            LFO1_RATE_INFO,          // MOD 2
-            LFO1_DEPTH_INFO,         // MOD 3
-            LFO1_DEST_INFO,          // MOD 4
-            LFO2_RATE_INFO,          // MOD 5
-            LFO2_DEPTH_INFO,         // MOD 6
-            LFO2_DEST_INFO,          // MOD 7
+            mi("TUNE", "TUN", 0.3, ParamGroup::Voice),  // MACH 0
+            mi("DEPTH", "DPT", 0.5, ParamGroup::Voice), // MACH 1
+            mi("RATE", "RTE", 0.2, ParamGroup::Voice),  // MACH 2
+            resv(),                                     // MACH 3
+            resv(),                                     // MACH 4
+            mi("DEC", "DEC", 0.255, ParamGroup::Voice), // MACH 5
+            resv(),                                     // MACH 6
+            mi("SHAPE", "SHP", 0.5, ParamGroup::Voice), // MACH 7
+            resv(),                                     // FILT 0
+            resv(),                                     // FILT 1
+            STRIP_CUT_INFO,                             // FILT 2
+            STRIP_RESO_INFO,                            // FILT 3
+            STRIP_ATK_INFO,                             // FILT 4
+            STRIP_HOLD_INFO,                            // FILT 5
+            STRIP_DEC_INFO,                             // FILT 6
+            resv(),                                     // FILT 7
+            MACH_INFO,                                  // TRACK 0
+            OUT_INFO,                                   // TRACK 1
+            PAN_INFO,                                   // TRACK 2
+            level_info(0.8),                            // TRACK 3
+            SEND_DLY_INFO,                              // TRACK 4
+            SEND_RVB_INFO,                              // TRACK 5
+            resv(),                                     // TRACK 6
+            resv(),                                     // TRACK 7
+            resv(),                                     // MOD 0
+            resv(),                                     // MOD 1
+            LFO1_RATE_INFO,                             // MOD 2
+            LFO1_DEPTH_INFO,                            // MOD 3
+            LFO1_DEST_INFO,                             // MOD 4
+            LFO2_RATE_INFO,                             // MOD 5
+            LFO2_DEPTH_INFO,                            // MOD 6
+            LFO2_DEST_INFO,                             // MOD 7
         ],
     },
     // 14: Sweep FX
     MachineInfo {
         params: [
-            mi("RATE", "RTE", 0.2),   // MACH 0
-            mi("DEPTH", "DPT", 0.5),  // MACH 1
-            mi("START", "STR", 0.45), // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("DEC", "DEC", 0.255),  // MACH 5
-            resv(),                   // MACH 6
-            mi("MODE", "MOD", 0.0),   // MACH 7
-            resv(),                   // FILT 0
-            mi("RESO", "RES", 0.2),   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            level_info(0.7),          // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("RATE", "RTE", 0.2, ParamGroup::Voice),   // MACH 0
+            mi("DEPTH", "DPT", 0.5, ParamGroup::Voice),  // MACH 1
+            mi("START", "STR", 0.45, ParamGroup::Voice), // MACH 2
+            resv(),                                      // MACH 3
+            resv(),                                      // MACH 4
+            mi("DEC", "DEC", 0.255, ParamGroup::Voice),  // MACH 5
+            resv(),                                      // MACH 6
+            mi("MODE", "MOD", 0.0, ParamGroup::Voice),   // MACH 7
+            resv(),                                      // FILT 0
+            mi("RESO", "RES", 0.2, ParamGroup::Filter),  // FILT 1
+            STRIP_CUT_INFO,                              // FILT 2
+            STRIP_RESO_INFO,                             // FILT 3
+            STRIP_ATK_INFO,                              // FILT 4
+            STRIP_HOLD_INFO,                             // FILT 5
+            STRIP_DEC_INFO,                              // FILT 6
+            resv(),                                      // FILT 7
+            MACH_INFO,                                   // TRACK 0
+            OUT_INFO,                                    // TRACK 1
+            PAN_INFO,                                    // TRACK 2
+            level_info(0.7),                             // TRACK 3
+            SEND_DLY_INFO,                               // TRACK 4
+            SEND_RVB_INFO,                               // TRACK 5
+            resv(),                                      // TRACK 6
+            resv(),                                      // TRACK 7
+            resv(),                                      // MOD 0
+            resv(),                                      // MOD 1
+            LFO1_RATE_INFO,                              // MOD 2
+            LFO1_DEPTH_INFO,                             // MOD 3
+            LFO1_DEST_INFO,                              // MOD 4
+            LFO2_RATE_INFO,                              // MOD 5
+            LFO2_DEPTH_INFO,                             // MOD 6
+            LFO2_DEST_INFO,                              // MOD 7
         ],
     },
 ];

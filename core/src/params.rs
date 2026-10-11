@@ -24,6 +24,33 @@
 //! own table — mi-drum's strip/shaper rows are [`ParamRoute::Slot`] because it
 //! runs that chain inside the voice, while the drum device's same positions
 //! route to the core strip.
+//!
+//! ## Groups: a second address over the same table
+//!
+//! On top of the flat index, each row carries a [`ParamGroup`] — what the
+//! param *is*: [`Voice`](ParamGroup::Voice), [`Filter`](ParamGroup::Filter),
+//! [`Shaper`](ParamGroup::Shaper), [`Lfo`](ParamGroup::Lfo), and so on. A
+//! [`ParamId`] is `{ group, index }`, where `index` is the row's ordinal among
+//! rows carrying that group, and [`resolve`] walks the table to find it.
+//!
+//! Groups and banks are independent. A group is a label on a parameter, not a
+//! reserved range, so it has no declared size and a device adds a param by
+//! appending a row. mi-drum's SHAPER rows are scattered at flat 8, 9, 13, 14,
+//! 15, 22 and 23 — deliberately, because folding them into a bank would have
+//! meant reordering the flat array, and the flat array is what CC 20..51
+//! addresses. The two addressings coexist: the flat index is the ABI the CC
+//! map and the Deluge depend on, and `(group, index)` is the one NRPN will
+//! speak. They agree on what a param *is* and disagree only on layout.
+//!
+//! Resolution is a linear scan rather than a base-offset table. That lookup
+//! runs when an NRPN message arrives — control rate, never the audio path —
+//! and 33 rows is ~33 comparisons per message. A `GROUP_BASE` table would make
+//! it O(1) and force every group's rows contiguous, which would break the CC
+//! map for a cost that rounds to zero.
+//!
+//! [`ParamGroup::Reserved`] rows are skipped while counting ordinals and never
+//! resolve at all, so a slot a machine does not use stays a hole in the
+//! address space rather than a target a controller can reach.
 
 /// Most param knobs a device may expose.
 ///
@@ -139,6 +166,100 @@ pub const SLOT_LFO2_DEPTH: usize = param_index(BANK_MOD, 6);
 /// destination enum). CC 51. Track-routed.
 pub const SLOT_LFO2_DEST: usize = param_index(BANK_MOD, 7);
 
+/// Which group a param belongs to.
+///
+/// The label on a parameter, not a reserved range: a group has no declared
+/// size and adding one means adding a row. It is what an NRPN address keys
+/// on — MSB selects the group, LSB selects the param within it — so the
+/// identifiers are wire values and must not be renumbered.
+///
+/// A param's group is independent of its [`ParamRoute`]. Route says where the
+/// value goes in the engine; group says what it is called on the wire and on
+/// a control surface. mi-drum's shaper rows, for example, are group
+/// [`Shaper`](ParamGroup::Shaper) and route [`Slot`](ParamRoute::Slot).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ParamGroup {
+    /// Track-level routing and mixing: machine select, output, pan, level,
+    /// sends.
+    Track = 0,
+    /// Machine-specific synthesis controls. Per machine: Peaks takes four,
+    /// Plaits nine (`VOICE` is what makes that difference addressable rather
+    /// than a hole in the map).
+    Voice = 1,
+    /// A filter, machine-internal or strip: cutoff, resonance, FM.
+    Filter = 2,
+    /// The waveshaping stage: algorithm, timbre, drive, mix, and its
+    /// oscillator and I/O taps.
+    Shaper = 3,
+    /// Amplitude envelope — the strip's AHD on the drum device. mi-drum runs
+    /// its envelope inside the voice, so it has no AMP rows.
+    Amp = 4,
+    /// LFOs: rate, depth, and per-target depths.
+    Lfo = 5,
+    /// Envelopes other than the amplitude one: attack, decay, and per-target
+    /// depths.
+    Env = 6,
+    /// Reserved for the mod matrix. Not part of this work.
+    Matrix = 7,
+    /// Channel-independent: master gain, FX bus. Not addressable per track.
+    Global = 127,
+    /// A [`resv`] row. Never matches a [`ParamId`], so a reserved slot cannot
+    /// be addressed — which is the point of it being reserved.
+    Reserved = 255,
+}
+
+/// An address: a group, and a position within it.
+///
+/// The external address space for a param, and what NRPN carries. Resolution
+/// is a scan of the device's table for the `index`-th row in `group` — see
+/// [`resolve`].
+///
+/// `index` is the entry's ordinal among entries carrying that group, so it is
+/// stable under appending a param to a *different* group and shifts only when
+/// a param is inserted earlier within its own group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParamId {
+    /// The group being addressed.
+    pub group: ParamGroup,
+    /// Position within the group.
+    pub index: u8,
+}
+
+/// Resolve a [`ParamId`] against a device's parameter table.
+///
+/// Returns the flat index, or `None` if the group has no such member.
+///
+/// [`ParamGroup::Reserved`] rows are skipped while counting ordinals *and*
+/// the group itself never resolves: a reserved slot is a hole in the address
+/// space, not a target a controller can reach.
+///
+/// A linear scan rather than a base-offset table. The lookup runs when an
+/// NRPN message arrives, which is control rate: 33 rows is ~33 comparisons
+/// per message, against an M7 at 600 MHz. A `GROUP_BASE` table would make
+/// this O(1) and require every group's rows to be contiguous in the flat
+/// array, which would force a reorder of the existing layout and break the
+/// CC map (CC 20..51 = flat 0..31) for a cost that rounds to zero.
+pub const fn resolve(table: &[ParamInfo], id: ParamId) -> Option<usize> {
+    if id.group as u8 == ParamGroup::Reserved as u8 {
+        return None;
+    }
+    let mut seen = 0usize;
+    let mut i = 0usize;
+    while i < table.len() {
+        // `as u8` rather than `==`: `PartialEq` is not const-callable, and
+        // the enum is `repr(u8)` so the discriminants are the wire values.
+        if table[i].group as u8 == id.group as u8 {
+            if seen == id.index as usize {
+                return Some(i);
+            }
+            seen += 1;
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Where a param's value goes when it is set.
 ///
 /// Dispatch data for [`Track::set_param`](crate::track::Track::set_param),
@@ -222,8 +343,10 @@ pub enum SendBus {
 /// `name` is the human label (`"TUNE"`); `abbrev` is the short firmware
 /// display form (`"TUN"`). `default` is the canonical factory value used by
 /// a device's default-param function — same value on host and target so a
-/// rendered WAV lines up bit-for-bit against hardware. `route` says where the
-/// value goes when the param is set (see [`ParamRoute`]).
+/// rendered WAV lines up bit-for-bit against hardware. `group` says what the
+/// param is on the wire and on a control surface (see [`ParamGroup`]).
+/// `route` says where the value goes when the param is set (see
+/// [`ParamRoute`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParamInfo {
     /// Human label for display surfaces.
@@ -232,20 +355,31 @@ pub struct ParamInfo {
     pub abbrev: &'static str,
     /// Canonical factory param value.
     pub default: f32,
+    /// Which group the param belongs to.
+    pub group: ParamGroup,
     /// Where the value goes when the param is set.
     pub route: ParamRoute,
 }
 
 /// Build a [`ParamInfo`] literal for a machine row.
 ///
-/// The default route is [`ParamRoute::Slot`] — the voice consumes the value in
-/// `set_params` — which is what every machine-specific row wants. Track-routed
-/// rows chain [`with_route`].
-pub const fn mi(name: &'static str, abbrev: &'static str, default: f32) -> ParamInfo {
+/// The group is a required argument rather than a default: a wrong group
+/// means the param cannot be reached by its NRPN address, and nothing but
+/// being forced to state it at each row catches that. The default route is
+/// [`ParamRoute::Slot`] — the voice consumes the value in `set_params` —
+/// which is what every machine-specific row wants. Track-routed rows chain
+/// [`ParamInfo::with_route`].
+pub const fn mi(
+    name: &'static str,
+    abbrev: &'static str,
+    default: f32,
+    group: ParamGroup,
+) -> ParamInfo {
     ParamInfo {
         name,
         abbrev,
         default,
+        group,
         route: ParamRoute::Slot,
     }
 }
@@ -262,8 +396,10 @@ impl ParamInfo {
 ///
 /// Routes as [`ParamRoute::Slot`]: a set lands in the array and is forwarded,
 /// and the voice ignores what it does not use — same as it always behaved.
+/// Grouped [`Reserved`](ParamGroup::Reserved), so [`resolve`] never matches
+/// it and a reserved slot cannot be addressed.
 pub const fn resv() -> ParamInfo {
-    mi("RESV", "RSV", 0.0)
+    mi("RESV", "RSV", 0.0, ParamGroup::Reserved)
 }
 
 // ---- Track-routed param info ----
@@ -271,50 +407,53 @@ pub const fn resv() -> ParamInfo {
 // Their routes are what `Track::set_param` dispatches on.
 
 /// MACH selector (TRACK 0). CC 36.
-pub const MACH_INFO: ParamInfo = mi("MACH", "MCH", 0.0).with_route(ParamRoute::Machine);
+pub const MACH_INFO: ParamInfo =
+    mi("MACH", "MCH", 0.0, ParamGroup::Track).with_route(ParamRoute::Machine);
 /// Strip SVF cutoff (FILT 2). CC 30. Default 1.0 = 20 kHz (fully open).
-pub const STRIP_CUT_INFO: ParamInfo =
-    mi("STRIP.CUT", "SCUT", 1.0).with_route(ParamRoute::Strip(StripParam::Cutoff));
+pub const STRIP_CUT_INFO: ParamInfo = mi("STRIP.CUT", "SCUT", 1.0, ParamGroup::Filter)
+    .with_route(ParamRoute::Strip(StripParam::Cutoff));
 /// Strip SVF resonance (FILT 3). CC 31. Default ~0.01 = Butterworth Q.
-pub const STRIP_RESO_INFO: ParamInfo =
-    mi("STRIP.RESO", "SRES", 0.01).with_route(ParamRoute::Strip(StripParam::Reso));
+pub const STRIP_RESO_INFO: ParamInfo = mi("STRIP.RESO", "SRES", 0.01, ParamGroup::Filter)
+    .with_route(ParamRoute::Strip(StripParam::Reso));
 /// Strip AHD attack (FILT 4). CC 32. Default 0.0 = instant.
 pub const STRIP_ATK_INFO: ParamInfo =
-    mi("STRIP.ATK", "SATK", 0.0).with_route(ParamRoute::Strip(StripParam::Attack));
+    mi("STRIP.ATK", "SATK", 0.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Attack));
 /// Strip AHD hold (FILT 5). CC 33. Default 1.0 = 10 s.
 pub const STRIP_HOLD_INFO: ParamInfo =
-    mi("STRIP.HOLD", "SHLD", 1.0).with_route(ParamRoute::Strip(StripParam::Hold));
+    mi("STRIP.HOLD", "SHLD", 1.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Hold));
 /// Strip AHD decay (FILT 6). CC 34. Default 1.0 = 10 s.
 pub const STRIP_DEC_INFO: ParamInfo =
-    mi("STRIP.DEC", "SDEC", 1.0).with_route(ParamRoute::Strip(StripParam::Decay));
+    mi("STRIP.DEC", "SDEC", 1.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Decay));
 /// Strip pan (TRACK 2). CC 38. Default 0.5 = centre.
-pub const PAN_INFO: ParamInfo = mi("PAN", "PAN", 0.5).with_route(ParamRoute::Pan);
+pub const PAN_INFO: ParamInfo =
+    mi("PAN", "PAN", 0.5, ParamGroup::Track).with_route(ParamRoute::Pan);
 /// Delay send (TRACK 4). CC 40.
 pub const SEND_DLY_INFO: ParamInfo =
-    mi("SEND.DLY", "SDY", 0.0).with_route(ParamRoute::Send(SendBus::Delay));
+    mi("SEND.DLY", "SDY", 0.0, ParamGroup::Track).with_route(ParamRoute::Send(SendBus::Delay));
 /// Reverb send (TRACK 5). CC 41.
 pub const SEND_RVB_INFO: ParamInfo =
-    mi("SEND.RVB", "SRV", 0.0).with_route(ParamRoute::Send(SendBus::Reverb));
+    mi("SEND.RVB", "SRV", 0.0, ParamGroup::Track).with_route(ParamRoute::Send(SendBus::Reverb));
 /// Output routing (TRACK 1). CC 37. Default 0.0 = Master.
-pub const OUT_INFO: ParamInfo = mi("OUT", "OUT", 0.0).with_route(ParamRoute::Out);
+pub const OUT_INFO: ParamInfo =
+    mi("OUT", "OUT", 0.0, ParamGroup::Track).with_route(ParamRoute::Out);
 /// LFO 1 rate (MOD 2). CC 46. 0..0.5 slow, 0.5..1 fast.
 pub const LFO1_RATE_INFO: ParamInfo =
-    mi("LFO1.RATE", "L1R", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo1Rate));
+    mi("LFO1.RATE", "L1R", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Rate));
 /// LFO 1 depth (MOD 3). CC 47.
 pub const LFO1_DEPTH_INFO: ParamInfo =
-    mi("LFO1.DEP", "L1D", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo1Depth));
+    mi("LFO1.DEP", "L1D", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Depth));
 /// LFO 1 destination (MOD 4). CC 48. Default 0.0 = Param(0).
 pub const LFO1_DEST_INFO: ParamInfo =
-    mi("LFO1.DST", "L1S", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo1Dest));
+    mi("LFO1.DST", "L1S", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Dest));
 /// LFO 2 rate (MOD 5). CC 49. Same split mapping as [`LFO1_RATE_INFO`].
 pub const LFO2_RATE_INFO: ParamInfo =
-    mi("LFO2.RATE", "L2R", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo2Rate));
+    mi("LFO2.RATE", "L2R", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Rate));
 /// LFO 2 depth (MOD 6). CC 50.
 pub const LFO2_DEPTH_INFO: ParamInfo =
-    mi("LFO2.DEP", "L2D", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo2Depth));
+    mi("LFO2.DEP", "L2D", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Depth));
 /// LFO 2 destination (MOD 7). CC 51. Default 0.0 = Param(0).
 pub const LFO2_DEST_INFO: ParamInfo =
-    mi("LFO2.DST", "L2S", 0.0).with_route(ParamRoute::Lfo(LfoParam::Lfo2Dest));
+    mi("LFO2.DST", "L2S", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Dest));
 
 /// Track output level (TRACK 3). Per-machine default.
 ///
@@ -323,7 +462,7 @@ pub const LFO2_DEST_INFO: ParamInfo =
 /// strip or modulation params. The separate route exists so control surfaces
 /// can tell a track-level param from a machine one.
 pub const fn level_info(default: f32) -> ParamInfo {
-    mi("LEVEL", "LVL", default).with_route(ParamRoute::Level)
+    mi("LEVEL", "LVL", default, ParamGroup::Track).with_route(ParamRoute::Level)
 }
 
 #[cfg(test)]
@@ -332,11 +471,146 @@ mod tests {
 
     #[test]
     fn machine_rows_route_to_the_voice() {
-        assert_eq!(mi("TUNE", "TUN", 0.5).route, ParamRoute::Slot);
+        assert_eq!(
+            mi("TUNE", "TUN", 0.5, ParamGroup::Voice).route,
+            ParamRoute::Slot
+        );
         assert_eq!(resv().route, ParamRoute::Slot);
         assert_eq!(
-            mi("TUNE", "TUN", 0.5).with_route(ParamRoute::Pan).route,
+            mi("TUNE", "TUN", 0.5, ParamGroup::Voice)
+                .with_route(ParamRoute::Pan)
+                .route,
             ParamRoute::Pan
+        );
+    }
+
+    #[test]
+    fn reserved_rows_cannot_be_addressed() {
+        // `resv()` groups itself Reserved, so no ParamId ever resolves to it:
+        // a reserved slot stays a hole in the address space, not a target.
+        let table = [
+            mi("TUNE", "TUN", 0.5, ParamGroup::Voice),
+            resv(),
+            mi("HARM", "HRM", 0.5, ParamGroup::Voice),
+        ];
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Voice,
+                    index: 0
+                }
+            ),
+            Some(0)
+        );
+        // Index 1 skips the reserved row and finds HARM at 2: the ordinal is
+        // counted over rows in the group, and Reserved is not in the group.
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Voice,
+                    index: 1
+                }
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Voice,
+                    index: 2
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Reserved,
+                    index: 0
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_walks_a_device_table_by_group() {
+        // The shape mi-drum's table has today: SHAPER rows scattered across
+        // the flat array (8, 9, 13, 14, 15, 22, 23). Contiguity is not
+        // required — the scan finds them regardless.
+        let table = [
+            mi("TUNE", "TUN", 0.5, ParamGroup::Voice), // 0
+            mi("HARM", "HRM", 0.5, ParamGroup::Voice), // 1
+            mi("SAL", "SAL", 0.0, ParamGroup::Shaper), // 2
+            mi("STM", "STM", 0.5, ParamGroup::Shaper), // 3
+            resv(),                                    // 4
+            mi("SDR", "SDR", 0.2, ParamGroup::Shaper), // 5
+            mi("MCH", "MCH", 0.0, ParamGroup::Track),  // 6
+            mi("SIN", "SIN", 0.5, ParamGroup::Shaper), // 7
+        ];
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Shaper,
+                    index: 0
+                }
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Shaper,
+                    index: 2
+                }
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Shaper,
+                    index: 3
+                }
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Shaper,
+                    index: 4
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Track,
+                    index: 0
+                }
+            ),
+            Some(6)
+        );
+        assert_eq!(
+            resolve(
+                &table,
+                ParamId {
+                    group: ParamGroup::Amp,
+                    index: 0
+                }
+            ),
+            None
         );
     }
 
