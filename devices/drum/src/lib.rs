@@ -64,10 +64,11 @@ pub use device_core::strip::StripParams;
 pub use device_core::track::{pan_law, ModState, VelMod, CHOKE_SAMPLES};
 
 pub use machines::{
-    MachineId, ParamInfo, NUM_BANKS, NUM_PARAMS, PARAMS_PER_BANK, SLOT_FILT_0, SLOT_FILT_1,
-    SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST,
-    SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
-    SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
+    MachineId, ParamInfo, ParamRoute, NUM_BANKS, NUM_PARAMS, PARAMS_PER_BANK, SLOT_FILT_0,
+    SLOT_FILT_1, SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
+    SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
+    SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
+    SLOT_STRIP_RESO,
 };
 
 pub use device_core::engine::{DeviceEngine, Engine};
@@ -96,8 +97,11 @@ impl SlotId<NUM_PARAMS> for crate::machines::MachineId {
 }
 
 impl device_core::slot::DeviceModel<NUM_PARAMS> for crate::machines::MachineId {
-    fn param_info(self) -> [ParamInfo; NUM_PARAMS] {
+    fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
         self.params()
+    }
+    fn param_route(self, idx: usize) -> ParamRoute {
+        self.route_at(idx)
     }
     fn label(self) -> &'static str {
         self.label()

@@ -49,10 +49,10 @@ use device_core::dsp::svf::stability_ceiling_hz;
 use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::params::{
-    mi, param_index, ParamInfo, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO, NUM_PARAMS, OUT_INFO,
-    PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1,
-    SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT,
-    SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    level_info, mi, param_index, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD, BANK_TRACK, MACH_INFO,
+    NUM_PARAMS, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE,
+    SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6,
+    SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
@@ -508,8 +508,14 @@ impl SlotId<NUM_PARAMS> for MiMachineId {
 }
 
 impl DeviceModel<NUM_PARAMS> for MiMachineId {
-    fn param_info(self) -> [ParamInfo; NUM_PARAMS] {
+    fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
         self.params()
+    }
+    fn param_route(self, idx: usize) -> ParamRoute {
+        match PARAMS.get(idx) {
+            Some(info) => info.route,
+            None => ParamRoute::Slot,
+        }
     }
     fn label(self) -> &'static str {
         self.label()
@@ -727,7 +733,7 @@ static PARAMS: [ParamInfo; NUM_PARAMS] = [
     MACH_INFO,                // TRACK 0
     OUT_INFO,                 // TRACK 1
     PAN_INFO,                 // TRACK 2
-    mi("LEVEL", "LVL", 0.85), // TRACK 3
+    level_info(0.85),         // TRACK 3
     SEND_DLY_INFO,            // TRACK 4
     SEND_RVB_INFO,            // TRACK 5
     SHAPER_MOD_SRC_INFO,      // TRACK 6 — Warps modulator source
@@ -1975,6 +1981,30 @@ impl MiDrumEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The route table is what `Track::set_param` dispatches on. mi-drum runs
+    /// its own strip and modulation chain inside the slot (`strip_bypass` is
+    /// audio-path only now), so every slot except the TRACK-bank track params
+    /// must route to the voice — a `Strip`/`Lfo` row here would send a CC into
+    /// the core strip this device does not use.
+    #[test]
+    fn routes_match_the_device_contract() {
+        use device_core::params::SendBus;
+        let id = MiMachineId::SixOp1;
+        for (idx, info) in id.params().iter().enumerate() {
+            let expected = match idx {
+                SLOT_MACHINE => ParamRoute::Machine,
+                SLOT_OUT => ParamRoute::Out,
+                SLOT_PAN => ParamRoute::Pan,
+                SLOT_LEVEL => ParamRoute::Level,
+                SLOT_SEND_DELAY => ParamRoute::Send(SendBus::Delay),
+                SLOT_SEND_REVERB => ParamRoute::Send(SendBus::Reverb),
+                _ => ParamRoute::Slot,
+            };
+            assert_eq!(info.route, expected, "slot {idx} ({})", info.name);
+            assert_eq!(id.param_route(idx), expected, "slot {idx}");
+        }
+    }
 
     /// Heap-allocate the engine so the huge struct is not placed on the test
     /// thread's stack. The firmware uses static `.uninit` placement instead.

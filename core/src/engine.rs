@@ -623,8 +623,8 @@ pub fn configure_default_notes(map: &mut [Option<u8>; 128]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::NUM_PARAMS;
-    use crate::slot::{Slot, SlotId};
+    use crate::params::{resv, ParamInfo, ParamRoute, NUM_PARAMS};
+    use crate::slot::{DeviceModel, Slot, SlotId};
 
     /// A dummy slot for testing the generic engine without pulling in the drum
     /// catalogue.
@@ -647,6 +647,18 @@ mod tests {
         }
         fn default_params(self) -> [f32; NUM_PARAMS] {
             [0.0; NUM_PARAMS]
+        }
+    }
+
+    impl DeviceModel<NUM_PARAMS> for DummyId {
+        fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
+            [resv(); NUM_PARAMS]
+        }
+        fn param_route(self, _idx: usize) -> ParamRoute {
+            ParamRoute::Slot
+        }
+        fn label(self) -> &'static str {
+            "Dummy"
         }
     }
 
@@ -704,6 +716,18 @@ mod tests {
         }
         fn default_params(self) -> [f32; NUM_PARAMS] {
             [0.0; NUM_PARAMS]
+        }
+    }
+
+    impl DeviceModel<NUM_PARAMS> for GateId {
+        fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
+            [resv(); NUM_PARAMS]
+        }
+        fn param_route(self, _idx: usize) -> ParamRoute {
+            ParamRoute::Slot
+        }
+        fn label(self) -> &'static str {
+            "Gated"
         }
     }
 

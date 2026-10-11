@@ -7,11 +7,12 @@
 
 use crate::dsp::{fast, AhdEnv, Lfo, ModDest, Svf};
 use crate::params::{
-    SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH, SLOT_LFO2_DEST,
-    SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
-    SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD, SLOT_STRIP_RESO,
+    ParamRoute, SendBus, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
+    SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
+    SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
+    SLOT_STRIP_RESO,
 };
-use crate::slot::{Slot, SlotId};
+use crate::slot::{DeviceModel, Slot, SlotId};
 use crate::sound::Sound;
 use crate::strip::StripParams;
 use crate::OutPair;
@@ -343,103 +344,104 @@ where
     }
 
     /// Set one base param. Coefficient recompute is included.
+    ///
+    /// Where the value goes is data: the machine's parameter table vends a
+    /// [`ParamRoute`] per slot ([`DeviceModel::param_route`]), and the match
+    /// below replaces what used to be a cascade of flat-index comparisons. A
+    /// device decides per row whether a value drives the core strip, the
+    /// modulation bus, the sends, or the voice — so mi-drum's strip/shaper
+    /// rows route to the slot even at indices the drum device routes to the
+    /// strip, and no `strip_bypass` special case is needed in the control
+    /// path.
     pub fn set_param(&mut self, idx: usize, value: f32) {
         if idx >= N {
             return;
         }
         let v = value.clamp(0.0, 1.0);
-        // Slot selector (PITCH slot 5): quantise 0..1 onto the slot
-        // catalogue. Track-routed, so CC 25 swaps engines without a program
-        // change. Loading a different slot resets params to its defaults —
-        // the old voice's param values mean nothing on the new one.
-        if idx == SLOT_MACHINE {
-            let count = S::Id::count();
-            if count <= 1 {
+        let route = self.slot.id().param_route(idx);
+        match route {
+            // Machine selector: quantise 0..1 onto the slot catalogue.
+            // Track-routed, so CC 25 swaps engines without a program change.
+            // Loading a different slot resets params to its defaults — the
+            // old voice's param values mean nothing on the new one.
+            ParamRoute::Machine => {
+                let count = S::Id::count();
+                if count <= 1 {
+                    return;
+                }
+                let i = (v * (count - 1) as f32) as usize;
+                if let Some(id) = S::Id::from_index(i) {
+                    if id != self.slot.id() {
+                        self.load_machine(id);
+                    }
+                }
                 return;
             }
-            let i = (v * (count - 1) as f32) as usize;
-            if let Some(id) = S::Id::from_index(i) {
-                if id != self.slot.id() {
-                    self.load_machine(id);
-                }
+            // Output routing: quantise 0..1 onto the 4 `OutPair` variants and
+            // write `strip.out`. Same instant-jump discipline as the machine
+            // selector — routing is a discrete choice, smoothing it across
+            // blocks would route a track to a half-pair. Stores the quantised
+            // param value back so MIDI feedback / round-trip reads return the
+            // canonical centre of the variant.
+            ParamRoute::Out => {
+                let i = (v * (OutPair::COUNT - 1) as f32 + 0.5) as usize;
+                self.strip.out = OutPair::ALL[i];
+                let q = i as f32 / (OutPair::COUNT - 1) as f32;
+                self.base_params[idx] = q;
+                self.param_smooth[idx] = q;
+                self.param_pending &= !(1 << idx);
+                return;
             }
-            return;
-        }
-        // Output routing (MOD slot 26): quantise 0..1 onto the 4 `OutPair`
-        // variants and write `strip.out`. Same instant-jump discipline as the
-        // slot selector — routing is a discrete choice, smoothing it across
-        // blocks would route a track to a half-pair. Stores the quantised
-        // param value back so MIDI feedback / round-trip reads return the
-        // canonical centre of the variant.
-        if idx == SLOT_OUT {
-            let i = (v * (OutPair::COUNT - 1) as f32 + 0.5) as usize;
-            self.strip.out = OutPair::ALL[i];
-            let q = i as f32 / (OutPair::COUNT - 1) as f32;
-            self.base_params[SLOT_OUT] = q;
-            self.param_smooth[SLOT_OUT] = q;
-            self.param_pending &= !(1 << SLOT_OUT);
-            return;
-        }
-        // Track-routed strip/LFO params. These drive the per-track strip and
-        // modulation state, not the slot DSP, so they are intercepted before
-        // the generic slot-param path below. Each stores the param value and
-        // applies the derived parameter immediately.
-        //
-        // A track with `strip_bypass` set runs its own strip and its own
-        // modulation inside the slot, and reinterprets these same slots for
-        // that chain (mi-drum maps FILT 2..5 to Warps/Ripples and MOD 0..7 to
-        // Stages depths). So the interception is skipped there and the value
-        // falls through to `slot.set_params` like any other machine param —
-        // otherwise the slot would never see its own controls.
-        if !self.strip_bypass {
-            if idx == SLOT_STRIP_CUT
-                || idx == SLOT_STRIP_RESO
-                || idx == SLOT_STRIP_ATK
-                || idx == SLOT_STRIP_HOLD
-                || idx == SLOT_STRIP_DEC
-            {
+            // Track-routed strip and modulation params: store, then apply the
+            // derived strip coefficients / LFO state immediately. Not
+            // forwarded on this set — the voice is not what consumes them.
+            ParamRoute::Strip(_) => {
                 self.base_params[idx] = v;
                 self.param_smooth[idx] = v;
                 self.param_pending &= !(1 << idx);
                 self.apply_strip_params();
                 return;
             }
-            if idx == SLOT_LFO1_RATE
-                || idx == SLOT_LFO1_DEPTH
-                || idx == SLOT_LFO1_DEST
-                || idx == SLOT_LFO2_RATE
-                || idx == SLOT_LFO2_DEPTH
-                || idx == SLOT_LFO2_DEST
-            {
+            ParamRoute::Lfo(_) => {
                 self.base_params[idx] = v;
                 self.param_smooth[idx] = v;
                 self.param_pending &= !(1 << idx);
                 self.apply_lfo_params();
                 return;
             }
+            // Everything else stores first.
+            ParamRoute::Slot | ParamRoute::Pan | ParamRoute::Send(_) | ParamRoute::Level => {}
         }
         self.base_params[idx] = v;
         // Keep the CC smoother in sync: a direct set is the new current
         // value, and any pending ramp to a stale target is cancelled.
         self.param_smooth[idx] = v;
         self.param_pending &= !(1 << idx);
-        // The send params are track-routed: editing SEND.DLY / SEND.RVB
-        // drives the strip's aux levels (and the effective values read in
-        // the per-sample path), not the slot DSP.
-        if idx == SLOT_SEND_DELAY {
-            self.strip.send_delay = v;
-            self.eff_send_delay = v;
-        } else if idx == SLOT_SEND_REVERB {
-            self.strip.send_reverb = v;
-            self.eff_send_reverb = v;
-        } else if idx == SLOT_PAN {
-            // Param 0..1 maps onto the bipolar -1..+1 strip pan (0.5 = centre).
-            // `tick` reads the cached pan gains, so recompute them here or the
-            // change is inaudible.
-            self.strip.pan = v * 2.0 - 1.0;
-            let (l, r) = pan_law(self.strip.pan);
-            self.pan_l = l;
-            self.pan_r = r;
+        match route {
+            // The send params drive the strip's aux levels (and the effective
+            // values read in the per-sample path), not the slot DSP.
+            ParamRoute::Send(SendBus::Delay) => {
+                self.strip.send_delay = v;
+                self.eff_send_delay = v;
+            }
+            ParamRoute::Send(SendBus::Reverb) => {
+                self.strip.send_reverb = v;
+                self.eff_send_reverb = v;
+            }
+            ParamRoute::Pan => {
+                // Param 0..1 maps onto the bipolar -1..+1 strip pan (0.5 =
+                // centre). `tick` reads the cached pan gains, so recompute
+                // them here or the change is inaudible.
+                self.strip.pan = v * 2.0 - 1.0;
+                let (l, r) = pan_law(self.strip.pan);
+                self.pan_l = l;
+                self.pan_r = r;
+            }
+            // `Slot` (reserved rows included) and `Level` have no track-side
+            // work: the voice consumes them from the param array.
+            ParamRoute::Slot | ParamRoute::Level => {}
+            // Unreachable: every remaining variant returned above.
+            ParamRoute::Strip(_) | ParamRoute::Lfo(_) | ParamRoute::Out | ParamRoute::Machine => {}
         }
         if !self.mod_state.has_active_mod() {
             self.slot.set_params(&self.base_params);

@@ -5,7 +5,7 @@
 //! same strip, mixing, modulation and CC-param framework can host drum
 //! machines, FM voices, or any other no-alloc voice on different devices.
 
-use crate::params::ParamInfo;
+use crate::params::{ParamInfo, ParamRoute};
 use core::fmt::Debug;
 
 /// Identifier for a slot that can be selected per track.
@@ -33,8 +33,18 @@ pub trait SlotId<const N: usize>: Copy + Eq + Debug {
 /// [`SlotId`] so a device can vend both identity and metadata from the same
 /// type.
 pub trait DeviceModel<const N: usize>: SlotId<N> {
-    /// Per-param metadata for the machine identified by `self`.
-    fn param_info(self) -> [ParamInfo; N];
+    /// Per-param metadata for the machine identified by `self` — the device's
+    /// parameter table, one row per param slot.
+    fn param_table(self) -> [ParamInfo; N];
+
+    /// Where param `idx`'s value goes when it is set — the dispatch datum for
+    /// [`Track::set_param`](crate::track::Track::set_param).
+    ///
+    /// Implementations should index their static table directly rather than
+    /// copy [`param_table`](Self::param_table): this runs once per control
+    /// event. `idx` is always `< N` when the engine calls it; a reserved row
+    /// routes as [`ParamRoute::Slot`], which forwards to the voice.
+    fn param_route(self, idx: usize) -> ParamRoute;
 
     /// Human-readable label for the machine identified by `self`.
     fn label(self) -> &'static str;
@@ -47,7 +57,11 @@ pub trait DeviceModel<const N: usize>: SlotId<N> {
 /// known at compile time.
 pub trait Slot<const N: usize>: Sized {
     /// Device-specific identifier for this slot.
-    type Id: SlotId<N>;
+    ///
+    /// [`DeviceModel`] is a supertrait so the track can dispatch on the
+    /// machine's param table (`param_route`) without extra bounds at every
+    /// call site.
+    type Id: DeviceModel<N>;
 
     /// Build a slot from its identifier and initial params.
     fn new(id: Self::Id, params: &[f32; N]) -> Self;

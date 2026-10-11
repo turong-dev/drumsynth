@@ -177,6 +177,19 @@ impl MachineId {
         }
         out
     }
+
+    /// Route for the param at `idx` in this machine's table.
+    ///
+    /// Control-rate dispatch lookup for `Track::set_param`: indexes the
+    /// static table directly rather than copying the whole table. Out-of-range
+    /// indices (the engine guards against them, this is for totality) route as
+    /// [`ParamRoute::Slot`].
+    pub fn route_at(self, idx: usize) -> ParamRoute {
+        match MACHINE_INFO[self.index()].params.get(idx) {
+            Some(info) => info.route,
+            None => ParamRoute::Slot,
+        }
+    }
 }
 
 /// Per-machine metadata, indexed by [`MachineId::index`].
@@ -207,7 +220,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                // TRACK 0
             OUT_INFO,                 // TRACK 1
             PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.9),  // TRACK 3
+            level_info(0.9),          // TRACK 3
             SEND_DLY_INFO,            // TRACK 4
             SEND_RVB_INFO,            // TRACK 5
             resv(),                   // TRACK 6
@@ -244,7 +257,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                  // TRACK 0
             OUT_INFO,                   // TRACK 1
             PAN_INFO,                   // TRACK 2
-            mi("LEVEL", "LVL", 0.9),    // TRACK 3
+            level_info(0.9),            // TRACK 3
             SEND_DLY_INFO,              // TRACK 4
             SEND_RVB_INFO,              // TRACK 5
             resv(),                     // TRACK 6
@@ -281,7 +294,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.9), // TRACK 3
+            level_info(0.9),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -299,38 +312,38 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 3: Tom
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.35),  // MACH 0
-            mi("SWEEP", "SWP", 0.4),  // MACH 1
-            mi("SWP_T", "SWT", 0.4),  // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("DEC", "DEC", 0.4),    // MACH 5
-            resv(),                   // MACH 6
-            mi("STICK", "STK", 0.3),  // MACH 7
-            resv(),                   // FILT 0
-            resv(),                   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.85), // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("TUNE", "TUN", 0.35), // MACH 0
+            mi("SWEEP", "SWP", 0.4), // MACH 1
+            mi("SWP_T", "SWT", 0.4), // MACH 2
+            resv(),                  // MACH 3
+            resv(),                  // MACH 4
+            mi("DEC", "DEC", 0.4),   // MACH 5
+            resv(),                  // MACH 6
+            mi("STICK", "STK", 0.3), // MACH 7
+            resv(),                  // FILT 0
+            resv(),                  // FILT 1
+            STRIP_CUT_INFO,          // FILT 2
+            STRIP_RESO_INFO,         // FILT 3
+            STRIP_ATK_INFO,          // FILT 4
+            STRIP_HOLD_INFO,         // FILT 5
+            STRIP_DEC_INFO,          // FILT 6
+            resv(),                  // FILT 7
+            MACH_INFO,               // TRACK 0
+            OUT_INFO,                // TRACK 1
+            PAN_INFO,                // TRACK 2
+            level_info(0.85),        // TRACK 3
+            SEND_DLY_INFO,           // TRACK 4
+            SEND_RVB_INFO,           // TRACK 5
+            resv(),                  // TRACK 6
+            resv(),                  // TRACK 7
+            resv(),                  // MOD 0
+            resv(),                  // MOD 1
+            LFO1_RATE_INFO,          // MOD 2
+            LFO1_DEPTH_INFO,         // MOD 3
+            LFO1_DEST_INFO,          // MOD 4
+            LFO2_RATE_INFO,          // MOD 5
+            LFO2_DEPTH_INFO,         // MOD 6
+            LFO2_DEST_INFO,          // MOD 7
         ],
     },
     // 4: SD Natural
@@ -355,7 +368,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                // TRACK 0
             OUT_INFO,                 // TRACK 1
             PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.7),  // TRACK 3
+            level_info(0.7),          // TRACK 3
             SEND_DLY_INFO,            // TRACK 4
             SEND_RVB_INFO,            // TRACK 5
             resv(),                   // TRACK 6
@@ -392,7 +405,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                 // TRACK 0
             OUT_INFO,                  // TRACK 1
             PAN_INFO,                  // TRACK 2
-            mi("LEVEL", "LVL", 0.7),   // TRACK 3
+            level_info(0.7),           // TRACK 3
             SEND_DLY_INFO,             // TRACK 4
             SEND_RVB_INFO,             // TRACK 5
             resv(),                    // TRACK 6
@@ -410,38 +423,38 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 6: RS
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.4),   // MACH 0
-            mi("DET", "DET", 0.25),   // MACH 1
-            resv(),                   // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("DEC", "DEC", 0.3),    // MACH 5
-            mi("NDEC", "NDC", 0.3),   // MACH 6
-            mi("NLEV", "NLV", 0.4),   // MACH 7
-            mi("HPF", "HPF", 0.3),    // FILT 0
-            resv(),                   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.75), // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("TUNE", "TUN", 0.4), // MACH 0
+            mi("DET", "DET", 0.25), // MACH 1
+            resv(),                 // MACH 2
+            resv(),                 // MACH 3
+            resv(),                 // MACH 4
+            mi("DEC", "DEC", 0.3),  // MACH 5
+            mi("NDEC", "NDC", 0.3), // MACH 6
+            mi("NLEV", "NLV", 0.4), // MACH 7
+            mi("HPF", "HPF", 0.3),  // FILT 0
+            resv(),                 // FILT 1
+            STRIP_CUT_INFO,         // FILT 2
+            STRIP_RESO_INFO,        // FILT 3
+            STRIP_ATK_INFO,         // FILT 4
+            STRIP_HOLD_INFO,        // FILT 5
+            STRIP_DEC_INFO,         // FILT 6
+            resv(),                 // FILT 7
+            MACH_INFO,              // TRACK 0
+            OUT_INFO,               // TRACK 1
+            PAN_INFO,               // TRACK 2
+            level_info(0.75),       // TRACK 3
+            SEND_DLY_INFO,          // TRACK 4
+            SEND_RVB_INFO,          // TRACK 5
+            resv(),                 // TRACK 6
+            resv(),                 // TRACK 7
+            resv(),                 // MOD 0
+            resv(),                 // MOD 1
+            LFO1_RATE_INFO,         // MOD 2
+            LFO1_DEPTH_INFO,        // MOD 3
+            LFO1_DEST_INFO,         // MOD 4
+            LFO2_RATE_INFO,         // MOD 5
+            LFO2_DEPTH_INFO,        // MOD 6
+            LFO2_DEST_INFO,         // MOD 7
         ],
     },
     // 7: CP
@@ -466,7 +479,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.7), // TRACK 3
+            level_info(0.7),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -503,7 +516,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.4), // TRACK 3
+            level_info(0.4),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -540,7 +553,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.8), // TRACK 3
+            level_info(0.8),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -577,7 +590,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.5), // TRACK 3
+            level_info(0.5),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -595,38 +608,38 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
     // 11: CB Classic
     MachineInfo {
         params: [
-            mi("TUNE", "TUN", 0.4),   // MACH 0
-            mi("DET", "DET", 0.86),   // MACH 1
-            resv(),                   // MACH 2
-            resv(),                   // MACH 3
-            resv(),                   // MACH 4
-            mi("DEC", "DEC", 0.15),   // MACH 5
-            resv(),                   // MACH 6
-            resv(),                   // MACH 7
-            mi("BPF", "BPF", 0.35),   // FILT 0
-            resv(),                   // FILT 1
-            STRIP_CUT_INFO,           // FILT 2
-            STRIP_RESO_INFO,          // FILT 3
-            STRIP_ATK_INFO,           // FILT 4
-            STRIP_HOLD_INFO,          // FILT 5
-            STRIP_DEC_INFO,           // FILT 6
-            resv(),                   // FILT 7
-            MACH_INFO,                // TRACK 0
-            OUT_INFO,                 // TRACK 1
-            PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.55), // TRACK 3
-            SEND_DLY_INFO,            // TRACK 4
-            SEND_RVB_INFO,            // TRACK 5
-            resv(),                   // TRACK 6
-            resv(),                   // TRACK 7
-            resv(),                   // MOD 0
-            resv(),                   // MOD 1
-            LFO1_RATE_INFO,           // MOD 2
-            LFO1_DEPTH_INFO,          // MOD 3
-            LFO1_DEST_INFO,           // MOD 4
-            LFO2_RATE_INFO,           // MOD 5
-            LFO2_DEPTH_INFO,          // MOD 6
-            LFO2_DEST_INFO,           // MOD 7
+            mi("TUNE", "TUN", 0.4), // MACH 0
+            mi("DET", "DET", 0.86), // MACH 1
+            resv(),                 // MACH 2
+            resv(),                 // MACH 3
+            resv(),                 // MACH 4
+            mi("DEC", "DEC", 0.15), // MACH 5
+            resv(),                 // MACH 6
+            resv(),                 // MACH 7
+            mi("BPF", "BPF", 0.35), // FILT 0
+            resv(),                 // FILT 1
+            STRIP_CUT_INFO,         // FILT 2
+            STRIP_RESO_INFO,        // FILT 3
+            STRIP_ATK_INFO,         // FILT 4
+            STRIP_HOLD_INFO,        // FILT 5
+            STRIP_DEC_INFO,         // FILT 6
+            resv(),                 // FILT 7
+            MACH_INFO,              // TRACK 0
+            OUT_INFO,               // TRACK 1
+            PAN_INFO,               // TRACK 2
+            level_info(0.55),       // TRACK 3
+            SEND_DLY_INFO,          // TRACK 4
+            SEND_RVB_INFO,          // TRACK 5
+            resv(),                 // TRACK 6
+            resv(),                 // TRACK 7
+            resv(),                 // MOD 0
+            resv(),                 // MOD 1
+            LFO1_RATE_INFO,         // MOD 2
+            LFO1_DEPTH_INFO,        // MOD 3
+            LFO1_DEST_INFO,         // MOD 4
+            LFO2_RATE_INFO,         // MOD 5
+            LFO2_DEPTH_INFO,        // MOD 6
+            LFO2_DEST_INFO,         // MOD 7
         ],
     },
     // 12: SY Tone
@@ -651,7 +664,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                 // TRACK 0
             OUT_INFO,                  // TRACK 1
             PAN_INFO,                  // TRACK 2
-            mi("LEVEL", "LVL", 0.7),   // TRACK 3
+            level_info(0.7),           // TRACK 3
             SEND_DLY_INFO,             // TRACK 4
             SEND_RVB_INFO,             // TRACK 5
             resv(),                    // TRACK 6
@@ -688,7 +701,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,               // TRACK 0
             OUT_INFO,                // TRACK 1
             PAN_INFO,                // TRACK 2
-            mi("LEVEL", "LVL", 0.8), // TRACK 3
+            level_info(0.8),         // TRACK 3
             SEND_DLY_INFO,           // TRACK 4
             SEND_RVB_INFO,           // TRACK 5
             resv(),                  // TRACK 6
@@ -725,7 +738,7 @@ static MACHINE_INFO: [MachineInfo; MachineId::COUNT] = [
             MACH_INFO,                // TRACK 0
             OUT_INFO,                 // TRACK 1
             PAN_INFO,                 // TRACK 2
-            mi("LEVEL", "LVL", 0.7),  // TRACK 3
+            level_info(0.7),          // TRACK 3
             SEND_DLY_INFO,            // TRACK 4
             SEND_RVB_INFO,            // TRACK 5
             resv(),                   // TRACK 6
@@ -977,6 +990,69 @@ mod tests {
     fn ids_have_stable_indices() {
         for (i, m) in MachineId::ALL.iter().enumerate() {
             assert_eq!(m.index(), i, "index/order mismatch");
+        }
+    }
+
+    /// The route table is what `Track::set_param` dispatches on, so a row
+    /// with the wrong route silently redirects a CC. Pin the contract: strip
+    /// and modulation slots drive the core strip/mod bus, the TRACK-bank rows
+    /// are their track routes, and everything else is the voice's own.
+    #[test]
+    fn routes_match_the_device_contract() {
+        for m in MachineId::ALL {
+            let t = m.params();
+            assert_eq!(
+                t[SLOT_STRIP_CUT].route,
+                ParamRoute::Strip(StripParam::Cutoff)
+            );
+            assert_eq!(
+                t[SLOT_STRIP_RESO].route,
+                ParamRoute::Strip(StripParam::Reso)
+            );
+            assert_eq!(
+                t[SLOT_STRIP_ATK].route,
+                ParamRoute::Strip(StripParam::Attack)
+            );
+            assert_eq!(
+                t[SLOT_STRIP_HOLD].route,
+                ParamRoute::Strip(StripParam::Hold)
+            );
+            assert_eq!(
+                t[SLOT_STRIP_DEC].route,
+                ParamRoute::Strip(StripParam::Decay)
+            );
+            assert_eq!(t[SLOT_LFO1_RATE].route, ParamRoute::Lfo(LfoParam::Lfo1Rate));
+            assert_eq!(
+                t[SLOT_LFO1_DEPTH].route,
+                ParamRoute::Lfo(LfoParam::Lfo1Depth)
+            );
+            assert_eq!(t[SLOT_LFO1_DEST].route, ParamRoute::Lfo(LfoParam::Lfo1Dest));
+            assert_eq!(t[SLOT_LFO2_RATE].route, ParamRoute::Lfo(LfoParam::Lfo2Rate));
+            assert_eq!(
+                t[SLOT_LFO2_DEPTH].route,
+                ParamRoute::Lfo(LfoParam::Lfo2Depth)
+            );
+            assert_eq!(t[SLOT_LFO2_DEST].route, ParamRoute::Lfo(LfoParam::Lfo2Dest));
+            assert_eq!(t[SLOT_MACHINE].route, ParamRoute::Machine);
+            assert_eq!(t[SLOT_OUT].route, ParamRoute::Out);
+            assert_eq!(t[SLOT_PAN].route, ParamRoute::Pan);
+            assert_eq!(t[SLOT_LEVEL].route, ParamRoute::Level);
+            assert_eq!(t[SLOT_SEND_DELAY].route, ParamRoute::Send(SendBus::Delay));
+            assert_eq!(t[SLOT_SEND_REVERB].route, ParamRoute::Send(SendBus::Reverb));
+            // Machine-specific and reserved rows go to the voice.
+            for idx in [
+                SLOT_MACH_0,
+                SLOT_MACH_1,
+                SLOT_MACH_5,
+                SLOT_FILT_0,
+                SLOT_FILT_1,
+            ] {
+                assert_eq!(t[idx].route, ParamRoute::Slot, "{m:?} row {idx}");
+            }
+            // And the dispatch lookup agrees with the table.
+            for (idx, info) in t.iter().enumerate() {
+                assert_eq!(m.route_at(idx), info.route, "{m:?} row {idx}");
+            }
         }
     }
 

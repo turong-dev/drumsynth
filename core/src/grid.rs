@@ -794,7 +794,7 @@ fn machine_page_widget<const N: usize, Id: DeviceModel<N>>(
     row: usize,
     machine: Id,
 ) -> Option<Widget> {
-    let info: &[ParamInfo; N] = &machine.param_info();
+    let info: &[ParamInfo; N] = &machine.param_table();
     let count = Id::count() as u8;
 
     if row == 0 {
@@ -1136,7 +1136,7 @@ fn enum_option_for_col(count: u8, x: u8) -> u8 {
 mod tests {
     use super::*;
     use crate::engine::Engine;
-    use crate::params::ParamInfo;
+    use crate::params::{ParamInfo, ParamRoute};
     use crate::slot::{Slot, SlotId};
 
     /// Dummy slot for testing the generic grid without pulling in the drum
@@ -1165,23 +1165,29 @@ mod tests {
     }
 
     impl DeviceModel<32> for DummyId {
-        fn param_info(self) -> [ParamInfo; 32] {
+        fn param_table(self) -> [ParamInfo; 32] {
             let mut info = [ParamInfo {
                 name: "RESV",
                 abbrev: "RESV",
                 default: 0.0,
+                route: ParamRoute::Slot,
             }; 32];
             info[0] = ParamInfo {
                 name: "TUNE",
                 abbrev: "TUN",
                 default: 0.5,
+                route: ParamRoute::Slot,
             };
             info[1] = ParamInfo {
                 name: "DEC",
                 abbrev: "DEC",
                 default: 0.5,
+                route: ParamRoute::Slot,
             };
             info
+        }
+        fn param_route(self, idx: usize) -> ParamRoute {
+            self.param_table()[idx].route
         }
         fn label(self) -> &'static str {
             match self.0 {
