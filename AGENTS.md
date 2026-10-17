@@ -6,7 +6,7 @@ How to work on the drum engine without breaking it.
 
 ```text
 drumsynth/
-├── core/                 `device-core` crate: DSP, track, macros, MIDI parser
+├── core/                 `device-core` crate: DSP, track, params, MIDI parser
 ├── devices/
 │   ├── drum/             `drum-engine` crate: Rust drum machines
 │   └── mi-drum/          `mi-drum-engine` crate: Peaks + Plaits MI device
@@ -27,18 +27,24 @@ drumsynth/
 ## Build and test
 
 ```bash
-# host tests — run these first
-cargo test
+# host tests — run these first.
+#
+# Use --all-features. The `grid` feature (core/devices) and the `live`
+# feature (render: device mode, monitor) are off by default, and a plain
+# `cargo test` does not compile their code — both have silently broken
+# before.
+cargo test --workspace --all-features
 
 # host render
 cargo run -p render -- render
-cargo run -p render -- sweep <machine> <macro> --from 0.1 --to 0.8 --steps 12
+cargo run -p render -- sweep <machine> <param> --from 0.1 --to 0.8 --steps 12
 
 # mi-drum baseline test (digest gate)
 cargo test -p render mi_drum_baseline_is_unchanged
 
 # cross-compile (catches std/alloc leakage)
 cargo build -p device-core --target thumbv7em-none-eabihf
+cargo build -p device-core --features grid --target thumbv7em-none-eabihf
 cargo build -p drum-engine --target thumbv7em-none-eabihf
 cargo build -p mi-drum-engine --target thumbv7em-none-eabihf
 
@@ -60,8 +66,11 @@ host and fail in `bsp::rt`.
 - Everything in the engine is `f32`; block size is compile-time constant.
 - No `unsafe` in `core` or device crates. `unsafe` is allowed only inside
   `mi-dsp`.
-- Do not change existing macro slot indices or the CC-map layout. These are a
-  binary ABI shared with firmware and the Deluge.
+- Do not renumber `ParamGroup` discriminants, and do not insert a parameter
+  earlier within an existing group. `(group, index)` is the NRPN wire ABI.
+  Appending a row to a group is free; appending to a *different* group does
+  not move anything. The flat slot index is **not** an ABI — the CC map that
+  made it one is gone (#1 phase F) — so the flat layout may be reorganised.
 - Do not reintroduce `libm::sinf` into the per-sample audio path. Use
   `fast::sin_turns`.
 
@@ -70,7 +79,7 @@ host and fail in `bsp::rt`.
 1. Read `DESIGN.md` for the decision this touches.
 2. Read `BENCHMARKS.md` if the change affects the hot path, adds a machine, or
    adds an MI stage.
-3. Run `cargo test`.
+3. Run `cargo test --workspace --all-features`.
 4. For mi-drum changes, run the baseline test.
 
 ## Bit-identity gates
@@ -86,10 +95,13 @@ host and fail in `bsp::rt`.
 1. Add module under `devices/drum/src/machines/`.
 2. Add variant to `MachineId` and `MachineSlot` in `devices/drum/src/machines/mod.rs`.
 3. Add `MachineInfo` row to `MACHINE_INFO` (append, do not insert).
-4. Add tests: silent-until-struck, velocity-scales, decays-to-silence,
-   extreme-macros-do-not-produce-nans.
-5. Update renderer `MachineArg` if needed.
-6. Add a bench scenario if the voice is heavy or unusual.
+4. Give every row a `ParamGroup` (the `mi()` helper requires it) and a
+   `ParamKind` if it is not a plain continuous sweep. A wrong group means
+   the parameter has no reachable NRPN address.
+5. Add tests: silent-until-struck, velocity-scales, decays-to-silence,
+   extreme-params-do-not-produce-nans.
+6. Update renderer `MachineArg` if needed.
+7. Add a bench scenario if the voice is heavy or unusual.
 
 ## Changing the mi-drum strip
 
@@ -119,7 +131,8 @@ tools/checkasm.sh
 ## When in doubt
 
 - Keep changes minimal.
-- Prefer additive changes; never reorder macro slots or machine enum indices.
+- Prefer additive changes; never reorder a group's members or machine enum
+  indices.
 - Ask before adding dependencies, especially anything that pulls in `std` or
   `alloc`.
 - If a change affects cycles or memory on Teensy, it must be bench-gated before

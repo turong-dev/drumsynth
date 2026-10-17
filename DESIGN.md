@@ -19,23 +19,106 @@ tracked in GitHub issues.
 DrumEngine
  +-- tracks: [Track; 8]
  |    +-- slot: MachineSlot          enum dispatch, match in tick()
- |    +-- macros: [f32; 8]          0..1, stored user-facing state
+ |    +-- params: [f32; N]           0..1, stored user-facing state
  |    +-- strip: TrackStrip          SVF + filter env + AHD amp + drive + pan
  |    +-- mod: ModState              2 LFOs + routing table + velocity slots
  |    +-- choke/layer masks: u8
  +-- sends: SendFx                   delay + reverb
  +-- output routing                  MasterOnly or Multi (8 channels)
- +-- midi: parser + note/CC map tables
+ +-- midi: parser + note tables + NRPN router
 ```
 
 ## Key decisions
 
-### Macros are primary
+### Normalized parameters are primary
 
-Machines store 8 normalized macros (0..1, CC-friendly) plus a `set_macros()`
-that derives internal coefficients (Hz, seconds, gains) via documented mapping
-curves. Human-unit param structs are derived state, not stored state. This is
-what makes generic host sweeps possible without a hand-maintained enum.
+Machines store a flat `[f32; N]` of normalized parameters (0..1) plus a
+`set_params()` that derives internal coefficients (Hz, seconds, gains) via
+documented mapping curves. Human-unit param structs are derived state, not
+stored state. This is what makes generic host sweeps possible without a
+hand-maintained enum.
+
+*Macro* is deliberately **not** the word for these. It is reserved for a
+later feature: a named combination of parameters, where one control writes
+several `(group, index)` addresses with a per-target depth and curve. The
+engine has no such thing today, and calling an ordinary parameter a macro
+is what made the distinction impossible to state.
+
+### The control surface is NRPN
+
+Every parameter is addressed `(group, index)` over NRPN at 14 bits. MIDI
+channel selects the track, as it does for notes. CC 99 picks the
+[`ParamGroup`], CC 98 the index within it, CC 6/38 carry the value, and
+CC 96/97 step it. The only plain CCs left are 7 (master gain) and
+120/123 (panic).
+
+This replaced a flat map of `CC 20 + slot index` (issue #1). Two
+independent reasons, and widening the CC map would only have fixed the
+second:
+
+- **7 bits is too coarse.** A CC step on the strip cutoff is 94 cents —
+  the smallest move available on a self-oscillating filter is nearly a
+  semitone. The resonance range covers the whole peak-to-self-oscillation
+  transition in about 19 steps. Storage was always `f32`; the limit was
+  entirely on the wire. 14 bits is 128× finer.
+- **The map was exactly 32 entries and full.** mi-drum used all of them,
+  which is why its shaper parameters were split across two banks and why
+  three slot constants were aliases of core strip slots.
+
+A group is a *label on a parameter*, not a reserved range: it has no
+declared size, and a device adds a parameter by appending a table row.
+Nothing needs widening. `index` is the row's ordinal among rows carrying
+that group, so group membership can be per machine — `VOICE` has four
+rows on a Peaks model and nine on a Plaits one, and both are addressable
+without holes.
+
+Group members do **not** have to be contiguous in the flat array, and
+mi-drum's are not. Contiguity would buy an O(1) base-offset lookup in
+place of a linear scan, and the scan runs once per arriving message
+against 33 rows — control rate, never audio. Paying for that with a
+forced reorder of the flat layout was the wrong trade.
+
+Two consequences worth stating:
+
+- **The flat slot index is internal.** It was the ABI while CC addressed
+  it. Nothing off-device names it now, so the layout can be reorganised.
+- **`ParamGroup` discriminants are wire values.** They are `repr(u8)`
+  with explicit numbers and must not be renumbered. Inserting a
+  parameter earlier within its own group shifts every later member of
+  that group, which is the one move that breaks a controller mapping.
+  Appending to a *different* group is free.
+
+Relative control (CC 96/97) is part of the design rather than an
+afterthought: an endless encoder sends a delta, so message width stops
+bounding precision. It does not remove the need for absolute
+resolution — sound locks, preset recall and sequencer automation all
+transmit a value — and it needs acceleration to be usable, which is the
+controller's job. The engine applies whatever step magnitude arrives and
+keeps no per-parameter timing state. On a discrete parameter it reads
+only the sign, so one detent is one machine.
+
+### Parameter metadata is data, not code
+
+A `ParamInfo` row carries `name`, `abbrev`, `default`, `group`, `kind`
+and `route`. Three of those replace cascades that used to compare flat
+indices:
+
+- `route` is where the value goes when set. `Track::set_param`
+  dispatches on it instead of an `if idx == SLOT_X` chain, so a device
+  states its own routing — mi-drum's strip rows are `Slot` because it
+  runs that chain inside the voice, while the drum device's same
+  positions drive the core strip.
+- `group` is the external address.
+- `kind` is what the 0..1 value means: continuous, bipolar, or a choice
+  among `count` options. The grid picks a widget from it, the
+  cheat-sheet prints it, and the NRPN router snaps a discrete parameter
+  onto an exact option rather than a value between two.
+
+The grid's parameter screen is derived from the table through all three:
+the group selector pages by `group`, rows come from `resolve`, and
+widgets come from `kind`. A device adds a parameter by adding a row and
+it appears on the grid, in the cheat-sheet, and at its NRPN address,
+with no UI change.
 
 ### Enum dispatch, not trait objects
 
@@ -44,12 +127,12 @@ what makes generic host sweeps possible without a hand-maintained enum.
 
 ### Control-rate pass
 
-Once per 32-frame block: advance LFOs, sum modulation onto macros, recompute
+Once per 32-frame block: advance LFOs, sum modulation onto parameters, recompute
 coefficients only for dirty params. The audio callback stays thin.
 
 ### Sound struct
 
-A `Sound` is `{ machine_id, macros, strip_params }` — `Copy`, ~100 bytes.
+A `Sound` is `{ machine_id, params, strip_params }` — `Copy`, ~100 bytes.
 `load_sound(track, &Sound)` at trig time gives sound locks. Pool of 128 is ~13KB.
 
 ### Envelopes and filters
@@ -99,7 +182,7 @@ Plaits, `modulations.trigger` pings the outer LPG (`voice.cc:241`,
 starts the release but does not set its length. For the eight
 `already_enveloped` engines the amplitude belongs to the engine outright, and
 for `SixOp1`/`2`/`3` the gate *is* the amplitude authority, so those do follow
-the key. A macro-controlled release time is a separate change, and the
+the key. A parameter-controlled release time is a separate change, and the
 dedicated amplitude envelope is the design for it (issue #4).
 
 ### Sin table is mandatory
@@ -255,7 +338,7 @@ Peaks or Plaits source → Warps → Ripples
     `Modulator::set_bypass` — a bit-transparent copy — and is the only way to
     get an uncoloured section.
   - **The top half of Warps' knob covers 48× of gain.** That is where the
-    "gets crazy past halfway" reputation comes from. The macro is rescaled
+    "gets crazy past halfway" reputation comes from. The parameter is rescaled
     `0.0..1.0` onto Warps' `0.50..1.00` so the knob is strictly monotonic and
     spends its whole travel on the usable part of the curve, with the
     destructive region at the top where you can see it coming.
@@ -278,16 +361,16 @@ Peaks or Plaits source → Warps → Ripples
   RAM and cycles recovered first.
 - Modulation patching is **static** in the first deliverable. The four shipped
   routes are LFO 1 → Ripples cutoff, LFO 2 → Warps timbre, AD 1 → Ripples
-  cutoff, AD 2 → Warps timbre. Depth per route is a macro parameter.
+  cutoff, AD 2 → Warps timbre. Depth per route is its own parameter.
 - **Clouds** lives on the shared send FX bus alongside delay and reverb. Each
   track gets a Clouds send amount. It is not landed yet.
-- The 32 macro slots are reused/reinterpreted for the new modules; slot indices
-  and the CC-map ABI do not change. Only one MOD bank of 8 CC-addressable slots
-  is available for modulation, so many per-source parameters are not CC-mapped
-  in the first deliverable. NRPN is the intended long-term fix.
+- The parameter slots are reused/reinterpreted for the new modules. The
+  "only 8 CC-addressable MOD slots" constraint that shaped the first
+  deliverable is gone: NRPN addresses `(LFO, n)` and `(ENV, n)` with no
+  width limit, and a device adds a parameter by adding a table row.
 
-`DeviceModel::macro_info` is still per-device; because the strip is fixed, the
-grid does not need to relabel knobs when a "stage" changes. The old
+`DeviceModel::param_table` is still per-device; because the strip is fixed,
+the grid does not need to relabel knobs when a "stage" changes. The old
 `macro_info(&self, stages: StageConfig)` widening is no longer required.
 
 ### mi-drum gate
@@ -366,7 +449,7 @@ depending on the digest at all.
 | question | answer |
 |---|---|
 | Track count | 8, any machine anywhere |
-| Macro surface | normalized 0..1 primary; human units derived internally |
+| Parameter surface | normalized 0..1 primary; human units derived internally |
 | Machine dispatch | enum, not trait objects |
 | Send FX | delay + reverb + Clouds; bench-gated; always advanced per block |
 | Sequencer | external (MIDI-driven); engine has p-lock/sound-lock hooks |
@@ -384,6 +467,10 @@ depending on the digest at all.
 | MI FFI boundary | block-rate only |
 | MI catalog growth | bench-gated; wrap one, measure `8×` before breadth |
 | MI drum strip | fixed Warps → Ripples with Stages modulation; segment-based strip |
+| Control surface | NRPN `(group, index)`, 14-bit; MIDI channel selects the track |
+| Parameter count | per device, not core-wide; ceiling 256 (`MAX_PARAMS`) |
+| Flat slot index | internal layout, not an ABI |
+| *Macro* | reserved for a later named-combination feature; a knob is a parameter |
 
 ## Anti-decisions (do not do these)
 
@@ -391,5 +478,7 @@ depending on the digest at all.
 - Do not add `std` or `alloc` to engine crates.
 - Do not put `unsafe` in `core` or device crates; confine it to `mi-dsp`.
 - Do not reintroduce `libm::sinf` into the per-sample audio path.
-- Do not change existing macro slot indices or CC-map layout (binary ABI).
+- Do not renumber `ParamGroup` discriminants or reorder a group's members.
+  Those are the wire ABI (see *The control surface is NRPN*). The flat slot
+  index is not, and may be reorganised.
 - Do not make mi-drum strip changes without the bit-identity gate.

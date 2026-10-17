@@ -30,7 +30,7 @@ Both consumers link it unmodified:
 ## Start here
 
 ```bash
-cargo test                              # engine tests, host speed
+cargo test --workspace --all-features   # engine tests, host speed
 cargo run -p render -- render           # writes out.wav
 cargo run -p render -- sweep kick-decay --from 0.1 --to 0.8 --steps 12
 ```
@@ -107,7 +107,7 @@ Both FX live in `engine/src/dsp/fx/` and are depressingly conventional:
 
 - **Delay** — 500 ms ring buffer × 2 channels, feedback with a one-pole
   tone LP in the loop so repeats recede instead of piling up. Feedback is
-  clamped to 0.98 so a runaway macro can't blow the tank up.
+  clamped to 0.98 so a runaway parameter can't blow the tank up.
 - **Reverb** — Dattorro-plate-ish: predelay → two series allpass diffusors →
   six parallel Freeverb-style damped combs per side. L and R tank sizes
   are deliberately different, so the stereo image spreads without cross-
@@ -127,6 +127,36 @@ light reverb — and the kit sounds audibly wetter if you comment out the
 The bench has two FX scenarios ("8 FX idle", "8 + FX") for measuring the
 per-block overhead of having FX in the engine, and the realistic worst
 case with two sends active. See `firmware/src/bin/bench.rs`.
+
+## Controlling it
+
+MIDI channel picks the track; notes are chromatic, with middle C (60) at
+the machine's configured pitch and one semitone per step.
+
+Parameters are addressed over **NRPN** as `(group, index)` at 14-bit
+resolution:
+
+```
+CC 99 = group   (TRACK 0, VOICE 1, FILTER 2, SHAPER 3, AMP 4, LFO 5, ENV 6)
+CC 98 = index within that group
+CC  6 = value, high 7 bits      CC 38 = value, low 7 bits
+CC 96 = increment               CC 97 = decrement
+```
+
+`cargo run -p render -- cheatsheet` prints every address, generated from
+the engine's own tables so it cannot drift. To see what a controller is
+actually sending, `cargo run -p render --features live -- monitor`
+decodes NRPN on the wire — address, 14-bit value and all — instead of
+four unrelated CC lines.
+
+The remaining plain CCs are 7 (master gain) and 120/123 (panic). There
+used to be a flat `CC 20 + slot` map; 7 bits put the smallest move on a
+filter cutoff at nearly a semitone, and 32 slots was one short of what
+the mi-drum device needed, so it is gone.
+
+A Monome grid on MIDI channel 16 is the other control surface: a mixer
+screen of track faders, and a parameter screen whose rows come from the
+same table NRPN addresses. Build with `--features grid`.
 
 ## Hardware
 

@@ -90,6 +90,36 @@ to get back to HalfKay.
 - Memory pressure matters: a cycle win that costs ITCM or DTCM you do not have
   is not a win.
 
+## Two discontinuities in the saved baselines (#1 phase F)
+
+Both are deliberate and both mean "do not diff across this point".
+
+**`8+FX+CC` became `8+FX+NRPN`.** The drum bench's param-automation
+scenario drove `apply_cc` on the flat CC map. That map is gone, so it
+drives `apply_nrpn` instead — which resolves a `(group, index)` address
+against the machine table before reaching the smoother. That scan is
+inside the measured region on purpose: it is per-message work the device
+really does now. The label changed with the path, so `benchloop.py`
+reports the scenario as missing against a pre-F baseline rather than
+quietly comparing two different things.
+
+**mi-bench scenarios moved when the RNG was seeded.** `stmlib::Random` is
+one process-global LCG shared by every Plaits engine, and the firmware
+never seeded it. Where a scenario started in the sequence therefore
+depended on how many draws the scenarios before it had made — which
+depends on how many voices were sounding, which is the thing being
+measured. The symptom was the stochastic scenarios (`1/2/4 sounding`,
+`6 no SHAPE`, the FX and `MOD` variants) varying by up to ~50k cycles
+between runs of an *identical binary*, with values occasionally
+recurring exactly across different ones.
+
+`measure()` now calls `seed_random(DEFAULT_RANDOM_SEED)` per scenario.
+Every scenario is comparable between builds from here; none of them is
+comparable to a pre-seeding number. The "~4 cycles" repeatability figure
+applied only to the steady scenarios (`idle`, `3 sounding`,
+`6 sounding`) before this, and should now hold across the sweep —
+re-establish it on the first hardware run and re-baseline.
+
 ## Gate culture
 
 Bench-gate every significant change:
@@ -101,6 +131,10 @@ Bench-gate every significant change:
 - Optimization: measure both drum and mi-drum if the hot path is shared.
 - mi-drum strip work: gate **per sub-phase** against the 14.1 skeleton
   baseline, not once at the end.
+- Control-plane work: the parameter path is not the audio path, but it is
+  not free either — `8+FX+NRPN` is the scenario that sees it. Phase B′ of
+  #1 moved it +898 cycles on drum and +7,260 on mi-drum and was committed
+  without a bench run; do not repeat that.
 
 Commit result JSONs to `bench-results/` when they are the new baseline.
 
