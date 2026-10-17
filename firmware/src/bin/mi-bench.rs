@@ -464,17 +464,23 @@ fn measure(
     // engine, and nothing in the firmware ever seeded it, so where a
     // scenario started in the sequence depended on how many draws the
     // scenarios before it had made -- which depends on how many voices
-    // were sounding, which is the thing being measured. The symptom was
-    // the stochastic scenarios (`1/2/4 sounding`, `6 no SHAPE`, the FX and
-    // MOD variants) varying by up to ~50k cycles between runs of an
-    // *identical binary*, with values occasionally recurring exactly
-    // across different ones: carried-over generator state, not code.
+    // were sounding, which is the thing being measured. Seeding here,
+    // after the reset and before the warm-up pass, removes that coupling:
+    // each scenario renders the same noise whatever ran before it.
     //
-    // Seeding here, after the reset and before the warm-up pass, makes
-    // every scenario start from the same noise and makes the whole sweep
-    // comparable between builds. It does change the absolute numbers
-    // against any pre-seeding baseline, which is the point: those were not
-    // measuring one thing.
+    // Worth being precise about what this did *not* fix, because the
+    // issue that prompted it (#1, finding 2) guessed wrong. The symptom
+    // was the stochastic scenarios swinging ~5% between runs of an
+    // identical binary, and that was blamed on carried-over generator
+    // state. It is not: measured over three runs, per-scenario **avg**
+    // varies by at most 0.68% and **peak** by up to 7.70%, both before
+    // and after this call. The work each scenario does was always
+    // repeatable; it is the peak statistic that is not. See the
+    // avg-versus-peak section of BENCHMARKS.md.
+    //
+    // Seeding stays because the coupling it removes is real and a
+    // scenario that renders different audio depending on its position in
+    // the sweep is not measuring one thing. It just was not the cause.
     seed_random(DEFAULT_RANDOM_SEED);
 
     // One untimed pass so the branch predictor and caches are warm. Matters

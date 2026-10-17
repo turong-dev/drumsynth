@@ -80,9 +80,56 @@ If the LED blinks S.O.S. (3 short / 3 long / 3 short), `teensy4-panic` caught a
 fault. The last printed scenario is the one before the crash. Press the button
 to get back to HalfKay.
 
+## avg or peak? Use both, and know which one is noise
+
+The honest answer depends on the device, and the project got this wrong
+for a while. Worst per-scenario spread over **three runs of one
+identical binary**, same session, no rebuild:
+
+| | `avg` | `peak` |
+|---|---|---|
+| drum (`f-nrpn-drum`, `-repeat`, `-run3`) | 0.02% | 0.26% |
+| mi-drum (`f-nrpn-mi`, `-repeat`, `-run3`) | **0.68%** | **7.70%** |
+
+The first two drum runs were bit-identical in every scenario; the third
+drifted by at most 264 cycles. mi-drum is a different animal: `peak`
+swings 2–8% per scenario (`ALG1 fold` 7.7%, `4 sounding` 6.2%,
+`6 + RES SND` 5.9%) while `avg` stays inside 0.7% and is usually under
+0.3%.
+
+So on mi-drum, `peak` has a noise floor of roughly ±5%, which is larger
+than almost any change worth gating. `avg` has one of ±0.5%.
+
+**This invalidates a conclusion that was recorded as fact.** Issue #1's
+finding 1 reported phase B′ as a +4.7% mi-drum regression on
+`3 sounding` and +4.3% on `6 sounding`. Both are peak numbers. On `avg`
+the same two scenarios moved −0.04% and −0.49%, and the sum over all
+sixteen was **−0.23% — B′ made mi-drum slightly faster.** The regression
+was peak noise, and a static diff of the two binaries agrees: not one
+function on the audio path changed a single instruction.
+
+Practical rule until the peak tail is understood:
+
+- **Gate on `avg`.** It is the statistic that reflects the work done.
+- **Watch `peak`, and only believe it over ~8%** on mi-drum. On drum it is
+  good to ~0.3% and worth reading directly.
+- A `peak` move with no `avg` move is not a regression. Check `avg`
+  before you spend a day on it — the JSONs in `bench-results/` carry
+  both, so this costs nothing.
+- Deadline safety still depends on real peak, so a peak that approaches
+  budget matters even when it is noisy. It just cannot be *diffed*.
+
+The tail itself is unexplained and worth its own investigation: `avg` to
+`peak` is a ~1.2–1.3× ratio on the Plaits scenarios, which is too large
+and too systematic for interrupt jitter alone. It is the same tail
+*What the peak/average ratio is made of* (below) has been chasing — the
+new fact is that it is not reproducible run to run, which rules out
+anything fixed about the code.
+
 ## Interpreting results
 
-- Compare **peak** cycles, not average.
+- Compare `avg` first; see the section above for why, and for when `peak`
+  is trustworthy.
 - Compare against the relevant baseline (`baseline.json`, `mi-baseline.json`, or
   the 14.1 skeleton gate for mi-drum strip work).
 - Watch the **worst-case scenario** first; a change that helps idle but hurts
@@ -103,22 +150,16 @@ really does now. The label changed with the path, so `benchloop.py`
 reports the scenario as missing against a pre-F baseline rather than
 quietly comparing two different things.
 
-**mi-bench scenarios moved when the RNG was seeded.** `stmlib::Random` is
-one process-global LCG shared by every Plaits engine, and the firmware
-never seeded it. Where a scenario started in the sequence therefore
-depended on how many draws the scenarios before it had made — which
-depends on how many voices were sounding, which is the thing being
-measured. The symptom was the stochastic scenarios (`1/2/4 sounding`,
-`6 no SHAPE`, the FX and `MOD` variants) varying by up to ~50k cycles
-between runs of an *identical binary*, with values occasionally
-recurring exactly across different ones.
+**mi-bench scenarios moved when the RNG was seeded.** `measure()` now
+calls `seed_random(DEFAULT_RANDOM_SEED)` per scenario. `stmlib::Random`
+is one process-global LCG shared by every Plaits engine and the firmware
+never seeded it, so where a scenario started in the sequence depended on
+how many draws the scenarios before it had made — which depends on how
+many voices were sounding, which is the thing being measured. That
+coupling is real and is now gone, so mi-drum baselines need re-pinning.
 
-`measure()` now calls `seed_random(DEFAULT_RANDOM_SEED)` per scenario.
-Every scenario is comparable between builds from here; none of them is
-comparable to a pre-seeding number. The "~4 cycles" repeatability figure
-applied only to the steady scenarios (`idle`, `3 sounding`,
-`6 sounding`) before this, and should now hold across the sweep —
-re-establish it on the first hardware run and re-baseline.
+It did **not** fix the run-to-run variance it was introduced for. See
+the next section; that turned out to be a different problem.
 
 ## Gate culture
 
@@ -126,15 +167,18 @@ Bench-gate every significant change:
 
 - New machine or stage: add a worst-case scenario row, measure it, and record
   the delta.
-- Refactor: assert the worst-case scenario is unchanged within the ~50-cycle
-  noise floor.
+- Refactor: assert the worst-case scenario's `avg` is unchanged within the
+  noise floor — ~0.05% on drum, ~0.7% on mi-drum.
 - Optimization: measure both drum and mi-drum if the hot path is shared.
 - mi-drum strip work: gate **per sub-phase** against the 14.1 skeleton
   baseline, not once at the end.
 - Control-plane work: the parameter path is not the audio path, but it is
-  not free either — `8+FX+NRPN` is the scenario that sees it. Phase B′ of
-  #1 moved it +898 cycles on drum and +7,260 on mi-drum and was committed
-  without a bench run; do not repeat that.
+  not free either — `8+FX+NRPN` is the scenario that sees it. On drum,
+  where the bench is exact, one parameter moving every block costs
+  **+1,504 cy/block** over `8 + FX`, of which **+187** is NRPN address
+  resolution and the rest is the smoother's per-block recompute. Phase B′'s
+  route dispatch costs **+8 cy/block** of that, measured as the
+  `8+FX+CC` − `8 + FX` delta before and after it.
 
 Commit result JSONs to `bench-results/` when they are the new baseline.
 
@@ -234,6 +278,12 @@ own average while `idle` sits at 1.01x. Partly accounted for:
   voice block size (16 vs 24) or with warm-up, so it is neither render
   scheduling nor cache warming. Whatever it is, it is the thing to understand
   before cutting more DSP, because it sets the deadline.
+- **And the tail is not reproducible.** Three runs of one identical binary
+  put `peak` anywhere inside a ~5% band while `avg` holds to 0.7% — see
+  *avg or peak?* above. Whatever produces the tail is not a fixed property
+  of the code, so "which block was worst" changes between runs even though
+  the work does not. That is a second clue about the same mechanism, and
+  the two should be investigated together.
 
 ### mi-drum per-unit costs
 

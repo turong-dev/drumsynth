@@ -342,24 +342,46 @@ def fmt_delta(cur, base):
 
 
 def report(result, baseline):
+    """Print both statistics, with `avg` first.
+
+    `avg` leads because it is the one you can diff. On mi-bench, `peak`
+    moves up to ~8% between runs of an identical binary while `avg` holds
+    inside 0.7%, so a peak delta under about 8% there carries no
+    information -- a conclusion that was recorded as a real regression in
+    issue #1 before anyone checked. `peak` still sets the deadline, so it
+    is printed and it is what the "% of budget" column and the
+    worst-case line use; it just is not the gate. See the "avg or peak?"
+    section of BENCHMARKS.md.
+    """
     budget = result.get("budget")
     print("")
-    print("scenario        peak cy   %% budget   %s" % ("delta vs baseline" if baseline else ""))
-    print("-" * 72)
+    header = "scenario         avg cy  delta vs base      peak cy  delta vs base   %budget"
+    if not baseline:
+        header = "scenario         avg cy      peak cy   %budget"
+    print("")
+    print(header)
+    print("-" * len(header))
     base_sc = (baseline or {}).get("scenarios", {})
     worst = None
     for label in result["order"]:
         row = result["scenarios"][label]
-        delta = fmt_delta(row["peak"], base_sc.get(label, {}).get("peak"))
-        print("%-14s %9d   %6.1f%%   %s" % (label, row["peak"], row["pct"], delta))
+        if baseline:
+            da = fmt_delta(row["avg"], base_sc.get(label, {}).get("avg"))
+            dp = fmt_delta(row["peak"], base_sc.get(label, {}).get("peak"))
+            print("%-14s %8d  %-15s %8d  %-15s %5.1f%%"
+                  % (label, row["avg"], da, row["peak"], dp, row["pct"]))
+        else:
+            print("%-14s %8d %12d   %6.1f%%" % (label, row["avg"], row["peak"], row["pct"]))
         if worst is None or row["pct"] > worst[1]:
             worst = (label, row["pct"])
-    print("-" * 72)
+    print("-" * len(header))
     if budget:
-        print("budget %d cycles/block" % budget)
+        print("budget %d cycles/block (%% is of peak)" % budget)
     if worst:
         flag = "  <-- OVER 70%" if worst[1] > 70.0 else ""
         print("worst case: %s at %.1f%% of budget%s" % (worst[0], worst[1], flag))
+    if baseline and BIN == "mi-bench":
+        print("note: mi-bench peak repeats to only ~8%; gate on avg (BENCHMARKS.md)")
 
     sizes = result.get("sizes")
     base_sizes = (baseline or {}).get("sizes")
