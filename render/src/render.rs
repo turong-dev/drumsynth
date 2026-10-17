@@ -354,6 +354,33 @@ pub(crate) fn render_mi_drum_marked(shaper_algorithm: f32) -> (Vec<f32>, Vec<(f3
     }
     engine.tracks_mut()[0].set_param(SLOT_SHAPER_OSC_SHAPE, 0.0);
 
+    // ---- the whole kit, sounding together -------------------------------
+    //
+    // Everything above this point triggers **track 0 and nothing else**,
+    // which left the digest blind to anything per-track. Render phase is
+    // the case that found it: `MiDrumEngine::stagger_render_phase` gives
+    // each track a different voice-block offset, and changing it — even
+    // zeroing it outright, which is a measurable ~20% swing in block peak —
+    // did not move this digest by one bit, because track 0's phase is 0
+    // under every scheme.
+    //
+    // Six tracks on coprime periods, so the relative alignment of their
+    // render boundaries keeps changing and the hash sees many different
+    // combinations rather than one repeating one. That is exactly the
+    // property the old section could not test.
+    mark!("full kit — all six tracks on coprime periods");
+    engine.load_kit(&mi_drum_engine::DEFAULT_KIT);
+    let periods = [7usize, 11, 13, 17, 19, 23];
+    for block in 0..((3.0 * SAMPLE_RATE / BLOCK as f32) as usize) {
+        for (track, period) in periods.iter().enumerate() {
+            if block % period == 0 {
+                engine.trigger(track, if block % 2 == 0 { 1.0 } else { 0.7 });
+            }
+        }
+        engine.process(&mut l, &mut r);
+        append_block(&mut out, &l, &r);
+    }
+
     (out, marks)
 }
 

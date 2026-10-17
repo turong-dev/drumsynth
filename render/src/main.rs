@@ -704,7 +704,22 @@ mod mi_drum_baseline {
     // Verified identical across five separate processes before pinning — the
     // discipline `1633ca5` established after two uninitialised reads made this
     // digest drift between runs.
-    const BASELINE_DIGEST: u64 = 0xfdcd_64b0_d89f_6cfd;
+    //
+    // Re-pinned twice in one change.
+    //
+    // First for the baseline's new "full kit" section. Everything before it
+    // triggers **track 0 and nothing else**, so the digest was blind to
+    // anything per-track: zeroing every voice's render phase — a ~20% swing
+    // in block peak and an audibly different render on tracks 1–5 — moved
+    // it by zero bits.
+    //
+    // Then because the wider coverage immediately caught a real bug:
+    // `MiSlot::load_in_place` was dropping the staggered render phase on
+    // every machine change, so `load_kit` left all six voices aligned. The
+    // full-kit section loads a kit, so it now renders staggered where it
+    // used to render aligned. That is a deliberate change to the sound,
+    // and it is the correct behaviour — see `tests/render_phase.rs`.
+    const BASELINE_DIGEST: u64 = 0x14a7_b4fc_81f2_b9cd;
 
     /// One test, one render, deliberately.
     ///

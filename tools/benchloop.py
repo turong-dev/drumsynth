@@ -62,6 +62,17 @@ BINS = {
 }
 RESULTS = REPO / "bench-results"
 
+# "  dist min=299k p50=305k p99=312k max=420k over=3/512"
+# Emitted on the line after a scenario row, so it attaches to whichever
+# label was parsed last. Optional: a binary without it still parses.
+# "  phase p0=304112 p1=295880 p2=315901"
+PHASE_RE = re.compile(r"^phase\s+p0=(?P<p0>\d+)\s+p1=(?P<p1>\d+)\s+p2=(?P<p2>\d+)")
+
+DIST_RE = re.compile(
+    r"^dist\s+min=(?P<min>\d+)\s+p50=(?P<p50>\d+)\s+p99=(?P<p99>\d+)\s+"
+    r"max=(?P<max>\d+)\s+over=(?P<over>\d+)/(?P<runs>\d+)"
+)
+
 SENTINEL = "=== BENCH END ==="
 # First line the bench prints. If this is missing from a capture, the host
 # opened the port too late and the early scenarios were lost -- macOS discards
@@ -304,6 +315,24 @@ def parse(text):
         if m:
             budget = int(m.group(1))
             continue
+        m = PHASE_RE.match(line)
+        if m and order:
+            scenarios[order[-1]]["phase"] = [
+                int(m.group("p0")), int(m.group("p1")), int(m.group("p2"))
+            ]
+            continue
+        m = DIST_RE.match(line)
+        if m and order:
+            # Attaches to the row above it. Optional, so a binary that does
+            # not emit it still parses and just has no distribution.
+            scenarios[order[-1]].update(
+                min=int(m.group("min")),
+                p50=int(m.group("p50")),
+                p99=int(m.group("p99")),
+                over=int(m.group("over")),
+                runs=int(m.group("runs")),
+            )
+            continue
         m = LINE_RE.match(line)
         if not m:
             continue
@@ -382,6 +411,28 @@ def report(result, baseline):
         print("worst case: %s at %.1f%% of budget%s" % (worst[0], worst[1], flag))
     if baseline and BIN == "mi-bench":
         print("note: mi-bench peak repeats to only ~8%; gate on avg (BENCHMARKS.md)")
+
+    if any("p99" in result["scenarios"][l] for l in result["order"]):
+        print("")
+        print("distribution  (is the tail the workload, or a handful of bad blocks?)")
+        hdr = ("scenario           min      p50      p99      max   p99/p50   max/p99"
+               "   over budget")
+        print(hdr)
+        print("-" * len(hdr))
+        for label in result["order"]:
+            r = result["scenarios"][label]
+            if "p99" not in r:
+                continue
+            p50, p99, mx = r["p50"], r["p99"], r["peak"]
+            ph = r.get("phase")
+            spread = ""
+            if ph and min(ph):
+                spread = "  phase %+.1f%%" % ((max(ph) - min(ph)) / min(ph) * 100.0)
+            print("%-14s %8d %8d %8d %8d   %7.3f   %7.3f   %5d/%d%s"
+                  % (label, r["min"], p50, p99, mx,
+                     p99 / p50 if p50 else 0.0,
+                     mx / p99 if p99 else 0.0,
+                     r["over"], r["runs"], spread))
 
     sizes = result.get("sizes")
     base_sizes = (baseline or {}).get("sizes")

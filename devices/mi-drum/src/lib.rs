@@ -1327,8 +1327,28 @@ impl Slot<NUM_PARAMS> for MiSlot {
     #[allow(unsafe_code)]
     unsafe fn load_in_place(id: Self::Id, params: &[f32; NUM_PARAMS], ptr: *mut Self) {
         unsafe {
+            // Render phase belongs to the *track*, not to the voice sitting
+            // in it, so it has to survive a machine swap.
+            //
+            // `new_in_place` zeroes it, which is right for a fresh slot —
+            // `MiDrumEngine::new` staggers the phases immediately
+            // afterwards. It was badly wrong here: every path that changes
+            // a machine goes through `load_in_place`, so `load_kit` reset
+            // all six tracks to phase 0 and a single machine swap reset
+            // one. Phase 0 on every track is precisely the aligned
+            // configuration `stagger_render_phase` exists to avoid — all
+            // six voices crossing their render boundary on the same tick,
+            // which measured 123.9% of budget against 100.3% staggered.
+            //
+            // So the device booted staggered and collapsed to the worst
+            // case the first time anyone loaded a kit or turned the
+            // machine selector, and the bench never caught it because it
+            // does neither.
+            let phase = (*ptr).render_phase;
             PlaitsVoice::free_in_place(core::ptr::addr_of_mut!((*ptr).plaits));
             Self::new_in_place(id, params, ptr);
+            core::ptr::addr_of_mut!((*ptr).render_phase).write(phase);
+            core::ptr::addr_of_mut!((*ptr).block_pos).write(VOICE_BLOCK - phase);
         }
     }
 
@@ -1807,6 +1827,15 @@ impl MiSlot {
     /// Spread this slot's voice-render across the block period.
     ///
     /// `phase` is in samples, `0..VOICE_BLOCK`. See `render_phase`.
+    /// This slot's voice-render offset, in samples.
+    ///
+    /// Exposed so `tests/render_phase.rs` can assert the staggering
+    /// survives a machine change, which is the bug it guards.
+    pub fn render_phase(&self) -> usize {
+        self.render_phase
+    }
+
+    /// Set this slot's voice-render offset, in samples, `0..VOICE_BLOCK`.
     pub fn set_render_phase(&mut self, phase: usize) {
         self.render_phase = phase % VOICE_BLOCK;
         self.block_pos = VOICE_BLOCK - self.render_phase;
@@ -1993,6 +2022,21 @@ impl MiDrumEngine {
     /// It targets the *peak*, which is what the block deadline is set by —
     /// `6 sounding` peaked at 1.67x its own average with every voice aligned,
     /// and a block where all six render is the one that misses.
+    ///
+    /// Applied at construction, and preserved across machine changes by
+    /// `MiSlot::load_in_place` — see the note there, and
+    /// `tests/render_phase.rs`.
+    ///
+    /// This spacing equalises the number of renders per engine block, which
+    /// is not quite the same as equalising their *cost*: `VOICE_BLOCK` (24)
+    /// does not divide `BLOCK` (32), so the pattern repeats over three
+    /// blocks and each slot renders twice in one of them. Consecutive
+    /// tracks land in the same one, and `DEFAULT_KIT` puts both expensive
+    /// Plaits voices on consecutive tracks, so one block in three pays both
+    /// their doubles. Measured at -5%/+2%/+4% around the mean. Assigning
+    /// the classes round-robin instead takes that to about +/-1.5%; not
+    /// done here because it is a change to the sound, unlike the bug fix
+    /// this comment sits next to.
     fn stagger_render_phase(&mut self) {
         let n = self.inner.tracks.len();
         if n == 0 {

@@ -408,6 +408,110 @@ fn reboot_to_bootloader() -> ! {
 struct Stats {
     avg: u32,
     peak: u32,
+    /// Median block. With `peak` and `p99`, this is what separates "one
+    /// freak block" from "every third block is expensive".
+    p50: u32,
+    p99: u32,
+    min: u32,
+    /// Blocks at or over the deadline. The number that actually says
+    /// whether the device misses it, which `peak` alone cannot:
+    /// `over == 1` is a measurement artefact to go and find, `over == 170`
+    /// is a device that does not fit.
+    over: u32,
+    /// Mean block cost grouped by block index mod [`RENDER_PERIOD`].
+    ///
+    /// The direct test of the render-boundary hypothesis. A slot renders
+    /// `VOICE_BLOCK` = 24 samples at a time into a `BLOCK` = 32 engine
+    /// block, so over three engine blocks it renders four times: two
+    /// renders land in one block and one in each of the others. If that
+    /// is what makes the tail, cost is periodic with period 3 and these
+    /// three numbers differ. If they are equal, the variation is coming
+    /// from somewhere else and the boundary theory is wrong.
+    phase: [u32; RENDER_PERIOD],
+}
+
+/// Engine blocks per voice-render cycle: `lcm(VOICE_BLOCK, BLOCK) / BLOCK`
+/// = `lcm(24, 32) / 32` = 3.
+const RENDER_PERIOD: usize = 3;
+
+/// Per-block samples for one scenario, kept so the distribution can be
+/// reported rather than just its two extremes.
+///
+/// `peak` is a max over [`RUNS`] blocks, so a single contaminated block
+/// defines it while leaving `avg` untouched — which is exactly the
+/// signature mi-drum shows (avg repeats to 0.7%, peak to only 8%). Keeping
+/// every sample is 2 KB of stack and turns that ambiguity into a number.
+struct Samples {
+    cy: [u32; RUNS],
+    n: usize,
+}
+
+impl Samples {
+    const fn new() -> Self {
+        Self {
+            cy: [0; RUNS],
+            n: 0,
+        }
+    }
+
+    fn push(&mut self, elapsed: u32) {
+        if self.n < RUNS {
+            self.cy[self.n] = elapsed;
+            self.n += 1;
+        }
+    }
+
+    /// Sort in place and reduce to [`Stats`].
+    ///
+    /// `sort_unstable` is `core`, not `alloc` — pattern-defeating quicksort
+    /// over a borrowed slice, no scratch allocation — so this stays inside
+    /// the no-alloc contract.
+    fn finish(&mut self) -> Stats {
+        let n = self.n;
+        if n == 0 {
+            return Stats {
+                avg: 0,
+                peak: 0,
+                p50: 0,
+                p99: 0,
+                min: 0,
+                over: 0,
+                phase: [0; RENDER_PERIOD],
+            };
+        }
+        let total: u64 = self.cy[..n].iter().map(|&c| c as u64).sum();
+        let budget = BUDGET as u32;
+        let over = self.cy[..n].iter().filter(|&&c| c >= budget).count() as u32;
+
+        // Group by position in the render cycle *before* sorting, which
+        // destroys the ordering this depends on.
+        let mut phase = [0u32; RENDER_PERIOD];
+        let mut sums = [0u64; RENDER_PERIOD];
+        let mut counts = [0u32; RENDER_PERIOD];
+        for (i, &c) in self.cy[..n].iter().enumerate() {
+            sums[i % RENDER_PERIOD] += c as u64;
+            counts[i % RENDER_PERIOD] += 1;
+        }
+        for k in 0..RENDER_PERIOD {
+            if counts[k] > 0 {
+                phase[k] = (sums[k] / counts[k] as u64) as u32;
+            }
+        }
+
+        let s = &mut self.cy[..n];
+        s.sort_unstable();
+        Stats {
+            avg: (total / n as u64) as u32,
+            peak: s[n - 1],
+            p50: s[n / 2],
+            // Nearest-rank, clamped: at RUNS = 512 this is the 507th sample,
+            // so it ignores the top five blocks.
+            p99: s[(n * 99 / 100).min(n - 1)],
+            min: s[0],
+            over,
+            phase,
+        }
+    }
 }
 
 /// Set a track's delay/reverb send levels, refreshing the engine's
@@ -488,8 +592,7 @@ fn measure(
     // Plaits voice's first block render.
     engine.process(left, right);
 
-    let mut total: u64 = 0;
-    let mut peak: u32 = 0;
+    let mut samples = Samples::new();
 
     for _ in 0..RUNS {
         retrigger(engine, retrigger_count);
@@ -500,12 +603,7 @@ fn measure(
 
         // Wrapping subtract: CYCCNT is free-running 32-bit and rolls over
         // roughly every 7 seconds at 600 MHz.
-        let elapsed = end.wrapping_sub(start);
-
-        total += elapsed as u64;
-        if elapsed > peak {
-            peak = elapsed;
-        }
+        samples.push(end.wrapping_sub(start));
 
         // Defeat dead-code elimination. Without this the optimiser may notice
         // nothing reads the buffers and delete the call, giving a bench that
@@ -514,10 +612,7 @@ fn measure(
         core::hint::black_box(&*right);
     }
 
-    Stats {
-        avg: (total / RUNS as u64) as u32,
-        peak,
-    }
+    samples.finish()
 }
 
 /// Worst case with the send-FX buses punched in: track 1 → reverb,
@@ -675,8 +770,7 @@ fn measure_resonator_send(
 
     engine.process(left, right);
 
-    let mut total: u64 = 0;
-    let mut peak: u32 = 0;
+    let mut samples = Samples::new();
 
     for _ in 0..RUNS {
         retrigger(engine, TRACKS);
@@ -686,22 +780,14 @@ fn measure_resonator_send(
         // Mono send feed, as a send bus would be.
         resonator.process(0.01, 0.3, 0.5, 0.3, left, &mut wet);
         let end = DWT::cycle_count();
-        let elapsed = end.wrapping_sub(start);
-
-        total += elapsed as u64;
-        if elapsed > peak {
-            peak = elapsed;
-        }
+        samples.push(end.wrapping_sub(start));
 
         core::hint::black_box(&*left);
         core::hint::black_box(&*right);
         core::hint::black_box(&wet);
     }
 
-    Stats {
-        avg: (total / RUNS as u64) as u32,
-        peak,
-    }
+    samples.finish()
 }
 
 /// The FX bookkeeping floor: buses constructed and tanks advanced every block
@@ -731,6 +817,26 @@ fn report(label: &str, s: Stats, poller: &mut imxrt_log::Poller, pit: &mut bsp::
         s.peak,
         pct,
         per_frame,
+    );
+
+    // The distribution, on its own line so the existing one keeps its
+    // format. This is the line that says what the peak/average tail is
+    // made of: a `p99` near `p50` with a high `max` is a handful of
+    // contaminated blocks, while a `p99` near `max` is the workload.
+    log::info!(
+        "  dist min={} p50={} p99={} max={} over={}/{}",
+        s.min,
+        s.p50,
+        s.p99,
+        s.peak,
+        s.over,
+        RUNS,
+    );
+    log::info!(
+        "  phase p0={} p1={} p2={}",
+        s.phase[0],
+        s.phase[1],
+        s.phase[2],
     );
 
     if pct > 70.0 {
