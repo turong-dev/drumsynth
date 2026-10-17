@@ -40,23 +40,25 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name    | range         | notes |
-//! |-----|-----|---------|---------------|-------|
-//! | 0   | 20  | RATE    | 0.1..5 Hz      | sweep LFO speed |
-//! | 1   | 21  | DEPTH   | 0..4 oct       | cutoff sweep width (exp2 from START) |
-//! | 2   | 22  | START   | 80..8000 Hz    | cutoff centre |
-//! | 5   | 25  | MACH    | 0..1           | machine selector (quantised over MachineId::ALL) |
-//! | 9   | 29  | RESO    | 0.5..12 Q      | SVF resonance (FILTER bank resonance slot) |
-//! | 16  | 36  | LEVEL   | 0..1           | per-machine output level |
-//! | 17  | 37  | PAN     | 0..1           | (track-routed; ignored here) |
-//! | 18  | 38  | DEC     | 0.05..0.6 s    | release decay, 5% of the old gesture length |
-//! | 20  | 40  | MODE    | 0..1           | LP/BP/HP, quantised (default BP — the classic riser shape) |
-//! | 22  | 42  | SEND.DLY| 0..1           | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB| 0..1           | reverb send (track-routed) |
-//! | 26  | 46  | OUT     | 0..1           | track routing (Master/Aux1/2/3) |
+//! | name     | range       | notes                                                      |
+//! |----------|-------------|------------------------------------------------------------|
+//! | RATE     | 0.1..5 Hz   | sweep LFO speed                                            |
+//! | DEPTH    | 0..4 oct    | cutoff sweep width (exp2 from START)                       |
+//! | START    | 80..8000 Hz | cutoff centre                                              |
+//! | MACH     | 0..1        | machine selector (quantised over MachineId::ALL)           |
+//! | RESO     | 0.5..12 Q   | SVF resonance (FILTER bank resonance slot)                 |
+//! | LEVEL    | 0..1        | per-machine output level                                   |
+//! | PAN      | 0..1        | (track-routed; ignored here)                               |
+//! | DEC      | 0.05..0.6 s | release decay, 5% of the old gesture length                |
+//! | MODE     | 0..1        | LP/BP/HP, quantised (default BP — the classic riser shape) |
+//! | SEND.DLY | 0..1        | delay send (track-routed)                                  |
+//! | SEND.RVB | 0..1        | reverb send (track-routed)                                 |
+//! | OUT      | 0..1        | track routing (Master/Aux1/2/3)                            |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 //!

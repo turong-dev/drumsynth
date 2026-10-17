@@ -30,21 +30,23 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name    | range        | notes |
-//! |-----|-----|---------|--------------|-------|
-//! | 0   | 20  | TUNE    | 30..120 Hz   | settled resonator frequency |
-//! | 1   | 21  | SWEEP   | 0..120 Hz    | pitch-sweep depth above TUNE |
-//! | 2   | 22  | SWP_T   | 5..55 ms     | pitch-sweep decay time |
-//! | 5   | 25  | MACH    | 0..1         | machine selector (quantised over MachineId::ALL) |
-//! | 9   | 29  | Q       | 0.5..10      | resonator Q (FILTER bank: the "resonance" slot) |
-//! | 16  | 36  | LEVEL   | 0..1         | per-machine output level |
-//! | 17  | 37  | PAN     | 0..1         | (track-routed; ignored here) |
-//! | 18  | 38  | DEC     | 50..1500 ms  | amp-decay (pulse excitation) time |
-//! | 22  | 42  | SEND.DLY| 0..1         | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB| 0..1         | reverb send (track-routed) |
+//! | name     | range       | notes                                            |
+//! |----------|-------------|--------------------------------------------------|
+//! | TUNE     | 30..120 Hz  | settled resonator frequency                      |
+//! | SWEEP    | 0..120 Hz   | pitch-sweep depth above TUNE                     |
+//! | SWP_T    | 5..55 ms    | pitch-sweep decay time                           |
+//! | MACH     | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | Q        | 0.5..10     | resonator Q (FILTER bank: the "resonance" slot)  |
+//! | LEVEL    | 0..1        | per-machine output level                         |
+//! | PAN      | 0..1        | (track-routed; ignored here)                     |
+//! | DEC      | 50..1500 ms | amp-decay (pulse excitation) time                |
+//! | SEND.DLY | 0..1        | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1        | reverb send (track-routed)                       |
 //!
 //! All other slots are RESV (default 0.0) and ignored — the resonator
 //! *is* the filter, so there is no FILTER-bank cutoff param, only Q.

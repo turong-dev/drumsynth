@@ -11,20 +11,22 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range        | notes |
-//! |-----|-----|-----------|--------------|-------|
-//! | 0   | 20  | TUNE      | 30..120 Hz   | settled fundamental |
-//! | 1   | 21  | SWEEP     | 1×..11×      | start-to-end pitch ratio |
-//! | 2   | 22  | SWP_T     | 5..155 ms    | pitch-sweep decay time |
-//! | 5   | 25  | MACH      | 0..1         | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | LEVEL     | 0..1         | per-machine output level |
-//! | 18  | 38  | DEC       | 50..1500 ms  | amp-decay time |
-//! | 20  | 40  | DRIVE     | 1.0..6.0     | saturation amount |
-//! | 22  | 42  | SEND.DLY  | 0..1         | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1         | reverb send (track-routed) |
+//! | name     | range       | notes                                            |
+//! |----------|-------------|--------------------------------------------------|
+//! | TUNE     | 30..120 Hz  | settled fundamental                              |
+//! | SWEEP    | 1×..11×     | start-to-end pitch ratio                         |
+//! | SWP_T    | 5..155 ms   | pitch-sweep decay time                           |
+//! | MACH     | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | LEVEL    | 0..1        | per-machine output level                         |
+//! | DEC      | 50..1500 ms | amp-decay time                                   |
+//! | DRIVE    | 1.0..6.0    | saturation amount                                |
+//! | SEND.DLY | 0..1        | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1        | reverb send (track-routed)                       |
 //!
 //! All other slots are RESV (default 0.0) and ignored — the voice is
 //! sine-only with no transient layer.
