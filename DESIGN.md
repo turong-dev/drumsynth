@@ -316,13 +316,16 @@ Peaks or Plaits source → Warps → Ripples
   two-input cross-modulator with a mono result:
   - **Carrier** is the voice, tapped by `AUX`: its main output at 0, Plaits'
     aux output at 1, a crossfade in between. This is a *source* selector and
-    not a trim — 21 of the 24 Plaits engines render an aux that is a
-    different signal, measured at 0.92 and 0.04 correlation with the dry
-    voice at the two ends and -0.005 with each other — so it roughly doubles
-    the catalogue without a new engine. The three `SixOp` engines write the
-    same samples to both outputs, which makes the knob inert on them; a
-    Peaks voice has no aux at all and pins it to 0. Default 0, so the shipped
-    sound is unchanged.
+    not a trim — 20 of the 24 Plaits engines generate their aux from a
+    second generator rather than from their main output, measured at 0.92
+    and 0.04 correlation with the dry voice at the two ends and -0.005 with
+    each other — so it roughly doubles the catalogue without a new engine.
+    The exceptions are the three `SixOp` engines, which write the same
+    samples to both outputs so the knob is inert on them, and
+    `mi-wavetable`, whose aux is its own main output requantised to 1/32 —
+    upstream's "lo-fi output", so the knob crossfades towards a bit-crushed
+    copy of the voice. A Peaks voice has no aux at all and pins it to 0.
+    Default 0, so the shipped sound is unchanged.
 
     Two consequences worth stating, because neither is obvious from the
     knob:

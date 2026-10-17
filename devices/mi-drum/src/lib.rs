@@ -373,39 +373,61 @@ impl MiMachineId {
         self.index() as i32
     }
 
-    /// Machine-specific default param values.
-    /// Whether this machine's aux output carries a *different* signal from
-    /// its main output.
+    /// Whether this machine's aux output is generated independently of its
+    /// main output.
     ///
-    /// Not the same question as whether it carries signal at all. Measured
-    /// through the strip, 21 of the 24 Plaits engines render an aux that
-    /// differs from their main output; the three `SixOp` engines write the
-    /// same samples to both, so selecting aux on one of them is
-    /// indistinguishable from self-modulation. A Peaks voice has no aux at
-    /// all.
+    /// Not "does it carry signal", and not "do the samples differ" — that
+    /// second question is what this used to be built on, and it is what let
+    /// `mi-wavetable` through. The question is whether there is a *second
+    /// generator* behind the aux buffer, because cross-modulating a signal
+    /// against a function of itself is the degenerate case `SHAPE.IN` exists
+    /// to avoid.
+    ///
+    /// That is a property of the vendored engine, readable once rather than
+    /// measured. Surveying how each one fills `aux`, exactly two compute it
+    /// from their own `out`:
+    ///
+    /// - **The three `SixOp` engines.** `six_op_engine.cc:172` is
+    ///   `aux[i] = out[i] = SoftClip(...)` — the same value in both buffers.
+    /// - **`mi-wavetable`.** `wavetable_engine.cc:214` is
+    ///   `aux = trunc(out * 32) / 32` — the sample just written to `out`,
+    ///   requantised to 1/32. Upstream documents it as that model's "lo-fi
+    ///   output", and that is what it is: the same voice bit-crushed to
+    ///   about five bits, not a second one. Through the strip it fits
+    ///   `aux ≈ 0.952 · main` with a residual 30.9 dB down — evidence for
+    ///   the source line above, not the reason, and not a clean reading of
+    ///   it either: `Voice::Render` gives each buffer its own `out_gain` /
+    ///   `aux_gain` and then runs both through the LPG, which is a
+    ///   time-varying filter. So the fitted gain mixes the model's own gain
+    ///   ratio with the truncation's magnitude bias, and the quantisation
+    ///   grid is smeared before anything downstream can see it. The exact
+    ///   relation exists only inside the engine, which is why it is cited
+    ///   here rather than asserted in a test.
+    ///
+    /// Every other engine hands `aux` to its own generator — `auxiliary_`,
+    /// `sub_oscillator_`, `harmonic_oscillator_[2]`, `clocked_noise_[0]`,
+    /// `sub_downsampler`, and so on. So 20 of the 24 Plaits engines have a
+    /// real second signal. A Peaks voice has no aux at all.
     ///
     /// This is what decides a machine's `SHAPE.IN` default: aux where there is
     /// a real second signal, the strip's oscillator where there is not.
     /// `every_machine_has_a_real_modulator_by_default` is the guard, and it
-    /// is what caught this — the first version of that default was a single
-    /// shared value and it left the `SixOp` engines cross-modulating against
-    /// themselves.
+    /// is what caught the original version — a single shared default left the
+    /// `SixOp` engines cross-modulating against themselves. It did not catch
+    /// `mi-wavetable`, and could not: a bit-crush produces plenty of
+    /// difference from self-modulation, 31× the guard's threshold. A test
+    /// that asks "do they differ" cannot answer "is the difference a signal".
     ///
-    /// Two caveats, measured when `AUX` put the same outputs on the carrier
-    /// (correlation of the two taps over a hit, per engine):
-    ///
-    /// - **`mi-wavetable` belongs on the other side of this line.** Its aux
-    ///   correlates **+1.000** with its main output at 0.99 of the level —
-    ///   numerically distinct, so it passes the "differs" test this
-    ///   predicate was built from, but a trim rather than a second signal.
-    ///   Moving it would change that machine's shipped `SHAPE.IN` default
-    ///   and with it the baseline digest, so it is recorded rather than
-    ///   done.
-    /// - **`mi-particle`'s aux is nearly silent** — 0.002 peak against the
-    ///   main output's 0.207. It is a real second signal and a poor one to
-    ///   cross-modulate with.
+    /// One machine passes this predicate and is still a poor choice:
+    /// **`mi-particle`'s aux is nearly silent**, 0.002 peak against the main
+    /// output's 0.207. It is independently generated, so the rule holds; it
+    /// is just quiet.
     pub fn has_distinct_aux(self) -> bool {
-        !self.is_peaks() && !matches!(self, Self::SixOp1 | Self::SixOp2 | Self::SixOp3)
+        !self.is_peaks()
+            && !matches!(
+                self,
+                Self::SixOp1 | Self::SixOp2 | Self::SixOp3 | Self::Wavetable
+            )
     }
 
     /// Machine-specific default param values.
@@ -611,13 +633,16 @@ pub const SLOT_LPG_COLOUR: usize = BANKED_PARAMS;
 /// and only the address is new. 1 is the aux output alone; in between is a
 /// linear crossfade of the two.
 ///
-/// This is a *source* selector, not a trim. 21 of the 24 Plaits engines render
-/// an aux that is a genuinely different signal — measured against the dry
-/// voice, the two ends of this crossfade correlate 0.92 and 0.04 with it and
-/// -0.005 with each other — so the catalogue's timbres roughly double without
-/// a new engine. The three `SixOp` engines write the same samples to both
-/// outputs, which makes this knob inert on them rather than wrong; see
-/// [`MiMachineId::has_distinct_aux`].
+/// This is a *source* selector, not a trim. 20 of the 24 Plaits engines
+/// generate their aux independently of their main output — measured against
+/// the dry voice, the two ends of this crossfade correlate 0.92 and 0.04 with
+/// it and -0.005 with each other — so the catalogue's timbres roughly double
+/// without a new engine. The other four are not wrong here, just less than
+/// they look: the three `SixOp` engines write the same samples to both
+/// outputs, so the knob is inert on them, and `mi-wavetable`'s aux is its own
+/// main output requantised to 1/32, so the knob crossfades towards a
+/// bit-crushed copy of the voice — a usable effect, but not a second timbre.
+/// See [`MiMachineId::has_distinct_aux`].
 ///
 /// Plaits-only. A Peaks voice has no second output at all — `block_aux` is
 /// zeroed there — so a crossfade would fade the track into silence rather

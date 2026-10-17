@@ -719,7 +719,16 @@ mod mi_drum_baseline {
     // full-kit section loads a kit, so it now renders staggered where it
     // used to render aligned. That is a deliberate change to the sound,
     // and it is the correct behaviour — see `tests/render_phase.rs`.
-    const BASELINE_DIGEST: u64 = 0x14a7_b4fc_81f2_b9cd;
+    //
+    // Re-pinned again for #15: `mi-wavetable`'s `SHAPE.IN` default moved
+    // from its aux output to the strip oscillator. `wavetable_engine.cc:214`
+    // computes that engine's aux as `trunc(out * 32) / 32` — upstream's
+    // "lo-fi output", the main output requantised to 1/32 — so the default
+    // was pointing Warps' modulator input at a bit-crushed copy of its own
+    // carrier, which is the degenerate case `SHAPE.IN` exists to avoid. Only
+    // the machine-sweep section moves: `mi-wavetable` is not in
+    // `DEFAULT_KIT`, so the kit sections are untouched.
+    const BASELINE_DIGEST: u64 = 0x5035_ea1d_f5c5_7a55;
 
     /// One test, one render, deliberately.
     ///
