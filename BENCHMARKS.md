@@ -100,6 +100,10 @@ swings 2–8% per scenario (`ALG1 fold` 7.7%, `4 sounding` 6.2%,
 So on mi-drum, `peak` has a noise floor of roughly ±5%, which is larger
 than almost any change worth gating. `avg` has one of ±0.5%.
 
+Most of this is now explained — the render-boundary mismatch, measured
+below — but the conclusion stands: `max` is an extremum over 512 blocks
+drawn from a wide distribution, so it moves even when nothing does.
+
 **This invalidates a conclusion that was recorded as fact.** Issue #1's
 finding 1 reported phase B′ as a +4.7% mi-drum regression on
 `3 sounding` and +4.3% on `6 sounding`. Both are peak numbers. On `avg`
@@ -108,7 +112,7 @@ sixteen was **−0.23% — B′ made mi-drum slightly faster.** The regression
 was peak noise, and a static diff of the two binaries agrees: not one
 function on the audio path changed a single instruction.
 
-Practical rule until the peak tail is understood:
+Practical rule:
 
 - **Gate on `avg`.** It is the statistic that reflects the work done.
 - **Watch `peak`, and only believe it over ~8%** on mi-drum. On drum it is
@@ -119,17 +123,21 @@ Practical rule until the peak tail is understood:
 - Deadline safety still depends on real peak, so a peak that approaches
   budget matters even when it is noisy. It just cannot be *diffed*.
 
-The tail itself is unexplained and worth its own investigation: `avg` to
-`peak` is a ~1.2–1.3× ratio on the Plaits scenarios, which is too large
-and too systematic for interrupt jitter alone. It is the same tail
-*What the peak/average ratio is made of* (below) has been chasing — the
-new fact is that it is not reproducible run to run, which rules out
-anything fixed about the code.
+Most of the tail is now accounted for — see *What the peak/average ratio
+is made of* below, which the per-block distribution finally cracked.
 
 ## Interpreting results
 
 - Compare `avg` first; see the section above for why, and for when `peak`
   is trustworthy.
+- Read the **distribution** block the harness prints under the main table.
+  `p99/p50` is how wide the workload is; `max/p99` is how far the single
+  worst block sits beyond it. A high `max/p99` with a normal `p99/p50` is
+  a contaminated block, not a regression. `over budget` is the only
+  number that says whether the deadline is actually missed.
+- The `phase` column is the spread between the three positions in the
+  voice-render cycle. Flat on `idle`; around 10% when six voices sound.
+  A jump there means something changed about render scheduling.
 - Compare against the relevant baseline (`baseline.json`, `mi-baseline.json`, or
   the 14.1 skeleton gate for mi-drum strip work).
 - Watch the **worst-case scenario** first; a change that helps idle but hurts
@@ -274,16 +282,30 @@ own average while `idle` sits at 1.01x. Partly accounted for:
 - **Cold cache after `panic()`: ~12 points.** 32 warm-up passes instead of 1
   drops `6 sounding` peak/avg from 1.35x to 1.19x. Not corrected, for the
   reason in the rejected table above.
-- **Unexplained: the ~1.34x on a single voice.** It does not move with the
-  voice block size (16 vs 24) or with warm-up, so it is neither render
-  scheduling nor cache warming. Whatever it is, it is the thing to understand
-  before cutting more DSP, because it sets the deadline.
-- **And the tail is not reproducible.** Three runs of one identical binary
-  put `peak` anywhere inside a ~5% band while `avg` holds to 0.7% — see
-  *avg or peak?* above. Whatever produces the tail is not a fixed property
-  of the code, so "which block was worst" changes between runs even though
-  the work does not. That is a second clue about the same mechanism, and
-  the two should be investigated together.
+- **Mostly the 24-into-32 render mismatch, and it is now measured.**
+  `VOICE_BLOCK` (24) does not divide `BLOCK` (32), so the pattern repeats
+  every `lcm(24, 32) / 32` = **3 engine blocks**, over which each slot
+  renders four times — twice in one of the three, once in each of the
+  others. The bench reports mean cost grouped by block index mod 3 (the
+  `phase` column), and it is flat to 0.0% on `idle`, which renders
+  nothing, and −5%/+2%/+4% on every six-voice scenario.
+
+  The model predicts the sign on the partial kits too, which is what
+  makes it convincing rather than suggestive: `1`/`2 sounding` load only
+  the first class so phase 0 is dearest; `4 sounding` leaves the third
+  empty so phase 2 is cheapest; `3 sounding` splits 2/1/0 and runs
+  +3.7/0.0/−3.7.
+- **A `load_kit` used to throw the staggering away entirely.** Fixed in
+  `7149f20`. Worth 10–25% of peak on every six-voice scenario, and the
+  reason no bench saw it is that no bench changes a machine. If you add
+  a scenario, consider whether it should.
+- **What is left is a handful of genuinely contaminated blocks.** With
+  the structural part understood, the residue shows up as `max/p99`
+  around 1.4 on one or two scenarios per run, moving between runs, while
+  every other scenario sits at 1.02–1.17. That is the rare-and-large
+  signature — a few blocks out of 512, not a property of the workload.
+  The timed region does not mask interrupts, which is the obvious
+  candidate and the obvious next experiment.
 
 ### mi-drum per-unit costs
 
