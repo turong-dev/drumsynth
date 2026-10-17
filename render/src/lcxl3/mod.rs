@@ -87,20 +87,24 @@ pub fn preflight(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| input.port_name(p).unwrap_or_else(|_| "?".into()))
         .collect();
 
-    let needle = filter.unwrap_or(driver::DEFAULT_PORT_FILTER);
-    if driver::pick_port(&out_names, filter).is_none() {
-        return Err(format!(
-            "no MIDI output port matching '{needle}'. available: {}",
-            out_names.join(", ")
-        )
-        .into());
-    }
-    if driver::pick_port(&in_names, filter).is_none() {
-        return Err(format!(
-            "no MIDI input port matching '{needle}'. available: {}",
-            in_names.join(", ")
-        )
-        .into());
+    let needle = driver::describe_filter(filter);
+    for (kind, found, all) in [
+        ("output", driver::pick_port(&out_names, filter), &out_names),
+        ("input", driver::pick_port(&in_names, filter), &in_names),
+    ] {
+        if found.is_none() {
+            // One line on purpose: `main` reports a `Box<dyn Error>`
+            // through `Debug`, which escapes newlines into the message.
+            return Err(format!(
+                "no MIDI {kind} port matching {needle} — connect the controller; DAW mode lives on its DAW In/Out USB port. {kind} ports seen: {}",
+                if all.is_empty() {
+                    "none at all".to_string()
+                } else {
+                    all.join(", ")
+                }
+            )
+            .into());
+        }
     }
     Ok(())
 }

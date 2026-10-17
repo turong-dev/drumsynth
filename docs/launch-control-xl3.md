@@ -132,6 +132,48 @@ If a capture later shows the repaint burst is too wide, the palette is
 where to save three quarters of it — but measure first, and get the
 swatches first.
 
+## Running it
+
+```bash
+# mi-drum, through the speakers, with the controller as the front panel
+cargo run -p render --features live -- lcxl3 mi-drum --out "MacBook Air Speakers"
+
+# the drum device instead
+cargo run -p render --features live -- lcxl3 --out "MacBook Air Speakers"
+```
+
+Two flags are worth knowing before the first run.
+
+**`--out` defaults to BlackHole when one is installed**, which is right for
+recording and silent for auditioning. Pass a real output device — `render
+device --list` prints them — or you will turn knobs and hear nothing.
+
+**`--surface-port` overrides the port match.** The default tries `lcxl3`,
+`launch control xl` and `launchcontrol`, preferring a port whose name also
+contains `daw`, because only the DAW In/Out interface speaks DAW mode.
+If the match fails, the error lists every port it saw; pass a substring of
+the right one. `render monitor --list` prints the inputs.
+
+The port check runs before the audio device opens, so a controller that is
+not there fails immediately rather than after the engine's banner.
+
+### What you should see
+
+On start: the controller's screen shows `MACRO R1`, the eight faders are
+track levels, and the three encoder rows are the first three `TRACK`
+parameters of each column's track. Macros (#14) are not landed, so the
+resting screen falls back to the `TRACK` group as #13 anticipates.
+
+The top button row selects a track and auditions it — hold Shift to select
+silently. The bottom row is the eight addressable groups: hold one for a
+quick edit and the screen comes back on release, tap one to latch it.
+Buttons for groups the loaded machine has no parameters in are dark.
+
+On mi-drum specifically: there are six tracks, so **columns 7 and 8 are
+dark** and do nothing, and the `AMP` button is dark on every machine
+because mi-drum runs its envelope inside the voice and has no `AMP` rows.
+Both are correct, and both are covered by tests.
+
 ## Phase 0: what to capture, and what each capture decides
 
 `render monitor --daw --hex` puts the controller into DAW mode with

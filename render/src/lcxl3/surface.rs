@@ -1829,3 +1829,279 @@ mod tests {
         }
     }
 }
+
+/// The same state machine against mi-drum, the other device `render` can
+/// run.
+///
+/// mi-drum differs from the drum device in every dimension the surface is
+/// parameterised over — six tracks rather than eight, 34 parameters rather
+/// than 32, a 28-machine catalogue rather than 15, parameter groups that
+/// are deliberately non-contiguous in the flat array, and no `AMP` rows at
+/// all because it runs its envelope inside the voice. That last one makes
+/// it the device where "a group with nothing in it is not selectable"
+/// stops being hypothetical.
+#[cfg(test)]
+mod mi_drum_tests {
+    use super::*;
+    use drum_engine::midi::handle_midi;
+    use mi_drum_engine::{MiDrumEngine, MiMachineId, NUM_PARAMS as MI_PARAMS};
+
+    use drum_engine::{DeviceEngine, SlotId};
+
+    fn surface() -> (Surface<MI_PARAMS>, Box<MiDrumEngine>) {
+        mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+        let engine = crate::render::mi_drum_in_place();
+        let kit = crate::lcxl3::snapshot::<_, MI_PARAMS>(&*engine);
+        let s = Surface::new(
+            crate::lcxl3::catalogue_for::<MiMachineId, MI_PARAMS>(),
+            &kit,
+        );
+        (s, engine)
+    }
+
+    fn gcol(group: ParamGroup) -> u8 {
+        ParamGroup::ADDRESSABLE
+            .iter()
+            .position(|&g| g == group)
+            .unwrap() as u8
+    }
+
+    /// Six tracks on an eight-column surface: the last two columns are
+    /// dark rather than addressing a track that is not there.
+    #[test]
+    fn the_two_columns_past_the_last_track_are_dark() {
+        let (s, engine) = surface();
+        assert_eq!(s.tracks(), engine.tracks().len());
+        assert_eq!(s.tracks(), 6);
+        for column in 6..COLUMNS as u8 {
+            assert_eq!(s.fader_addr(column), None, "column {column} fader");
+            assert_eq!(s.track_leds()[column as usize], Rgb::DARK);
+            for row in 0..ROWS as u8 {
+                assert_eq!(s.encoder_addr(row, column), None, "column {column}");
+            }
+        }
+    }
+
+    /// Selecting a track that does not exist must not move the selection
+    /// or sound anything.
+    #[test]
+    fn selecting_a_column_with_no_track_does_nothing() {
+        let (mut s, _) = surface();
+        let out = s.handle(
+            Input::Button {
+                button: Button::Track(7),
+                down: true,
+            },
+            0,
+        );
+        assert_eq!(s.selected_track(), 0);
+        assert_eq!(out.events().count(), 0);
+    }
+
+    /// The faders find the level by route on mi-drum too, which routes its
+    /// strip inside the voice and so could plausibly not have had one.
+    #[test]
+    fn faders_are_track_levels() {
+        let (s, _) = surface();
+        for column in 0..6u8 {
+            let addr = s.fader_addr(column).expect("mi-drum has a LEVEL row");
+            assert_eq!(addr.track, column);
+            let flat = drum_engine::machines::resolve(s.table(column as usize), addr.id).unwrap();
+            assert_eq!(s.table(column as usize)[flat].route, ParamRoute::Level);
+        }
+    }
+
+    /// mi-drum has no AMP rows, so that button is dark and cannot strand
+    /// the screen. This is the rule's real case rather than a contrived
+    /// one.
+    #[test]
+    fn amp_is_empty_on_mi_drum_and_so_is_not_selectable() {
+        let (mut s, _) = surface();
+        let amp = gcol(ParamGroup::Amp);
+        assert_eq!(
+            group_len(s.table(0), ParamGroup::Amp),
+            0,
+            "mi-drum runs its envelope in the voice"
+        );
+        assert!(!s.group_is_reachable(amp));
+        assert_eq!(s.group_leds()[amp as usize], Rgb::DARK);
+        s.handle(
+            Input::Button {
+                button: Button::Group(amp),
+                down: true,
+            },
+            0,
+        );
+        assert_eq!(s.screen(), Screen::Macros);
+    }
+
+    /// Every group mi-drum does have is reachable, pages correctly, and
+    /// hands out addresses that resolve. Walking all of them is what
+    /// catches a group whose rows are scattered through the flat array —
+    /// mi-drum's SHAPER sits at 8, 9, 13, 14, 15, 22 and 23.
+    #[test]
+    fn every_non_empty_group_resolves_on_every_page() {
+        let (mut s, _) = surface();
+        for g in 0..ParamGroup::ADDRESSABLE.len() as u8 {
+            if !s.group_is_reachable(g) {
+                continue;
+            }
+            s.handle(
+                Input::Button {
+                    button: Button::Group(g),
+                    down: true,
+                },
+                0,
+            );
+            s.handle(
+                Input::Button {
+                    button: Button::Group(g),
+                    down: false,
+                },
+                1,
+            ); // tap: latch
+            let pages = s.pages();
+            let mut found = 0;
+            for page in 0..pages {
+                while s.page() < page {
+                    s.handle(
+                        Input::Button {
+                            button: Button::PageDown,
+                            down: true,
+                        },
+                        10,
+                    );
+                }
+                for row in 0..ROWS as u8 {
+                    for column in 0..COLUMNS as u8 {
+                        let Some(addr) = s.encoder_addr(row, column) else {
+                            continue;
+                        };
+                        assert!(
+                            drum_engine::machines::resolve(s.table(addr.track as usize), addr.id)
+                                .is_some(),
+                            "{:?} does not resolve",
+                            addr
+                        );
+                        found += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                found,
+                group_len(s.table(0), ParamGroup::ADDRESSABLE[g as usize]),
+                "{} must be reachable in full across its pages",
+                ParamGroup::ADDRESSABLE[g as usize].name()
+            );
+        }
+    }
+
+    /// The shadow has to agree with mi-drum's engine as well as the drum
+    /// one — different catalogue size, different defaults, and a machine
+    /// change that rebuilds a Plaits voice.
+    #[test]
+    fn shadow_tracks_the_engine() {
+        let (mut s, mut engine) = surface();
+        let script: Vec<Input> = vec![
+            Input::Fader {
+                column: 0,
+                value: 110,
+            },
+            Input::Fader {
+                column: 5,
+                value: 20,
+            },
+            Input::Button {
+                button: Button::Track(3),
+                down: true,
+            },
+            Input::Button {
+                button: Button::Group(gcol(ParamGroup::Voice)),
+                down: true,
+            },
+            Input::Encoder {
+                row: 0,
+                column: 0,
+                delta: 25,
+            },
+            Input::Encoder {
+                row: 0,
+                column: 2,
+                delta: -9,
+            },
+            Input::Button {
+                button: Button::Group(gcol(ParamGroup::Voice)),
+                down: false,
+            },
+            // The machine selector, which rebuilds the voice.
+            Input::Encoder {
+                row: 0,
+                column: 3,
+                delta: 5,
+            },
+            Input::Encoder {
+                row: 1,
+                column: 3,
+                delta: -1,
+            },
+            Input::Fader {
+                column: 3,
+                value: 90,
+            },
+        ];
+
+        let mut now = 0u32;
+        for input in script {
+            now += HOLD_MS;
+            let out = s.handle(input, now);
+            for ev in out.events() {
+                handle_midi(&mut *engine, ev);
+            }
+        }
+
+        for track in 0..engine.tracks().len() {
+            assert_eq!(
+                s.machine(track),
+                engine.tracks()[track].id().index(),
+                "track {track}: machine"
+            );
+            for flat in 0..MI_PARAMS {
+                let shadow = s.value(track, flat);
+                let actual = engine.tracks()[track].param_target(flat);
+                assert!(
+                    (shadow - actual).abs() < 1e-6,
+                    "track {track} param {flat} ({}): shadow {shadow} vs engine {actual}",
+                    s.table(track)[flat].name
+                );
+            }
+        }
+    }
+
+    /// One detent on mi-drum's 28-machine selector is one machine, all the
+    /// way across the catalogue. Truncation in the engine's quantiser
+    /// makes this worth walking rather than sampling.
+    #[test]
+    fn a_detent_is_one_machine_across_the_whole_catalogue() {
+        let (mut s, mut engine) = surface();
+        let start = engine.tracks()[0].id().index();
+        for step in 1..MiMachineId::count() - start {
+            let out = s.handle(
+                Input::Encoder {
+                    row: 0,
+                    column: 0,
+                    delta: 1,
+                },
+                0,
+            );
+            for ev in out.events() {
+                handle_midi(&mut *engine, ev);
+            }
+            assert_eq!(
+                engine.tracks()[0].id().index(),
+                start + step,
+                "detent {step}"
+            );
+            assert_eq!(s.machine(0), start + step, "shadow at detent {step}");
+        }
+    }
+}

@@ -51,14 +51,25 @@ use drum_engine::midi::MidiEvent;
 use super::surface::{Addr, Button, Input, Reading, Rgb, Surface, Title, COLUMNS, ENCODERS, ROWS};
 use super::wire::{self, Incoming};
 
-/// Substring used to find the controller's DAW ports when none is given.
+/// Substrings tried, in order, when no `--surface-port` is given.
 ///
-/// The device presents several interfaces; the DAW one is the only one
-/// that speaks DAW mode, and on macOS it is named with this suffix.
-pub const DEFAULT_PORT_FILTER: &str = "LCXL3";
-/// Narrower filter applied on top of [`DEFAULT_PORT_FILTER`], to pick the
-/// DAW interface out of the device's several ports.
-pub const DAW_PORT_HINT: &str = "DAW";
+/// Novation's naming is not something this code can pin down from the
+/// reference: the guide says the device "appears on your system with the
+/// device ID appended to the device name", and CoreMIDI then prefixes the
+/// port name on top of that — so the full string is something like
+/// "LCXL3 1 DAW In" or "Launch Control XL 3 DAW In" depending on firmware
+/// and device ID. Rather than guess once and fail, try the plausible
+/// spellings and let `--surface-port` override.
+pub const DEFAULT_PORT_FILTERS: &[&str] = &["lcxl3", "launch control xl", "launchcontrol"];
+
+/// Narrower filter applied on top of the device match, to pick the DAW
+/// interface out of the device's several ports.
+///
+/// Only the DAW In/Out interface speaks DAW mode; the main MIDI interface
+/// and the DIN ports do not, so matching the device name alone is
+/// ambiguous and picking wrong means a controller that lights up and
+/// sends nothing.
+pub const DAW_PORT_HINT: &str = "daw";
 
 /// Minimum gap between repaint passes.
 const RENDER_INTERVAL_MS: u64 = 10;
@@ -88,7 +99,7 @@ const NAME_FIELDS: usize = COLUMNS;
 /// Options for starting the driver.
 pub struct Config {
     /// Substring matched against MIDI port names. `None` uses
-    /// [`DEFAULT_PORT_FILTER`].
+    /// [`DEFAULT_PORT_FILTERS`].
     pub port: Option<String>,
 }
 
@@ -494,9 +505,13 @@ pub fn open_output_port(filter: Option<&str>) -> Result<MidiOutputConnection, Bo
         .collect();
     let i = pick_port(&names, filter).ok_or_else(|| {
         format!(
-            "no MIDI output port matching '{}'. available: {}",
-            filter.unwrap_or(DEFAULT_PORT_FILTER),
-            names.join(", ")
+            "no MIDI output port matching {}. available: {}",
+            describe_filter(filter),
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
         )
     })?;
     println!("Launch Control XL 3 out: {}", names[i]);
@@ -523,9 +538,13 @@ where
         .collect();
     let i = pick_port(&names, filter).ok_or_else(|| {
         format!(
-            "no MIDI input port matching '{}'. available: {}",
-            filter.unwrap_or(DEFAULT_PORT_FILTER),
-            names.join(", ")
+            "no MIDI input port matching {}. available: {}",
+            describe_filter(filter),
+            if names.is_empty() {
+                "(none)".to_string()
+            } else {
+                names.join(", ")
+            }
         )
     })?;
     println!("Launch Control XL 3 in:  {}", names[i]);
@@ -551,22 +570,51 @@ where
 /// match is taken, which is what a user passing an explicit `--port`
 /// expects.
 pub fn pick_port(names: &[String], filter: Option<&str>) -> Option<usize> {
-    let needle = filter.unwrap_or(DEFAULT_PORT_FILTER).to_lowercase();
-    let matches: Vec<usize> = names
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| n.to_lowercase().contains(&needle))
-        .map(|(i, _)| i)
-        .collect();
-    matches
-        .iter()
-        .copied()
-        .find(|&i| {
-            names[i]
-                .to_lowercase()
-                .contains(&DAW_PORT_HINT.to_lowercase())
-        })
-        .or_else(|| matches.first().copied())
+    let owned;
+    let needles: &[&str] = match filter {
+        Some(f) => {
+            owned = [f];
+            &owned
+        }
+        None => DEFAULT_PORT_FILTERS,
+    };
+    for needle in needles {
+        let needle = needle.to_lowercase();
+        let matches: Vec<usize> = names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.to_lowercase().contains(&needle))
+            .map(|(i, _)| i)
+            .collect();
+        if matches.is_empty() {
+            continue;
+        }
+        return matches
+            .iter()
+            .copied()
+            .find(|&i| names[i].to_lowercase().contains(DAW_PORT_HINT))
+            .or_else(|| matches.first().copied());
+    }
+    None
+}
+
+/// How to name the filter in a failure message.
+///
+/// Saying which spellings were tried is the difference between "plug it
+/// in" and "pass --surface-port", and the user cannot tell which from a
+/// single quoted guess.
+pub fn describe_filter(filter: Option<&str>) -> String {
+    match filter {
+        Some(f) => format!("'{f}'"),
+        None => format!(
+            "any of {} (override with --surface-port)",
+            DEFAULT_PORT_FILTERS
+                .iter()
+                .map(|f| format!("'{f}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// Install a ctrl-c handler and return the flag it clears.
@@ -601,6 +649,30 @@ mod tests {
     #[test]
     fn no_match_is_none() {
         assert_eq!(pick_port(&names(&["Nothing"]), None), None);
+        assert_eq!(pick_port(&[], None), None);
+    }
+
+    /// Novation's CoreMIDI spelling is not something this code can pin
+    /// down without the hardware, so every plausible one has to work.
+    #[test]
+    fn any_of_the_default_spellings_finds_the_daw_port() {
+        for prefix in ["LCXL3 1", "Launch Control XL 3", "LaunchControl XL3"] {
+            let ports = names(&[
+                &format!("{prefix} MIDI In"),
+                &format!("{prefix} DAW In"),
+                &format!("{prefix} To DIN Out"),
+            ]);
+            assert_eq!(pick_port(&ports, None), Some(1), "{prefix}");
+        }
+    }
+
+    /// An explicit filter is used alone: naming a port means that port,
+    /// even if a default spelling would also have matched something.
+    #[test]
+    fn an_explicit_filter_does_not_fall_back_to_the_defaults() {
+        let ports = names(&["LCXL3 1 DAW In", "Some Other Thing"]);
+        assert_eq!(pick_port(&ports, Some("other")), Some(1));
+        assert_eq!(pick_port(&ports, Some("nothing here")), None);
     }
 
     #[test]
