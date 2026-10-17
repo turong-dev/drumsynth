@@ -106,6 +106,11 @@ pub(crate) struct CheatRow {
 
 impl CheatRow {
     /// `(GROUP, index)` as a controller would be configured with it.
+    ///
+    /// The tables print the index under a group heading rather than this
+    /// composite, so it survives only as the form the tests assert in — it
+    /// is the thing those tests are about.
+    #[cfg(test)]
     fn address(&self) -> String {
         format!("({}, {})", self.group.name(), self.index)
     }
@@ -247,15 +252,58 @@ fn generate<D: CheatDevice<N>, const N: usize>(format: &str) -> String {
     }
 }
 
-const HEADER: &str = "| Address | Name | Abbrev | Kind | Default | Slot |\n\
-                      |---------|------|--------|------|---------|------|\n";
+/// Split rows into one run per group, in the order [`rows_for`] emitted
+/// them — which is [`ParamGroup::ADDRESSABLE`] order, the order a control
+/// surface pages through.
+///
+/// A group with no rows in this section simply does not appear, so a
+/// machine with only VOICE rows gets one table rather than seven, six of
+/// them empty.
+fn by_group(rows: &[CheatRow]) -> Vec<(ParamGroup, &[CheatRow])> {
+    let mut out: Vec<(ParamGroup, &[CheatRow])> = Vec::new();
+    let mut start = 0;
+    for i in 0..rows.len() {
+        let last = i + 1 == rows.len();
+        if last || rows[i + 1].group as u8 != rows[i].group as u8 {
+            out.push((rows[i].group, &rows[start..=i]));
+            start = i + 1;
+        }
+    }
+    out
+}
 
-fn markdown_rows(out: &mut String, rows: &[CheatRow]) {
+/// Heading for a group's table: the name a controller sends and the number
+/// it sends it as.
+fn group_heading(group: ParamGroup) -> String {
+    format!("{} — group {}", group.name(), group as u8)
+}
+
+const HEADER: &str = "| Index | Name | Abbrev | Kind | Default | Slot |\n\
+                      |-------|------|--------|------|---------|------|\n";
+
+/// One table per group, each under its own heading.
+///
+/// The address column is gone: under a `VOICE — group 1` heading, printing
+/// `(VOICE, 0)`, `(VOICE, 1)`, `(VOICE, 2)` down the page repeats the
+/// heading on every row. The index is the half that varies, and the heading
+/// carries the half that does not.
+fn markdown_rows(out: &mut String, rows: &[CheatRow], depth: usize) {
+    for (group, group_rows) in by_group(rows) {
+        out.push_str(&format!(
+            "{} {}\n\n",
+            "#".repeat(depth),
+            group_heading(group)
+        ));
+        markdown_group_table(out, group_rows);
+    }
+}
+
+fn markdown_group_table(out: &mut String, rows: &[CheatRow]) {
     out.push_str(HEADER);
     for row in rows {
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} |\n",
-            row.address(),
+            "| {} | {} | {} | {} | {} | {} |\n",
+            row.index,
             row.name,
             row.abbrev,
             row.kind_label(),
@@ -342,12 +390,12 @@ fn generate_markdown<D: CheatDevice<N>, const N: usize>(
             "Track-level routing, the strip, and the LFOs. Values are factory defaults.\n\n",
         );
         markdown_diagram(&mut out, D::strip_topology());
-        markdown_rows(&mut out, &sheet.common);
+        markdown_rows(&mut out, &sheet.common, 3);
 
         for (m, rows) in &sheet.per_machine {
             out.push_str(&format!("## {}\n\n", m.label()));
             markdown_diagram(&mut out, m.topology());
-            markdown_rows(&mut out, rows);
+            markdown_rows(&mut out, rows, 3);
         }
     } else {
         out.push_str("## Parameters\n\n");
@@ -357,7 +405,7 @@ fn generate_markdown<D: CheatDevice<N>, const N: usize>(
              Values are factory defaults.\n\n",
         );
         markdown_diagram(&mut out, D::strip_topology());
-        markdown_rows(&mut out, &sheet.common);
+        markdown_rows(&mut out, &sheet.common, 3);
     }
 
     out.push_str("---\n\n");
@@ -387,7 +435,9 @@ Group numbers: TRACK 0, VOICE 1, FILTER 2, SHAPER 3, AMP 4, LFO 5, ENV 6.
 ";
 
 const FOOTER: &str = "\
-**Address** is what a controller sends: `(group, index)` over NRPN.  \n\
+**Index** is the second half of what a controller sends. Its table's \
+heading is the first half: a row under `VOICE — group 1` at index 3 is the \
+NRPN address `(1, 3)`.  \n\
 **Slot** is the flat index into the engine's parameter array — internal, \
 shown because the device's tables and `set_params` are written in those \
 terms. Reserved slots have no address and are not listed.  \n\
@@ -469,7 +519,7 @@ fn generate_html<D: CheatDevice<N>, const N: usize>(machines: &[D], sheet: &Shee
         out.push_str("</section>\n\n");
     }
 
-    out.push_str("<footer>\n<p><strong>Address</strong> is what a controller sends: <code>(group, index)</code> over NRPN. <strong>Slot</strong> is the flat index into the engine's parameter array — internal, shown because the device's tables and <code>set_params</code> are written in those terms. Reserved slots have no address and are not listed.</p>\n");
+    out.push_str("<footer>\n<p><strong>Index</strong> is the second half of what a controller sends; its table's heading is the first half, so a row under <code>VOICE — group 1</code> at index 3 is the NRPN address <code>(1, 3)</code>. <strong>Slot</strong> is the flat index into the engine's parameter array — internal, shown because the device's tables and <code>set_params</code> are written in those terms. Reserved slots have no address and are not listed.</p>\n");
     out.push_str("</footer>\n");
     html_mermaid_script(&mut out);
     out.push_str("</body>\n</html>\n");
@@ -553,12 +603,24 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// One table per group, each under its own heading. See [`markdown_rows`]
+/// for why the address column is an index column here.
 fn html_table(out: &mut String, rows: &[CheatRow]) {
-    out.push_str("<table>\n<thead>\n<tr><th>Address</th><th>Name</th><th>Abbrev</th><th>Kind</th><th>Default</th><th>Slot</th></tr>\n</thead>\n<tbody>\n");
+    for (group, group_rows) in by_group(rows) {
+        out.push_str(&format!(
+            "<h3>{}</h3>\n",
+            html_escape(&group_heading(group))
+        ));
+        html_group_table(out, group_rows);
+    }
+}
+
+fn html_group_table(out: &mut String, rows: &[CheatRow]) {
+    out.push_str("<table>\n<thead>\n<tr><th>Index</th><th>Name</th><th>Abbrev</th><th>Kind</th><th>Default</th><th>Slot</th></tr>\n</thead>\n<tbody>\n");
     for row in rows {
         out.push_str(&format!(
-            "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-            row.address(),
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            row.index,
             row.name,
             row.abbrev,
             row.kind_label(),
@@ -611,6 +673,17 @@ body {
 header { margin-bottom: 2rem; }
 h1 { font-size: 1.75rem; font-weight: 700; }
 h2 { font-size: 1.25rem; font-weight: 600; margin-top: 2.5rem; margin-bottom: 0.75rem; }
+h3 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  margin-top: 1.5rem;
+  margin-bottom: 0.4rem;
+}
+h3:first-of-type { margin-top: 0.5rem; }
+table + h3 { margin-top: 1.75rem; }
 p { color: var(--muted); margin-bottom: 1rem; }
 code { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.9em; }
 .badge {
@@ -774,14 +847,58 @@ mod tests {
     #[test]
     fn markdown_and_html_both_render() {
         let md = generate_cheatsheet("drum", "markdown").unwrap();
-        assert!(md.contains("`(TRACK, 2)`"), "pan should be TRACK 2");
+        assert!(md.contains("### TRACK — group 0"));
+        assert!(
+            md.contains("| 2 | PAN | PAN | bipolar"),
+            "pan is TRACK index 2"
+        );
         assert!(
             !md.contains("| CC |") || md.contains("| 99 |"),
             "no CC map table"
         );
         let html = generate_cheatsheet("drum", "html").unwrap();
-        assert!(html.contains("(TRACK, 2)"));
+        assert!(html.contains("<h3>TRACK — group 0</h3>"));
         assert!(html.ends_with("</html>\n"));
+    }
+
+    #[test]
+    fn rows_are_split_into_one_table_per_group() {
+        // The group is in the heading, so it is not repeated on every row.
+        let md = generate_cheatsheet("mi-drum", "markdown").unwrap();
+        for (name, number) in [
+            ("TRACK", 0),
+            ("VOICE", 1),
+            ("FILTER", 2),
+            ("SHAPER", 3),
+            ("LFO", 5),
+            ("ENV", 6),
+        ] {
+            assert!(
+                md.contains(&format!("### {name} — group {number}")),
+                "no table for {name}"
+            );
+        }
+        // One table header per group present, and no composite addresses.
+        assert_eq!(md.matches("| Index | Name |").count(), 6);
+        assert!(!md.contains("(VOICE, "), "address column should be gone");
+
+        // A group this device places no rows in gets no empty table.
+        assert!(!md.contains("AMP — group 4"));
+    }
+
+    #[test]
+    fn a_machine_with_one_group_gets_one_table() {
+        // Hat Classic has VOICE and FILTER rows of its own and nothing
+        // else: it should get two tables, not seven with five empty.
+        let md = generate_cheatsheet("drum", "markdown").unwrap();
+        let section = md
+            .split("## Hat Classic")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .expect("a Hat Classic section");
+        assert_eq!(section.matches("| Index | Name |").count(), 2, "{section}");
+        assert!(section.contains("### VOICE — group 1"));
+        assert!(section.contains("### FILTER — group 2"));
     }
 
     #[test]
