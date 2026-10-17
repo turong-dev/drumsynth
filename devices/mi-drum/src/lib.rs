@@ -47,9 +47,9 @@ use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::params::{
     level_info, mach_info, mi, param_index, ParamGroup, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD,
-    BANK_TRACK, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE,
-    SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6,
-    SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    BANK_TRACK, NUM_BANKS, OUT_INFO, PAN_INFO, PARAMS_PER_BANK, SEND_DLY_INFO, SEND_RVB_INFO,
+    SLOT_LEVEL, SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4,
+    SLOT_MACH_5, SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
@@ -390,6 +390,20 @@ impl MiMachineId {
     /// is what caught this — the first version of that default was a single
     /// shared value and it left the `SixOp` engines cross-modulating against
     /// themselves.
+    ///
+    /// Two caveats, measured when `AUX` put the same outputs on the carrier
+    /// (correlation of the two taps over a hit, per engine):
+    ///
+    /// - **`mi-wavetable` belongs on the other side of this line.** Its aux
+    ///   correlates **+1.000** with its main output at 0.99 of the level —
+    ///   numerically distinct, so it passes the "differs" test this
+    ///   predicate was built from, but a trim rather than a second signal.
+    ///   Moving it would change that machine's shipped `SHAPE.IN` default
+    ///   and with it the baseline digest, so it is recorded rather than
+    ///   done.
+    /// - **`mi-particle`'s aux is nearly silent** — 0.002 peak against the
+    ///   main output's 0.207. It is a real second signal and a poor one to
+    ///   cross-modulate with.
     pub fn has_distinct_aux(self) -> bool {
         !self.is_peaks() && !matches!(self, Self::SixOp1 | Self::SixOp2 | Self::SixOp3)
     }
@@ -473,6 +487,11 @@ impl MiMachineId {
         // no LPG and ignores the row, so the same value costs nothing and keeps
         // the table's default and the engine's default from drifting apart.
         m[SLOT_LPG_COLOUR] = 0.5;
+        // Main output. Unconditional for the same reason as `LPG.COL`: a
+        // Peaks track pins it to 0 anyway, and a machine-specific default
+        // here would be a second place for the shipped sound to drift from
+        // the table's. 0 is also what keeps the baseline digest still.
+        m[SLOT_VOICE_AUX] = 0.0;
 
         m
     }
@@ -572,9 +591,47 @@ pub const SLOT_RIPPLES_RESONANCE: usize = param_index(BANK_FILT, 3);
 /// [`SLOT_RIPPLES_CUTOFF`].
 const SLOT_RIPPLES_FM: usize = param_index(BANK_FILT, 4);
 
+/// The first flat index past the four 8-wide banks.
+///
+/// Rows beyond this point are the appended tail: they have a `(group, index)`
+/// NRPN address like every other row, but no bank/slot position, because the
+/// bank layout is the drum device's 32-entry shape and this device has
+/// outgrown it. Written as the bank arithmetic rather than as a literal so
+/// adding a row does not require remembering what 32 was made of.
+const BANKED_PARAMS: usize = NUM_BANKS * PARAMS_PER_BANK;
+
 /// MACH 8: Plaits' LPG colour. Appended rather than folded into an existing
 /// row — see [`NUM_PARAMS`].
-pub const SLOT_LPG_COLOUR: usize = NUM_PARAMS - 1;
+pub const SLOT_LPG_COLOUR: usize = BANKED_PARAMS;
+
+/// MACH 9: how much of Plaits' aux output stands in for its main output as
+/// the voice the whole strip then processes.
+///
+/// 0 is the main output and is the default, so the shipped sound is unchanged
+/// and only the address is new. 1 is the aux output alone; in between is a
+/// linear crossfade of the two.
+///
+/// This is a *source* selector, not a trim. 21 of the 24 Plaits engines render
+/// an aux that is a genuinely different signal — measured against the dry
+/// voice, the two ends of this crossfade correlate 0.92 and 0.04 with it and
+/// -0.005 with each other — so the catalogue's timbres roughly double without
+/// a new engine. The three `SixOp` engines write the same samples to both
+/// outputs, which makes this knob inert on them rather than wrong; see
+/// [`MiMachineId::has_distinct_aux`].
+///
+/// Plaits-only. A Peaks voice has no second output at all — `block_aux` is
+/// zeroed there — so a crossfade would fade the track into silence rather
+/// than into another signal. `set_params` pins the value to 0 on a Peaks
+/// track, which is the same fallback `SHAPE.IN` makes for the same reason.
+///
+/// **Worth knowing with `SHAPE.IN`.** The default modulator source on a Plaits
+/// machine is *also* the aux output, so turning this up converges Warps' two
+/// inputs on one signal — the degenerate case `SHAPE.IN` exists to avoid,
+/// where `ALGORITHM_XFADE` collapses to a gain. Pair a high `AUX` with
+/// `SHAPE.IN` on self or the oscillator to keep the shaping stage doing
+/// something. The modulator tap is unaffected by this param either way: it
+/// reads the untouched aux block.
+pub const SLOT_VOICE_AUX: usize = BANKED_PARAMS + 1;
 
 /// FILT 7: dry/wet between the voice and the Warps stage.
 ///
@@ -748,15 +805,20 @@ const AD_SHAPER_DEPTH_INFO: ParamInfo = mi("AD.WRP", "AWR", 0.0, ParamGroup::Env
 /// new.
 const LPG_COLOUR_INFO: ParamInfo = mi("LPG.COL", "LPC", 0.5, ParamGroup::Voice);
 
+/// MACH 9: the voice's output tap — main, Plaits' aux, or a blend.
+/// See [`SLOT_VOICE_AUX`].
+const VOICE_AUX_INFO: ParamInfo = mi("AUX", "AUX", 0.0, ParamGroup::Voice);
+
 /// Param knobs the MI devices expose: the width of the shared parameter table,
 /// and of the track's smoothing state.
 ///
-/// 33 rather than the drum device's 32, which is the point of the count
-/// being per-device: `LPG.COL` got its own row (phase E′) instead of being
-/// folded into an existing one, and the flat array simply grew. There is no
-/// external layout to keep in step with any more — NRPN addresses
-/// `(VOICE, 8)` and does not care where in the array the row sits.
-pub const NUM_PARAMS: usize = 33;
+/// 34 rather than the drum device's 32, which is the point of the count
+/// being per-device: `LPG.COL` got its own row (phase E′) and `AUX` another,
+/// instead of either being folded into an existing one, and the flat array
+/// simply grew. There is no external layout to keep in step with any more —
+/// NRPN addresses `(VOICE, 8)` and `(VOICE, 9)` and does not care where in
+/// the array the rows sit.
+pub const NUM_PARAMS: usize = 34;
 
 /// Shared param metadata table for all MI machines.
 /// This device's machine-selector row.
@@ -801,6 +863,7 @@ static PARAMS: [ParamInfo; NUM_PARAMS] = [
     AD_FILTER_DEPTH_INFO,                        // MOD 6
     AD_SHAPER_DEPTH_INFO,                        // MOD 7
     LPG_COLOUR_INFO,                             // MACH 8 — Plaits LPG colour
+    VOICE_AUX_INFO,                              // MACH 9 — voice output tap
 ];
 
 /// A block-buffered Plaits voice implementing the per-sample `Slot` trait.
@@ -948,6 +1011,10 @@ pub struct MiSlot {
     shaper_mod_src: ModSource,
     /// `SHAPE.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
     shaper_out_tap: f32,
+    /// `AUX`: crossfade between the voice's main (0) and aux (1) outputs,
+    /// applied to the carrier before anything in the strip sees it. Pinned to
+    /// 0 on a Peaks track, which has no aux. See [`SLOT_VOICE_AUX`].
+    voice_aux: f32,
     /// Plaits' aux output for the current segment, captured by `tick` in the
     /// same order the main output is consumed so the two stay aligned.
     ///
@@ -1193,8 +1260,40 @@ impl MiSlot {
                 &mut self.block_aux,
                 VOICE_BLOCK,
             );
+            // The note's length is the *main* output's, whichever tap `AUX`
+            // is listening to, so the silence gate reads the block before the
+            // blend.
+            //
+            // Gating on the blended carrier is the obvious alternative and is
+            // worse, measured: `mi-particle` and `mi-modal` both retire on
+            // their main output and both have an aux that does not fall under
+            // `SILENCE_THRESHOLD`, so on the aux tap they never go idle. That
+            // matters because `is_active` is the engine's per-track early-out
+            // — a track that never rests keeps its whole voice in the cycle
+            // budget until the ten-second gate watchdog, and six of them is
+            // the budget. `the_aux_output_is_still_loud_when_the_main_one_retires`
+            // is the guard.
+            //
+            // The cost is the other direction: an aux tail is cut when the
+            // main output reaches zero first. `mi-fm` and `mi-noise` are the
+            // two it shows on — their aux tail reaches silence before their
+            // main one does, so on the aux tap those tracks stay active a
+            // little past the end of what they are emitting. Both outputs
+            // leave Plaits through the same LPG, so it is blocks, not notes.
+            let peak = Self::peak_of(&self.block_out[..VOICE_BLOCK]);
+            // `AUX`: fold the aux output into the carrier at block rate, and
+            // before anything else reads it. The per-sample path in `tick`
+            // keeps its single array read, and `block_aux` is left untouched,
+            // so the modulator tap still sees the real aux and `SHAPE.IN` is
+            // unchanged. Skipped entirely at 0, which is the default.
+            if self.voice_aux > 0.0 {
+                let mix = self.voice_aux;
+                for i in 0..VOICE_BLOCK {
+                    self.block_out[i] += mix * (self.block_aux[i] - self.block_out[i]);
+                }
+            }
             self.block_pos = 0;
-            Self::peak_of(&self.block_out[..VOICE_BLOCK])
+            peak
         };
 
         if peak < self.silence_floor() {
@@ -1293,6 +1392,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             shaper_mix: 1.0,
             shaper_mod_src: ModSource::Self_,
             shaper_out_tap: 0.0,
+            voice_aux: 0.0,
             aux_segment: [0.0f32; BLOCK],
             aux_filled: 0,
             lfo_rate: 0.5,
@@ -1427,6 +1527,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).shaper_mix).write(1.0);
             core::ptr::addr_of_mut!((*ptr).shaper_mod_src).write(ModSource::Self_);
             core::ptr::addr_of_mut!((*ptr).shaper_out_tap).write(0.0);
+            core::ptr::addr_of_mut!((*ptr).voice_aux).write(0.0);
             core::ptr::addr_of_mut!((*ptr).aux_segment).write([0.0f32; BLOCK]);
             core::ptr::addr_of_mut!((*ptr).aux_filled).write(0);
             core::ptr::addr_of_mut!((*ptr).lfo_rate).write(0.5);
@@ -1469,6 +1570,10 @@ impl Slot<NUM_PARAMS> for MiSlot {
                 params[SLOT_MACH_4],
             ];
             self.peaks.configure(self.peaks_params);
+            // No aux output to fade towards: `block_aux` is zeroed on a Peaks
+            // block, so honouring the param would fade the track out. Same
+            // fallback `SHAPE.IN` makes, for the same reason.
+            self.voice_aux = 0.0;
         } else {
             self.tune_param = params[SLOT_MACH_0];
             self.update_note();
@@ -1480,6 +1585,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             self.patch.morph_modulation_amount = params[SLOT_MACH_6];
             self.patch.decay = params[SLOT_MACH_7];
             self.patch.lpg_colour = params[SLOT_LPG_COLOUR];
+            self.voice_aux = params[SLOT_VOICE_AUX].clamp(0.0, 1.0);
         }
 
         self.shaper_algorithm = params[SLOT_SHAPER_ALGO];
@@ -2123,11 +2229,13 @@ mod tests {
             table[flat].name
         }
 
-        // VOICE: the eight Plaits patch fields, then LPG.COL — which lives at
-        // flat 32, past every other group, and is still voice member 8.
+        // VOICE: the eight Plaits patch fields, then LPG.COL and AUX — the
+        // appended tail, which lives at flat 32 and 33, past every other
+        // group, and is still voice members 8 and 9.
         assert_eq!(name_at(table, ParamGroup::Voice, 0), "TUNE");
         assert_eq!(name_at(table, ParamGroup::Voice, 7), "DECAY");
         assert_eq!(name_at(table, ParamGroup::Voice, 8), "LPG.COL");
+        assert_eq!(name_at(table, ParamGroup::Voice, 9), "AUX");
 
         // FILTER: Ripples, at the indices the drum device calls the strip SVF.
         assert_eq!(name_at(table, ParamGroup::Filter, 0), "RIP.CUT");
@@ -2155,7 +2263,7 @@ mod tests {
             table,
             ParamId {
                 group: ParamGroup::Voice,
-                index: 9
+                index: 10
             }
         )
         .is_none());
@@ -2194,8 +2302,7 @@ mod tests {
         )
         .expect("LPG.COL is voice member 8");
         assert_eq!(
-            flat,
-            NUM_PARAMS - 1,
+            flat, SLOT_LPG_COLOUR,
             "appended, not folded into an existing row"
         );
         assert_eq!(table[flat].name, "LPG.COL");
@@ -2690,6 +2797,177 @@ mod tests {
             max_delta(&a, &b) > 1.0e-3,
             "SHAPE.IN is inert — the aux output is not reaching the modulator"
         );
+    }
+
+    /// `AUX` picks a genuinely different carrier, not a trim.
+    ///
+    /// `SHAPE.MIX` at 0 takes the strip out, so what is compared is the voice
+    /// itself rather than two passes through Warps.
+    #[test]
+    fn voice_aux_selects_a_different_carrier() {
+        let main = render_with_params(
+            MiMachineId::VirtualAnalog,
+            &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 0.0)],
+        );
+        let aux = render_with_params(
+            MiMachineId::VirtualAnalog,
+            &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 1.0)],
+        );
+        assert!(
+            max_delta(&main, &aux) > 1.0e-3,
+            "AUX is inert — the aux output is not reaching the carrier"
+        );
+        let peak = aux.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        assert!(
+            peak > 1.0e-3,
+            "the aux carrier is silence, not a second signal (peak {peak})"
+        );
+    }
+
+    /// The knob is a crossfade of two signals, so the midpoint is close to
+    /// their average — and is neither of the ends.
+    ///
+    /// A gain dressed up as a source selector would pass the test above and
+    /// fail this one.
+    ///
+    /// *Close to*, not equal: the engine's master bus ends in
+    /// `fast::soft_clip` (`core/src/engine.rs`), so three renders of the same
+    /// note at different levels do not sum. At the ~0.3 peaks these settings
+    /// produce that costs about 1.5%, which is where the bound comes from —
+    /// loose enough for the clipper, two orders tighter than the 0.3 being
+    /// averaged. Everything between the tap and the master *is* linear: the
+    /// core strip is bypassed on this device, and `SHAPE.MIX` at 0 leaves
+    /// only Ripples, which is an SVF.
+    #[test]
+    fn voice_aux_is_a_crossfade_of_the_two_outputs() {
+        let at = |mix: f32| {
+            render_with_params(
+                MiMachineId::VirtualAnalog,
+                &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, mix)],
+            )
+        };
+        let (main, mid, aux) = (at(0.0), at(0.5), at(1.0));
+        assert!(
+            max_delta(&main, &mid) > 1.0e-3 && max_delta(&mid, &aux) > 1.0e-3,
+            "AUX at 0.5 collapsed onto one of its ends — this is a switch, not a crossfade"
+        );
+        let worst = main
+            .iter()
+            .zip(mid.iter())
+            .zip(aux.iter())
+            .map(|((m, x), a)| (x - 0.5 * (m + a)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1.0e-2,
+            "AUX at 0.5 is not the average of its two ends (max error {worst})"
+        );
+    }
+
+    /// At the moment the silence gate retires a track, the aux output can
+    /// still be well above the threshold. This is the measurement that
+    /// decided which signal the gate reads.
+    ///
+    /// Gating on the blended carrier instead would mean a track on the aux
+    /// tap never goes idle on an engine like this one, and `is_active` is the
+    /// engine's per-track early-out: a track that never rests keeps its whole
+    /// voice in the cycle budget until the ten-second gate watchdog, and six
+    /// of those is the budget. Reading the main output costs the other
+    /// direction — an aux tail is cut when the main output reaches zero
+    /// first — and that is the cheaper mistake, by a wide margin.
+    ///
+    /// `mi-modal` is the witness, and is chosen because it retires at the
+    /// same point on every run of the parallel harness. `mi-particle`,
+    /// `mi-noise` and the other noise engines show the same thing and cannot
+    /// be asserted on: they draw from `stmlib::Random`, which is one
+    /// process-global LCG, so their tails differ between runs of this test
+    /// binary.
+    ///
+    /// The main-output gate also makes this structural rather than
+    /// behavioural — `AUX` is applied after the peak is taken, so the tap
+    /// cannot reach the gate at all. There is no end-to-end assertion to
+    /// make; what is worth pinning is the fact that made it necessary.
+    #[test]
+    fn the_aux_output_is_still_loud_when_the_main_one_retires() {
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::Modal);
+        e.trigger(0, 1.0);
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        // Sound the note, then end it. Without the note-off the gate is held
+        // and a sustaining engine never reaches its own silence — see
+        // `the_gate` in the module docs, and issue #4.
+        for _ in 0..32 {
+            e.process(&mut l, &mut r);
+        }
+        e.release(0);
+        // Generous: the gate watchdog is ten seconds, so a machine that has
+        // not retired in five has not retired on its envelope.
+        let cap = (5.0 * SAMPLE_RATE / BLOCK as f32) as usize;
+        let mut blocks = 0;
+        while e.tracks()[0].is_active() && blocks < cap {
+            e.process(&mut l, &mut r);
+            blocks += 1;
+        }
+        assert!(
+            blocks < cap,
+            "mi-modal never retired, so there is no retirement to measure"
+        );
+        // The last block the voice rendered is the one that tripped the gate.
+        let aux_peak = MiSlot::peak_of(&e.tracks()[0].slot.block_aux);
+        assert!(
+            aux_peak > SILENCE_THRESHOLD,
+            "mi-modal's aux is already silent at retirement (peak {aux_peak}) — \
+             the reason the gate reads the main output no longer holds"
+        );
+    }
+
+    /// The three `SixOp` engines write the same samples to both outputs, so
+    /// the knob has nothing to fade towards and must be a no-op — not a
+    /// level change, and not a crossfade into silence.
+    ///
+    /// This is the measurement behind [`MiMachineId::has_distinct_aux`],
+    /// asserted rather than remembered.
+    #[test]
+    fn voice_aux_is_inert_on_the_sixop_engines() {
+        for id in [
+            MiMachineId::SixOp1,
+            MiMachineId::SixOp2,
+            MiMachineId::SixOp3,
+        ] {
+            let main = render_with_params(id, &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 0.0)]);
+            let aux = render_with_params(id, &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 1.0)]);
+            assert_eq!(
+                max_delta(&main, &aux),
+                0.0,
+                "{} has a distinct aux after all — has_distinct_aux is wrong",
+                id.name()
+            );
+            let peak = main.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+            assert!(peak > 1.0e-4, "{} rendered silence", id.name());
+        }
+    }
+
+    /// A Peaks voice has no second output, so the param has to be pinned
+    /// rather than honoured: fading towards a zeroed `block_aux` would fade
+    /// the track out.
+    ///
+    /// The bass drum rather than all four models, for the same reason
+    /// `a_peaks_track_can_reach_a_real_modulator` picks it: the models that
+    /// use noise draw from `stmlib::Random`, one process-global LCG, so two
+    /// consecutive renders of a snare are not the same render and a
+    /// bit-equality assertion on one would measure the generator.
+    #[test]
+    fn voice_aux_cannot_mute_a_peaks_track() {
+        let id = MiMachineId::PeaksBassDrum;
+        let main = render_with_params(id, &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 0.0)]);
+        let aux = render_with_params(id, &[(SLOT_SHAPER_MIX, 0.0), (SLOT_VOICE_AUX, 1.0)]);
+        assert_eq!(
+            max_delta(&main, &aux),
+            0.0,
+            "AUX moved a Peaks track, which has no aux to move to"
+        );
+        let peak = aux.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        assert!(peak > 1.0e-3, "the Peaks track went silent (peak {peak})");
     }
 
     /// Warps' aux tap is the saturated input sum, not the cross-modulation, so

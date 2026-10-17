@@ -48,6 +48,9 @@
 //!                is one Peaks voice with the strip on it
 //! 6 no SHAPE     SHAPE.DRV = 0 is a bypass detent, so
 //!                `6 sounding - 6 no SHAPE` is the shaping stage's cost
+//! 6 + AUX        AUX = 1 on every track, so `6 + AUX - 6 sounding` is
+//!                the carrier blend. Only the two Plaits tracks pay it:
+//!                a Peaks voice has no aux and pins the param to 0
 //! ```
 //!
 //! **What is still not reachable from here.** The four Stages generators
@@ -116,9 +119,9 @@ use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
 use mi_drum_engine::{
-    seed_random, DeviceEngine, MiDrumEngine, DEFAULT_RANDOM_SEED, SLOT_AD_FILTER_DEPTH,
-    SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH,
-    SLOT_SHAPER_DRIVE, BLOCK, SAMPLE_RATE, TRACKS,
+    seed_random, DeviceEngine, MiDrumEngine, BLOCK, DEFAULT_RANDOM_SEED, SAMPLE_RATE,
+    SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_LFO_FILTER_DEPTH,
+    SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_DRIVE, SLOT_VOICE_AUX, TRACKS,
 };
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -367,6 +370,20 @@ fn main() -> ! {
 
         let mod_on = measure_modulation(engine, &mut left, &mut right, 1.0);
         report("6 + MOD on ", mod_on, &mut poller, &mut pit);
+
+        // The `AUX` carrier blend, which folds Plaits' second output into
+        // the voice before the strip sees it. One multiply-add per sample
+        // per Plaits track, inside `render_if_needed` rather than `tick`, and
+        // gated on the param being above zero -- so `6 sounding` is also the
+        // measurement of the disabled path, and this is the enabled one.
+        //
+        // Two of the six tracks pay it. `DEFAULT_KIT` is four Peaks drums and
+        // two Plaits voices, and a Peaks voice has no aux output at all:
+        // `set_params` pins the param to 0 there rather than fading the track
+        // into a zeroed buffer. So the delta is two tracks' worth, which is
+        // the honest worst case for the kit that ships.
+        let aux_carrier = measure_aux_carrier(engine, &mut left, &mut right);
+        report("6 + AUX   ", aux_carrier, &mut poller, &mut pit);
 
         log::info!("");
 
@@ -744,6 +761,30 @@ fn measure_modulation(
         for &slot in &ROUTES {
             engine.tracks_mut()[t].set_param(slot, 0.0);
         }
+    }
+
+    stats
+}
+
+/// Worst case with the `AUX` carrier blend engaged on every track.
+///
+/// Set through `set_param` like every other scenario knob, so the Peaks
+/// tracks take the same path a controller would and pin themselves to 0.
+/// Restored afterwards: the param survives `panic()`/`reset()`, and leaving
+/// it set would fold the blend into whatever scenario ran next.
+fn measure_aux_carrier(
+    engine: &mut MiDrumEngine,
+    left: &mut [f32; BLOCK],
+    right: &mut [f32; BLOCK],
+) -> Stats {
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_param(SLOT_VOICE_AUX, 1.0);
+    }
+
+    let stats = measure(engine, left, right, TRACKS);
+
+    for t in 0..TRACKS {
+        engine.tracks_mut()[t].set_param(SLOT_VOICE_AUX, 0.0);
     }
 
     stats

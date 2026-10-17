@@ -75,7 +75,7 @@ without holes.
 Group members do **not** have to be contiguous in the flat array, and
 mi-drum's are not. Contiguity would buy an O(1) base-offset lookup in
 place of a linear scan, and the scan runs once per arriving message
-against 33 rows — control rate, never audio. Paying for that with a
+against 34 rows — control rate, never audio. Paying for that with a
 forced reorder of the flat layout was the wrong trade.
 
 Two consequences worth stating:
@@ -314,7 +314,33 @@ Peaks or Plaits source → Warps → Ripples
   Peaks tracks drop to 1 LFO + 1 AD.
 - **Warps** is the audio-processing stage for every track, used as a
   two-input cross-modulator with a mono result:
-  - **Carrier** is the voice's main output.
+  - **Carrier** is the voice, tapped by `AUX`: its main output at 0, Plaits'
+    aux output at 1, a crossfade in between. This is a *source* selector and
+    not a trim — 21 of the 24 Plaits engines render an aux that is a
+    different signal, measured at 0.92 and 0.04 correlation with the dry
+    voice at the two ends and -0.005 with each other — so it roughly doubles
+    the catalogue without a new engine. The three `SixOp` engines write the
+    same samples to both outputs, which makes the knob inert on them; a
+    Peaks voice has no aux at all and pins it to 0. Default 0, so the shipped
+    sound is unchanged.
+
+    Two consequences worth stating, because neither is obvious from the
+    knob:
+
+    - **The note's length is the main output's**, whichever tap is selected.
+      The silence gate reads the voice block before the blend. Gating on the
+      blended carrier instead leaves a track on `mi-particle` or `mi-modal`
+      permanently active, because their aux never falls under the silence
+      threshold, and `is_active` is the engine's per-track early-out — six
+      tracks that never rest is the cycle budget, bounded only by the
+      ten-second gate watchdog. The cost of reading main is an aux tail cut
+      when the main output reaches zero first, which both outputs leaving
+      through the same LPG keeps to a few blocks.
+    - **It converges Warps' two inputs** when `WARP.IN` is also on aux, which
+      is the default on a Plaits machine. That is the degenerate case
+      `WARP.IN` exists to avoid. Pair a high `AUX` with `WARP.IN` on self or
+      the oscillator. The modulator tap itself is unaffected: it reads the
+      untouched aux block, not the carrier.
   - **Modulator** is `WARP.IN`, a crossfade between the voice's main output
     and **Plaits' aux output**. Plaits renders two outputs and the slot used
     to discard the second; feeding it here costs nothing and is the patch
