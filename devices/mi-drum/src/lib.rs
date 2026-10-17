@@ -46,10 +46,10 @@ use device_core::dsp::svf::stability_ceiling_hz;
 use device_core::dsp::Shaper;
 use device_core::dsp::Svf;
 use device_core::params::{
-    level_info, mi, param_index, ParamGroup, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD,
-    BANK_TRACK, MACH_INFO, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL,
-    SLOT_MACHINE, SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5,
-    SLOT_MACH_6, SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
+    level_info, mach_info, mi, param_index, ParamGroup, ParamInfo, ParamRoute, BANK_FILT, BANK_MOD,
+    BANK_TRACK, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_LEVEL, SLOT_MACHINE,
+    SLOT_MACH_0, SLOT_MACH_1, SLOT_MACH_2, SLOT_MACH_3, SLOT_MACH_4, SLOT_MACH_5, SLOT_MACH_6,
+    SLOT_MACH_7, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY, SLOT_SEND_REVERB,
 };
 use mi_dsp::gate::{GATE_FALLING, GATE_HIGH, GATE_LOW, GATE_RISING};
 use mi_dsp::peaks::{PeaksModel, PeaksVoice};
@@ -478,16 +478,20 @@ impl MiMachineId {
     }
 
     /// Per-param metadata. All MI machines share the same layout.
-    pub fn params(self) -> [ParamInfo; NUM_PARAMS] {
+    ///
+    /// Borrowed from the static table: NRPN address resolution walks it on
+    /// every data message and the grid on every render, and neither should
+    /// copy 33 rows to read one.
+    pub fn params(self) -> &'static [ParamInfo; NUM_PARAMS] {
         let _ = self;
-        PARAMS
+        &PARAMS
     }
 
     /// Look up a param's metadata by name. Case-insensitive, ASCII only.
     pub fn param_by_name(self, name: &str) -> Option<(usize, ParamInfo)> {
-        for (i, m) in self.params().into_iter().enumerate() {
+        for (i, m) in self.params().iter().enumerate() {
             if m.name.eq_ignore_ascii_case(name.trim()) {
-                return Some((i, m));
+                return Some((i, *m));
             }
         }
         None
@@ -510,7 +514,7 @@ impl SlotId<NUM_PARAMS> for MiMachineId {
 }
 
 impl DeviceModel<NUM_PARAMS> for MiMachineId {
-    fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
+    fn param_table(self) -> &'static [ParamInfo; NUM_PARAMS] {
         self.params()
     }
     fn param_route(self, idx: usize) -> ParamRoute {
@@ -568,8 +572,8 @@ pub const SLOT_RIPPLES_RESONANCE: usize = param_index(BANK_FILT, 3);
 /// [`SLOT_RIPPLES_CUTOFF`].
 const SLOT_RIPPLES_FM: usize = param_index(BANK_FILT, 4);
 
-/// MACH 8: Plaits' LPG colour. Past the CC map rather than sharing a row —
-/// see [`NUM_PARAMS`].
+/// MACH 8: Plaits' LPG colour. Appended rather than folded into an existing
+/// row — see [`NUM_PARAMS`].
 pub const SLOT_LPG_COLOUR: usize = NUM_PARAMS - 1;
 
 /// FILT 7: dry/wet between the voice and the Warps stage.
@@ -747,18 +751,22 @@ const LPG_COLOUR_INFO: ParamInfo = mi("LPG.COL", "LPC", 0.5, ParamGroup::Voice);
 /// Param knobs the MI devices expose: the width of the shared parameter table,
 /// and of the track's smoothing state.
 ///
-/// 33 rather than the 32 the CC map was built for. Phase E′ gave `LPG.COL` its
-/// own row instead of folding it into an existing one, so index 32 sits past
-/// the `CC_TRACK_BASE + 31` the map documents.
-///
-/// It is still reachable by CC: `apply_cc` bounds on `param_idx < N`, not on
-/// the map's width, so CC 52 lands on index 32 here. That is not a break —
-/// CC 20..51 keep the meanings they had, and index 32 is a param that did not
-/// exist before, so no controller's existing mapping moves. NRPN (phase C)
-/// addresses it by group instead, and phase F removes the map.
+/// 33 rather than the drum device's 32, which is the point of the count
+/// being per-device: `LPG.COL` got its own row (phase E′) instead of being
+/// folded into an existing one, and the flat array simply grew. There is no
+/// external layout to keep in step with any more — NRPN addresses
+/// `(VOICE, 8)` and does not care where in the array the row sits.
 pub const NUM_PARAMS: usize = 33;
 
 /// Shared param metadata table for all MI machines.
+/// This device's machine-selector row.
+///
+/// [`mach_info`] takes the catalogue size because it is the one per-device
+/// part of the row: mi-drum vends 28 machines where the drum device vends
+/// 15, and a control surface or an NRPN sender needs the number to land on
+/// a machine exactly.
+const MACH_INFO: ParamInfo = mach_info(MiMachineId::COUNT as u8);
+
 static PARAMS: [ParamInfo; NUM_PARAMS] = [
     mi("TUNE", "TUN", 0.45, ParamGroup::Voice),  // MACH 0
     mi("HARM", "HRM", 0.5, ParamGroup::Voice),   // MACH 1
@@ -2073,34 +2081,34 @@ mod tests {
 
         // VOICE: the eight Plaits patch fields, then LPG.COL — which lives at
         // flat 32, past every other group, and is still voice member 8.
-        assert_eq!(name_at(&table, ParamGroup::Voice, 0), "TUNE");
-        assert_eq!(name_at(&table, ParamGroup::Voice, 7), "DECAY");
-        assert_eq!(name_at(&table, ParamGroup::Voice, 8), "LPG.COL");
+        assert_eq!(name_at(table, ParamGroup::Voice, 0), "TUNE");
+        assert_eq!(name_at(table, ParamGroup::Voice, 7), "DECAY");
+        assert_eq!(name_at(table, ParamGroup::Voice, 8), "LPG.COL");
 
         // FILTER: Ripples, at the indices the drum device calls the strip SVF.
-        assert_eq!(name_at(&table, ParamGroup::Filter, 0), "RIP.CUT");
-        assert_eq!(name_at(&table, ParamGroup::Filter, 2), "RIP.FM");
+        assert_eq!(name_at(table, ParamGroup::Filter, 0), "RIP.CUT");
+        assert_eq!(name_at(table, ParamGroup::Filter, 2), "RIP.FM");
 
         // SHAPER: the scattered one. Seven members, none adjacent.
-        assert_eq!(name_at(&table, ParamGroup::Shaper, 0), "SHAPE.ALG");
-        assert_eq!(name_at(&table, ParamGroup::Shaper, 2), "SHAPE.DRV");
-        assert_eq!(name_at(&table, ParamGroup::Shaper, 6), "SHAPE.OUT");
+        assert_eq!(name_at(table, ParamGroup::Shaper, 0), "SHAPE.ALG");
+        assert_eq!(name_at(table, ParamGroup::Shaper, 2), "SHAPE.DRV");
+        assert_eq!(name_at(table, ParamGroup::Shaper, 6), "SHAPE.OUT");
 
         // TRACK: the six track params, stopping before SHAPE.IN/OUT which are
         // shaper rows sitting in the TRACK bank.
-        assert_eq!(name_at(&table, ParamGroup::Track, 0), "MACH");
-        assert_eq!(name_at(&table, ParamGroup::Track, 5), "SEND.RVB");
+        assert_eq!(name_at(table, ParamGroup::Track, 0), "MACH");
+        assert_eq!(name_at(table, ParamGroup::Track, 5), "SEND.RVB");
 
         // LFO and ENV interleave across the MOD bank: 24, 25, 28, 29 against
         // 26, 27, 30, 31.
-        assert_eq!(name_at(&table, ParamGroup::Lfo, 0), "LFO.RATE");
-        assert_eq!(name_at(&table, ParamGroup::Lfo, 3), "LFO.WRP");
-        assert_eq!(name_at(&table, ParamGroup::Env, 0), "AD.ATK");
-        assert_eq!(name_at(&table, ParamGroup::Env, 3), "AD.WRP");
+        assert_eq!(name_at(table, ParamGroup::Lfo, 0), "LFO.RATE");
+        assert_eq!(name_at(table, ParamGroup::Lfo, 3), "LFO.WRP");
+        assert_eq!(name_at(table, ParamGroup::Env, 0), "AD.ATK");
+        assert_eq!(name_at(table, ParamGroup::Env, 3), "AD.WRP");
 
         // Nothing past the end, and the groups this device does not have.
         assert!(resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Voice,
                 index: 9
@@ -2108,7 +2116,7 @@ mod tests {
         )
         .is_none());
         assert!(resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Shaper,
                 index: 7
@@ -2118,7 +2126,7 @@ mod tests {
         // mi-drum runs its envelope inside the voice, so it has no AMP rows
         // and must not silently resolve the drum device's strip AHD.
         assert!(resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Amp,
                 index: 0
@@ -2134,7 +2142,7 @@ mod tests {
     fn lpg_colour_is_a_plaits_row_at_its_documented_default() {
         let table = MiMachineId::PeaksBassDrum.params();
         let flat = device_core::params::resolve(
-            &table,
+            table,
             device_core::params::ParamId {
                 group: ParamGroup::Voice,
                 index: 8,
@@ -2144,7 +2152,7 @@ mod tests {
         assert_eq!(
             flat,
             NUM_PARAMS - 1,
-            "appended past the 32 the CC map was built for"
+            "appended, not folded into an existing row"
         );
         assert_eq!(table[flat].name, "LPG.COL");
         assert_eq!(table[flat].default, 0.5, "the hard-coded value, unchanged");
@@ -2191,7 +2199,7 @@ mod tests {
         }
         let table = MiMachineId::SixOp1.params();
         let flat = resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Shaper,
                 index: 2,
@@ -2218,7 +2226,7 @@ mod tests {
         e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
         let table = MiMachineId::SixOp1.params();
         let flat = resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Voice,
                 index: 0,
@@ -2280,7 +2288,7 @@ mod tests {
         e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
         let table = MiMachineId::SixOp1.params();
         let flat = resolve(
-            &table,
+            table,
             ParamId {
                 group: ParamGroup::Voice,
                 index: 0,

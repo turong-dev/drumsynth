@@ -652,9 +652,11 @@ mod tests {
         }
     }
 
+    static DUMMY_PARAMS: [ParamInfo; NUM_PARAMS] = [resv(); NUM_PARAMS];
+
     impl DeviceModel<NUM_PARAMS> for DummyId {
-        fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
-            [resv(); NUM_PARAMS]
+        fn param_table(self) -> &'static [ParamInfo; NUM_PARAMS] {
+            &DUMMY_PARAMS
         }
         fn param_route(self, _idx: usize) -> ParamRoute {
             ParamRoute::Slot
@@ -688,9 +690,11 @@ mod tests {
         }
     }
 
+    static WIDE_PARAMS: [ParamInfo; 64] = [resv(); 64];
+
     impl DeviceModel<64> for WideId {
-        fn param_table(self) -> [ParamInfo; 64] {
-            [resv(); 64]
+        fn param_table(self) -> &'static [ParamInfo; 64] {
+            &WIDE_PARAMS
         }
         fn param_route(self, _idx: usize) -> ParamRoute {
             ParamRoute::Slot
@@ -839,8 +843,8 @@ mod tests {
     }
 
     impl DeviceModel<NUM_PARAMS> for GateId {
-        fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
-            [resv(); NUM_PARAMS]
+        fn param_table(self) -> &'static [ParamInfo; NUM_PARAMS] {
+            &DUMMY_PARAMS
         }
         fn param_route(self, _idx: usize) -> ParamRoute {
             ParamRoute::Slot

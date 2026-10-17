@@ -1,57 +1,66 @@
-//! Param/CC slot system.
+//! Parameter system: the flat array, and the `(group, index)` address over it.
 //!
-//! Every device exposes its own count of normalised (0..1) param knobs, its
+//! Every device exposes its own count of normalised (0..1) parameters, its
 //! `NUM_PARAMS`, which may not exceed [`MAX_PARAMS`]. The current devices lay
 //! theirs out as [`NUM_BANKS`] banks of [`PARAMS_PER_BANK`], mirroring the
 //! Syntakt PITCH/FILTER/AMP/MOD pages. The flat slot index is
-//! `bank * 8 + index` ([`param_index`]); MIDI CC is `CC_TRACK_BASE + flat`
-//! (20-based), so slot 0 maps to CC 20 and slot 31 maps to CC 51. A fixed
-//! layout lets the same param be a knob on one machine and a
-//! different-but-equivalent knob on another. Slots a machine does not use are
-//! `RESV` (default 0.0) and ignored. The slot index order is stable across
-//! versions — firmware CC mappings depend on it.
+//! `bank * 8 + index` ([`param_index`]). A fixed layout lets the same
+//! parameter be a knob on one machine and a different-but-equivalent knob on
+//! another. Slots a machine does not use are `RESV` (default 0.0) and
+//! ignored.
 //!
-//! | Bank | Slots | Group                 |
+//! | Bank | Slots | Contents |
 //! |------|-------|-----------------------|
 //! | 0    | 0–7   | MACH (tune, sweep, FM, decay, shape) |
 //! | 1    | 8–15  | FILT (machine filter + strip SVF + strip AHD env) |
 //! | 2    | 16–23 | TRACK (machine select, output, pan, level, sends) |
 //! | 3    | 24–31 | MOD (FM mod amount/env + LFOs) |
 //!
-//! Each row also carries a [`ParamRoute`]: where the value goes when the param
-//! is set. [`Track::set_param`](crate::track::Track::set_param) dispatches on
-//! it instead of comparing flat indices, so a device states its routing in its
-//! own table — mi-drum's strip/shaper rows are [`ParamRoute::Slot`] because it
-//! runs that chain inside the voice, while the drum device's same positions
-//! route to the core strip.
+//! **The flat index is internal.** It was the wire ABI while the control
+//! surface was `CC 20 + flat`; that map is gone (phase F of #1), and NRPN
+//! `(group, index)` is the only external address. The banks survive as the
+//! layout convention a machine's `set_params` reads, nothing more, and
+//! reordering them is now a refactor rather than a break.
 //!
-//! ## Groups: a second address over the same table
+//! Each row also carries a [`ParamRoute`]: where the value goes when the
+//! parameter is set. [`Track::set_param`](crate::track::Track::set_param)
+//! dispatches on it instead of comparing flat indices, so a device states its
+//! routing in its own table — mi-drum's strip/shaper rows are
+//! [`ParamRoute::Slot`] because it runs that chain inside the voice, while
+//! the drum device's same positions route to the core strip.
 //!
-//! On top of the flat index, each row carries a [`ParamGroup`] — what the
-//! param *is*: [`Voice`](ParamGroup::Voice), [`Filter`](ParamGroup::Filter),
+//! ## Groups: the external address
+//!
+//! Each row carries a [`ParamGroup`] — what the parameter *is*:
+//! [`Voice`](ParamGroup::Voice), [`Filter`](ParamGroup::Filter),
 //! [`Shaper`](ParamGroup::Shaper), [`Lfo`](ParamGroup::Lfo), and so on. A
-//! [`ParamId`] is `{ group, index }`, where `index` is the row's ordinal among
-//! rows carrying that group, and [`resolve`] walks the table to find it.
+//! [`ParamId`] is `{ group, index }`, where `index` is the row's ordinal
+//! among rows carrying that group, and [`resolve`] walks the table to find
+//! it. NRPN carries that pair: MSB selects the group, LSB the index (see
+//! [`crate::midi`]).
 //!
 //! Groups and banks are independent. A group is a label on a parameter, not a
-//! reserved range, so it has no declared size and a device adds a param by
-//! appending a row. mi-drum's SHAPER rows are scattered at flat 8, 9, 13, 14,
-//! 15, 22 and 23 — deliberately, because folding them into a bank would have
-//! meant reordering the flat array, and the flat array is what CC 20..51
-//! addresses. The two addressings coexist: the flat index is the ABI the CC
-//! map and the Deluge depend on, and `(group, index)` is the one NRPN
-//! speaks (see [`crate::midi`]). They agree on what a param *is* and
-//! disagree only on layout.
+//! reserved range, so it has no declared size and a device adds a parameter
+//! by appending a row. mi-drum's SHAPER rows are scattered at flat 8, 9, 13,
+//! 14, 15, 22 and 23, and nothing needs them otherwise: contiguity would only
+//! buy an O(1) base-offset lookup, and the lookup is control rate.
 //!
-//! Resolution is a linear scan rather than a base-offset table. That lookup
-//! runs when an NRPN message arrives — control rate, never the audio path —
-//! and 33 rows is ~33 comparisons per message. A `GROUP_BASE` table would make
-//! it O(1) and force every group's rows contiguous, which would break the CC
-//! map for a cost that rounds to zero.
+//! Resolution is therefore a linear scan. It runs when an NRPN message
+//! arrives — never on the audio path — and 33 rows is ~33 comparisons per
+//! message.
 //!
-//! [`ParamGroup::Reserved`] rows are skipped while counting ordinals and never
-//! resolve at all, so a slot a machine does not use stays a hole in the
+//! [`ParamGroup::Reserved`] rows are skipped while counting ordinals and
+//! never resolve at all, so a slot a machine does not use stays a hole in the
 //! address space rather than a target a controller can reach.
+//!
+//! ## Kinds
+//!
+//! [`ParamKind`] says what the 0..1 value *means*: a continuous sweep, a
+//! bipolar control centred at 0.5, or a choice among `count` discrete
+//! options. It is display and quantisation data, not routing: the grid picks
+//! a widget from it, the cheat-sheet prints it, and
+//! [`apply_nrpn`](crate::midi::apply_nrpn) snaps a discrete parameter onto an
+//! exact option instead of landing between two of them.
 
 /// Most param knobs a device may expose.
 ///
@@ -73,7 +82,8 @@ pub const PARAMS_PER_BANK: usize = 8;
 
 /// Flat slot index for a param, from its bank and in-bank position.
 ///
-/// `bank * PARAMS_PER_BANK + index`; MIDI CC is `CC_TRACK_BASE + flat`.
+/// `bank * PARAMS_PER_BANK + index`. Internal: the external address is
+/// `(group, index)` — see [`ParamId`].
 pub const fn param_index(bank: usize, index: usize) -> usize {
     bank * PARAMS_PER_BANK + index
 }
@@ -88,83 +98,83 @@ pub const BANK_TRACK: usize = 2;
 /// MOD bank: LFOs only.
 pub const BANK_MOD: usize = 3;
 
-// MACH slots (bank 0). CC 20 + flat. Numbered — each machine lays out its
+// MACH slots (bank 0). Numbered — each machine lays out its
 // own parameters here. The name/abbrev/default for each slot is defined
 // per-machine in the device's metadata table.
-/// MACH bank slot 0. CC 20. Machine-specific.
+/// MACH bank slot 0. Machine-specific.
 pub const SLOT_MACH_0: usize = param_index(BANK_MACH, 0);
-/// MACH bank slot 1. CC 21. Machine-specific.
+/// MACH bank slot 1. Machine-specific.
 pub const SLOT_MACH_1: usize = param_index(BANK_MACH, 1);
-/// MACH bank slot 2. CC 22. Machine-specific.
+/// MACH bank slot 2. Machine-specific.
 pub const SLOT_MACH_2: usize = param_index(BANK_MACH, 2);
-/// MACH bank slot 3. CC 23. Machine-specific.
+/// MACH bank slot 3. Machine-specific.
 pub const SLOT_MACH_3: usize = param_index(BANK_MACH, 3);
-/// MACH bank slot 4. CC 24. Machine-specific.
+/// MACH bank slot 4. Machine-specific.
 pub const SLOT_MACH_4: usize = param_index(BANK_MACH, 4);
-/// MACH bank slot 5. CC 25. Machine-specific.
+/// MACH bank slot 5. Machine-specific.
 pub const SLOT_MACH_5: usize = param_index(BANK_MACH, 5);
-/// MACH bank slot 6. CC 26. Machine-specific.
+/// MACH bank slot 6. Machine-specific.
 pub const SLOT_MACH_6: usize = param_index(BANK_MACH, 6);
-/// MACH bank slot 7. CC 27. Machine-specific.
+/// MACH bank slot 7. Machine-specific.
 pub const SLOT_MACH_7: usize = param_index(BANK_MACH, 7);
 
-// FILT slots (bank 1). CC 20 + flat.
-/// FILT bank: machine-internal filter slot 0. CC 28. Numbered — meaning
+// FILT slots (bank 1).
+/// FILT bank: machine-internal filter slot 0. Numbered — meaning
 /// varies per machine (HPF, BPF, etc.).
 pub const SLOT_FILT_0: usize = param_index(BANK_FILT, 0);
-/// FILT bank: machine-internal filter slot 1. CC 29. Numbered — meaning
+/// FILT bank: machine-internal filter slot 1. Numbered — meaning
 /// varies per machine (LPF, resonance, Q, etc.).
 pub const SLOT_FILT_1: usize = param_index(BANK_FILT, 1);
-/// FILT bank: per-track strip SVF cutoff (log-mapped 20 Hz..20 kHz). CC 30.
+/// FILT bank: per-track strip SVF cutoff (log-mapped 20 Hz..20 kHz).
 /// Track-routed: drives the device strip's cutoff, not the machine.
 pub const SLOT_STRIP_CUT: usize = param_index(BANK_FILT, 2);
-/// FILT bank: per-track strip SVF resonance (0.5..20 Q). CC 31.
+/// FILT bank: per-track strip SVF resonance (0.5..20 Q).
 /// Track-routed: drives the device strip's resonance, not the machine.
 pub const SLOT_STRIP_RESO: usize = param_index(BANK_FILT, 3);
-/// FILT bank: per-track strip AHD attack (0..1 s). CC 32.
+/// FILT bank: per-track strip AHD attack (0..1 s).
 /// Track-routed: drives the device strip's attack.
 pub const SLOT_STRIP_ATK: usize = param_index(BANK_FILT, 4);
-/// FILT bank: per-track strip AHD hold (0..10 s). CC 33.
+/// FILT bank: per-track strip AHD hold (0..10 s).
 /// Track-routed: drives the device strip's hold.
 pub const SLOT_STRIP_HOLD: usize = param_index(BANK_FILT, 5);
-/// FILT bank: per-track strip AHD decay (0.01..10 s). CC 34.
+/// FILT bank: per-track strip AHD decay (0.01..10 s).
 /// Track-routed: drives the device strip's decay.
 pub const SLOT_STRIP_DEC: usize = param_index(BANK_FILT, 6);
 
-// TRACK slots (bank 2). CC 20 + flat.
-/// TRACK bank: machine selector. CC 36. Track-routed: swaps the machine on
+// TRACK slots (bank 2).
+/// TRACK bank: machine selector. Track-routed: swaps the machine on
 /// this track (quantised by the device catalog).
 pub const SLOT_MACHINE: usize = param_index(BANK_TRACK, 0);
 /// TRACK bank: per-track output routing. 0..1 quantised over the device's
-/// output-pair enum. CC 37. Track-routed.
+/// output-pair enum. Track-routed.
 pub const SLOT_OUT: usize = param_index(BANK_TRACK, 1);
-/// TRACK bank: per-track panning. CC 38. Track-routed.
+/// TRACK bank: per-track panning. Track-routed.
 pub const SLOT_PAN: usize = param_index(BANK_TRACK, 2);
-/// TRACK bank: per-track output level. CC 39. Track-routed.
+/// TRACK bank: per-track output level. Track-routed.
 pub const SLOT_LEVEL: usize = param_index(BANK_TRACK, 3);
-/// TRACK bank: delay send (track-routed). CC 40. Zero this (and
+/// TRACK bank: delay send (track-routed). Zero this (and
 /// [`SLOT_SEND_REVERB`]) to take the send-FX bus out of the picture when
 /// isolating a single track's CPU cost.
 pub const SLOT_SEND_DELAY: usize = param_index(BANK_TRACK, 4);
-/// TRACK bank: reverb send (track-routed). CC 41. See [`SLOT_SEND_DELAY`].
+/// TRACK bank: reverb send (track-routed). See [`SLOT_SEND_DELAY`].
 pub const SLOT_SEND_REVERB: usize = param_index(BANK_TRACK, 5);
 
-// MOD slots (bank 3). CC 20 + flat. LFOs only.
+// MOD slots (bank 3). LFOs only.
 /// MOD bank: LFO 1 rate. 0..0.5 = slow range (0.1..10 Hz), 0.5..1 = fast
-/// range (1..100 Hz), log-mapped within each half. CC 46. Track-routed.
+/// range (1..100 Hz), log-mapped within each half. Track-routed.
 pub const SLOT_LFO1_RATE: usize = param_index(BANK_MOD, 2);
-/// MOD bank: LFO 1 depth (0..1). CC 47. Track-routed.
+/// MOD bank: LFO 1 depth (0..1). Track-routed.
 pub const SLOT_LFO1_DEPTH: usize = param_index(BANK_MOD, 3);
 /// MOD bank: LFO 1 destination (quantised over the device's modulation
-/// destination enum). CC 48. Track-routed.
+/// destination enum). Track-routed.
 pub const SLOT_LFO1_DEST: usize = param_index(BANK_MOD, 4);
-/// MOD bank: LFO 2 rate. Same split mapping as [`SLOT_LFO1_RATE`]. CC 49.
+/// MOD bank: LFO 2 rate. Same split mapping as [`SLOT_LFO1_RATE`].
 /// Track-routed.
 pub const SLOT_LFO2_RATE: usize = param_index(BANK_MOD, 5);
-/// MOD bank: LFO 2 depth (0..1). CC 50. Track-routed.
+/// MOD bank: LFO 2 depth (0..1). Track-routed.
 pub const SLOT_LFO2_DEPTH: usize = param_index(BANK_MOD, 6);
 /// MOD bank: LFO 2 destination (quantised over the device's modulation
-/// destination enum). CC 51. Track-routed.
+/// destination enum). Track-routed.
 pub const SLOT_LFO2_DEST: usize = param_index(BANK_MOD, 7);
 
 /// Which group a param belongs to.
@@ -235,6 +245,67 @@ impl ParamGroup {
             _ => None,
         }
     }
+
+    /// Short display name, as a control surface and the cheat-sheet print it.
+    ///
+    /// The same spelling the NRPN documentation uses, so a name read off a
+    /// grid tab or a monitor line is the name to look up.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ParamGroup::Track => "TRACK",
+            ParamGroup::Voice => "VOICE",
+            ParamGroup::Filter => "FILTER",
+            ParamGroup::Shaper => "SHAPER",
+            ParamGroup::Amp => "AMP",
+            ParamGroup::Lfo => "LFO",
+            ParamGroup::Env => "ENV",
+            ParamGroup::Matrix => "MATRIX",
+            ParamGroup::Global => "GLOBAL",
+            ParamGroup::Reserved => "RESV",
+        }
+    }
+
+    /// Every group a device may place a parameter in, in display order.
+    ///
+    /// [`Global`](ParamGroup::Global) is channel-independent and
+    /// [`Reserved`](ParamGroup::Reserved) is a hole, so neither is here:
+    /// this is the list a per-track control surface pages through.
+    pub const ADDRESSABLE: [ParamGroup; 8] = [
+        ParamGroup::Track,
+        ParamGroup::Voice,
+        ParamGroup::Filter,
+        ParamGroup::Shaper,
+        ParamGroup::Amp,
+        ParamGroup::Lfo,
+        ParamGroup::Env,
+        ParamGroup::Matrix,
+    ];
+}
+
+/// What a parameter's normalised `0..1` value means.
+///
+/// Display and quantisation data, independent of [`ParamRoute`]: the grid
+/// picks a widget from it, the cheat-sheet prints it, and
+/// [`apply_nrpn`](crate::midi::apply_nrpn) uses
+/// [`Discrete`](ParamKind::Discrete) to snap a 14-bit value onto an exact
+/// option rather than a float that lands between two of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamKind {
+    /// A continuous sweep over `0..1`. The default, and what most rows are.
+    Continuous,
+    /// Centred at 0.5, meaningful in both directions — pan, and anything
+    /// else a control surface should draw outward from the middle.
+    Bipolar,
+    /// A choice among `count` options, evenly spaced over `0..1`: option `k`
+    /// is the value `k / (count - 1)`.
+    ///
+    /// `count` is the engine's own option count for the parameter, so a
+    /// controller can address an option exactly instead of landing near it.
+    Discrete {
+        /// Number of options, `1..=255`. A `count` of 0 or 1 has one
+        /// position and nothing to choose.
+        count: u8,
+    },
 }
 
 /// An address: a group, and a position within it.
@@ -266,8 +337,7 @@ pub struct ParamId {
 /// NRPN message arrives, which is control rate: 33 rows is ~33 comparisons
 /// per message, against an M7 at 600 MHz. A `GROUP_BASE` table would make
 /// this O(1) and require every group's rows to be contiguous in the flat
-/// array, which would force a reorder of the existing layout and break the
-/// CC map (CC 20..51 = flat 0..31) for a cost that rounds to zero.
+/// array for a cost that rounds to zero.
 pub const fn resolve(table: &[ParamInfo], id: ParamId) -> Option<usize> {
     if id.group as u8 == ParamGroup::Reserved as u8 {
         return None;
@@ -286,6 +356,27 @@ pub const fn resolve(table: &[ParamInfo], id: ParamId) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// How many rows a device's table places in `group`.
+///
+/// The number of valid `index` values for that group: a [`ParamId`] with
+/// `index < group_len(table, group)` resolves, and one at or above it does
+/// not. [`ParamGroup::Reserved`] rows are not counted, matching
+/// [`resolve`].
+pub const fn group_len(table: &[ParamInfo], group: ParamGroup) -> usize {
+    if group as u8 == ParamGroup::Reserved as u8 {
+        return 0;
+    }
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < table.len() {
+        if table[i].group as u8 == group as u8 {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
 }
 
 /// Where a param's value goes when it is set.
@@ -373,8 +464,8 @@ pub enum SendBus {
 /// a device's default-param function — same value on host and target so a
 /// rendered WAV lines up bit-for-bit against hardware. `group` says what the
 /// param is on the wire and on a control surface (see [`ParamGroup`]).
-/// `route` says where the value goes when the param is set (see
-/// [`ParamRoute`]).
+/// `kind` says what its `0..1` value means (see [`ParamKind`]). `route` says
+/// where the value goes when the param is set (see [`ParamRoute`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParamInfo {
     /// Human label for display surfaces.
@@ -385,6 +476,8 @@ pub struct ParamInfo {
     pub default: f32,
     /// Which group the param belongs to.
     pub group: ParamGroup,
+    /// What the normalised value means.
+    pub kind: ParamKind,
     /// Where the value goes when the param is set.
     pub route: ParamRoute,
 }
@@ -395,8 +488,9 @@ pub struct ParamInfo {
 /// means the param cannot be reached by its NRPN address, and nothing but
 /// being forced to state it at each row catches that. The default route is
 /// [`ParamRoute::Slot`] — the voice consumes the value in `set_params` —
-/// which is what every machine-specific row wants. Track-routed rows chain
-/// [`ParamInfo::with_route`].
+/// which is what every machine-specific row wants. The default kind is
+/// [`ParamKind::Continuous`]. Rows that are neither chain
+/// [`ParamInfo::with_route`] / [`ParamInfo::with_kind`].
 pub const fn mi(
     name: &'static str,
     abbrev: &'static str,
@@ -408,6 +502,7 @@ pub const fn mi(
         abbrev,
         default,
         group,
+        kind: ParamKind::Continuous,
         route: ParamRoute::Slot,
     }
 }
@@ -417,6 +512,22 @@ impl ParamInfo {
     pub const fn with_route(mut self, route: ParamRoute) -> ParamInfo {
         self.route = route;
         self
+    }
+
+    /// Override the kind of a [`mi`] literal, usable in `const` context.
+    pub const fn with_kind(mut self, kind: ParamKind) -> ParamInfo {
+        self.kind = kind;
+        self
+    }
+
+    /// Number of discrete options, or `None` for a continuous parameter.
+    ///
+    /// `Some(n)` means the value grid is `k / (n - 1)` for `k` in `0..n`.
+    pub const fn option_count(self) -> Option<u8> {
+        match self.kind {
+            ParamKind::Discrete { count } if count > 1 => Some(count),
+            _ => None,
+        }
     }
 }
 
@@ -434,54 +545,74 @@ pub const fn resv() -> ParamInfo {
 // Same on every device: defined once, referenced by every machine metadata row.
 // Their routes are what `Track::set_param` dispatches on.
 
-/// MACH selector (TRACK 0). CC 36.
-pub const MACH_INFO: ParamInfo =
-    mi("MACH", "MCH", 0.0, ParamGroup::Track).with_route(ParamRoute::Machine);
-/// Strip SVF cutoff (FILT 2). CC 30. Default 1.0 = 20 kHz (fully open).
+/// MACH selector (TRACK 0), for a device whose catalogue holds `count`
+/// machines.
+///
+/// `count` is an argument rather than a constant because it is the one piece
+/// of this row that is per-device: the drum catalogue has 15 entries and
+/// mi-drum's has 28. Carrying it in [`ParamKind::Discrete`] is what lets a
+/// control surface draw the selector, and NRPN address a machine exactly,
+/// without either of them knowing the device.
+pub const fn mach_info(count: u8) -> ParamInfo {
+    mi("MACH", "MCH", 0.0, ParamGroup::Track)
+        .with_kind(ParamKind::Discrete { count })
+        .with_route(ParamRoute::Machine)
+}
+/// Strip SVF cutoff (FILT 2). Default 1.0 = 20 kHz (fully open).
 pub const STRIP_CUT_INFO: ParamInfo = mi("STRIP.CUT", "SCUT", 1.0, ParamGroup::Filter)
     .with_route(ParamRoute::Strip(StripParam::Cutoff));
-/// Strip SVF resonance (FILT 3). CC 31. Default ~0.01 = Butterworth Q.
+/// Strip SVF resonance (FILT 3). Default ~0.01 = Butterworth Q.
 pub const STRIP_RESO_INFO: ParamInfo = mi("STRIP.RESO", "SRES", 0.01, ParamGroup::Filter)
     .with_route(ParamRoute::Strip(StripParam::Reso));
-/// Strip AHD attack (FILT 4). CC 32. Default 0.0 = instant.
+/// Strip AHD attack (FILT 4). Default 0.0 = instant.
 pub const STRIP_ATK_INFO: ParamInfo =
     mi("STRIP.ATK", "SATK", 0.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Attack));
-/// Strip AHD hold (FILT 5). CC 33. Default 1.0 = 10 s.
+/// Strip AHD hold (FILT 5). Default 1.0 = 10 s.
 pub const STRIP_HOLD_INFO: ParamInfo =
     mi("STRIP.HOLD", "SHLD", 1.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Hold));
-/// Strip AHD decay (FILT 6). CC 34. Default 1.0 = 10 s.
+/// Strip AHD decay (FILT 6). Default 1.0 = 10 s.
 pub const STRIP_DEC_INFO: ParamInfo =
     mi("STRIP.DEC", "SDEC", 1.0, ParamGroup::Amp).with_route(ParamRoute::Strip(StripParam::Decay));
-/// Strip pan (TRACK 2). CC 38. Default 0.5 = centre.
-pub const PAN_INFO: ParamInfo =
-    mi("PAN", "PAN", 0.5, ParamGroup::Track).with_route(ParamRoute::Pan);
-/// Delay send (TRACK 4). CC 40.
+/// Strip pan (TRACK 2). Default 0.5 = centre.
+pub const PAN_INFO: ParamInfo = mi("PAN", "PAN", 0.5, ParamGroup::Track)
+    .with_kind(ParamKind::Bipolar)
+    .with_route(ParamRoute::Pan);
+/// Delay send (TRACK 4).
 pub const SEND_DLY_INFO: ParamInfo =
     mi("SEND.DLY", "SDY", 0.0, ParamGroup::Track).with_route(ParamRoute::Send(SendBus::Delay));
-/// Reverb send (TRACK 5). CC 41.
+/// Reverb send (TRACK 5).
 pub const SEND_RVB_INFO: ParamInfo =
     mi("SEND.RVB", "SRV", 0.0, ParamGroup::Track).with_route(ParamRoute::Send(SendBus::Reverb));
-/// Output routing (TRACK 1). CC 37. Default 0.0 = Master.
-pub const OUT_INFO: ParamInfo =
-    mi("OUT", "OUT", 0.0, ParamGroup::Track).with_route(ParamRoute::Out);
-/// LFO 1 rate (MOD 2). CC 46. 0..0.5 slow, 0.5..1 fast.
+/// Output routing (TRACK 1). Default 0.0 = Master.
+pub const OUT_INFO: ParamInfo = mi("OUT", "OUT", 0.0, ParamGroup::Track)
+    .with_kind(ParamKind::Discrete {
+        count: crate::OutPair::COUNT as u8,
+    })
+    .with_route(ParamRoute::Out);
+/// LFO 1 rate (MOD 2). 0..0.5 slow, 0.5..1 fast.
 pub const LFO1_RATE_INFO: ParamInfo =
     mi("LFO1.RATE", "L1R", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Rate));
-/// LFO 1 depth (MOD 3). CC 47.
+/// LFO 1 depth (MOD 3).
 pub const LFO1_DEPTH_INFO: ParamInfo =
     mi("LFO1.DEP", "L1D", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Depth));
-/// LFO 1 destination (MOD 4). CC 48. Default 0.0 = Param(0).
-pub const LFO1_DEST_INFO: ParamInfo =
-    mi("LFO1.DST", "L1S", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo1Dest));
-/// LFO 2 rate (MOD 5). CC 49. Same split mapping as [`LFO1_RATE_INFO`].
+/// LFO 1 destination (MOD 4). Default 0.0 = Param(0).
+pub const LFO1_DEST_INFO: ParamInfo = mi("LFO1.DST", "L1S", 0.0, ParamGroup::Lfo)
+    .with_kind(ParamKind::Discrete {
+        count: crate::dsp::ModDest::COUNT as u8,
+    })
+    .with_route(ParamRoute::Lfo(LfoParam::Lfo1Dest));
+/// LFO 2 rate (MOD 5). Same split mapping as [`LFO1_RATE_INFO`].
 pub const LFO2_RATE_INFO: ParamInfo =
     mi("LFO2.RATE", "L2R", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Rate));
-/// LFO 2 depth (MOD 6). CC 50.
+/// LFO 2 depth (MOD 6).
 pub const LFO2_DEPTH_INFO: ParamInfo =
     mi("LFO2.DEP", "L2D", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Depth));
-/// LFO 2 destination (MOD 7). CC 51. Default 0.0 = Param(0).
-pub const LFO2_DEST_INFO: ParamInfo =
-    mi("LFO2.DST", "L2S", 0.0, ParamGroup::Lfo).with_route(ParamRoute::Lfo(LfoParam::Lfo2Dest));
+/// LFO 2 destination (MOD 7). Default 0.0 = Param(0).
+pub const LFO2_DEST_INFO: ParamInfo = mi("LFO2.DST", "L2S", 0.0, ParamGroup::Lfo)
+    .with_kind(ParamKind::Discrete {
+        count: crate::dsp::ModDest::COUNT as u8,
+    })
+    .with_route(ParamRoute::Lfo(LfoParam::Lfo2Dest));
 
 /// Track output level (TRACK 3). Per-machine default.
 ///
@@ -688,7 +819,7 @@ mod tests {
 
     #[test]
     fn shared_track_params_carry_their_routes() {
-        assert_eq!(MACH_INFO.route, ParamRoute::Machine);
+        assert_eq!(mach_info(15).route, ParamRoute::Machine);
         assert_eq!(OUT_INFO.route, ParamRoute::Out);
         assert_eq!(PAN_INFO.route, ParamRoute::Pan);
         assert_eq!(SEND_DLY_INFO.route, ParamRoute::Send(SendBus::Delay));

@@ -32,7 +32,7 @@
 use std::error::Error;
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use drum_engine::midi::{handle_midi, MidiEvent, MidiParser, CC_MASTER_GAIN, CC_TRACK_BASE};
+use drum_engine::midi::{handle_midi, MidiEvent, MidiParser, CC_MASTER_GAIN};
 use drum_engine::{DeviceEngine, BLOCK, SAMPLE_RATE};
 use midir::os::unix::VirtualInput;
 use midir::{Ignore, MidiInput};
@@ -150,12 +150,9 @@ where
     );
     println!("notes are chromatic — any note plays that track, middle C (60) = default pitch, 1 semitone per note step");
     println!(
-        "CC {}..{} on channel N sets track N's params ({} per track); CC {} = master gain (any channel)",
-        CC_TRACK_BASE,
-        CC_TRACK_BASE as usize + N - 1,
-        N,
-        CC_MASTER_GAIN
+        "params ({N} per track) are NRPN (group, index) at 14 bits: CC 99 = group, CC 98 = index, CC 6/38 = value, CC 96/97 = step"
     );
+    println!("CC {CC_MASTER_GAIN} = master gain (any channel); CC 120/123 = panic");
     println!("per-track routing: strip.out = Master | Aux1 | Aux2 | Aux3");
     println!("ctrl-c to stop");
 

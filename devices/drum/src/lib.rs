@@ -36,8 +36,9 @@
 //! one [`MachineId`](machines::MachineId) into its [`DrumSlot`] and runs it
 //! through a [`Strip`] (multimode filter, AHD amp envelope, drive, pan,
 //! level). The result is summed, soft-clippered at the master, and written
-//! out. MIDI note and CC mappings live in the engine as small tables so the
-//! firmware just looks them up.
+//! out. MIDI note mappings live in the engine as small tables so the
+//! firmware just looks them up; parameters are addressed over NRPN (see
+//! [`midi`]).
 //!
 //! Machines expose a uniform surface of [`NUM_PARAMS`] normalised knobs so
 //! the host renderer can sweep any param of any machine generically — no
@@ -97,7 +98,7 @@ impl SlotId<NUM_PARAMS> for crate::machines::MachineId {
 }
 
 impl device_core::slot::DeviceModel<NUM_PARAMS> for crate::machines::MachineId {
-    fn param_table(self) -> [ParamInfo; NUM_PARAMS] {
+    fn param_table(self) -> &'static [ParamInfo; NUM_PARAMS] {
         self.params()
     }
     fn param_route(self, idx: usize) -> ParamRoute {

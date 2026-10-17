@@ -10,21 +10,46 @@
 //! * **Mixer** — 8 bottom-oriented vertical faders for track levels, with
 //!   track-select and audition pads on the right half.
 //! * **Parameter** — 6 rows of horizontal widgets for the selected track,
-//!   with 4 parameter pages.
+//!   addressed by [`ParamGroup`] and page.
 //! * **Fine-tune** — holding a fader pad for `HOLD_MS` replaces the relevant
 //!   row/column with a high-resolution strip.
 //!
 //! The grid is generic over any [`DeviceEngine`](crate::engine::DeviceEngine);
 //! the only device-specific surface it needs is [`DeviceModel`] on the slot
 //! identifier, which vends per-machine param metadata.
+//!
+//! # The parameter screen is derived, not hard-coded
+//!
+//! Rows come from the device's parameter table. The screen is addressed the
+//! same way NRPN is — `(group, index)` — so the group selector picks a
+//! [`ParamGroup`] and the row is the `page * 6 + row`-th parameter in it.
+//! Nothing here names a flat slot index except [`SLOT_LEVEL`], which the
+//! mixer's vertical faders need before a group has been chosen.
+//!
+//! Each row draws itself from the parameter's [`ParamKind`]: a continuous
+//! sweep is a fader, a bipolar one fills outward from the centre, and a
+//! discrete one lays its options out as clusters. A device adds a parameter
+//! by adding a table row, and it appears on the grid.
+//!
+//! ## Reaching 33 parameters with 24 pads
+//!
+//! Six rows across four page tabs is 24 reachable parameters, and mi-drum
+//! has 33. The fix is the **group selector** on the chrome row, columns
+//! 1–8: one pad per [`ParamGroup::ADDRESSABLE`] entry, lit when the loaded
+//! machine has parameters in that group. Groups are small — the largest is
+//! Plaits' nine VOICE rows — so the four page tabs are nearly always one
+//! page, and the selector is what actually moves between parameters.
+//!
+//! A pad for a group the machine does not use is dark and does nothing, so
+//! switching from Plaits to Peaks (nine VOICE rows down to four) cannot
+//! strand the screen on an address that no longer exists.
+//!
+//! The track's choke mask is not a parameter — it lives on the strip, not
+//! in the table — so it is appended as one synthetic row after the TRACK
+//! group's own rows.
 
 use crate::engine::DeviceEngine;
-use crate::params::{
-    ParamInfo, SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_LFO1_DEST, SLOT_LFO1_RATE, SLOT_LFO2_DEPTH,
-    SLOT_LFO2_DEST, SLOT_LFO2_RATE, SLOT_MACHINE, SLOT_OUT, SLOT_PAN, SLOT_SEND_DELAY,
-    SLOT_SEND_REVERB, SLOT_STRIP_ATK, SLOT_STRIP_CUT, SLOT_STRIP_DEC, SLOT_STRIP_HOLD,
-    SLOT_STRIP_RESO,
-};
+use crate::params::{group_len, resolve, ParamGroup, ParamId, ParamInfo, ParamKind, SLOT_LEVEL};
 use crate::slot::{DeviceModel, Slot};
 use crate::track::Track;
 
@@ -221,7 +246,11 @@ pub struct Grid {
     screen: Screen,
     /// Active track for the parameter screen, 0..=7.
     selected_track: u8,
-    /// Active parameter page, 0..=3.
+    /// Active parameter group — an index into
+    /// [`ParamGroup::ADDRESSABLE`], which is also its selector column
+    /// offset.
+    group: u8,
+    /// Active page within the group, 0..=3. Six parameters per page.
     page: u8,
     /// Anchor pad for the current gesture, if any.
     held: Option<HeldPad>,
@@ -260,6 +289,7 @@ struct HeldPad {
     down_at_ms: u32,
     screen: Screen,
     track: u8,
+    group: u8,
     page: u8,
 }
 
@@ -286,6 +316,10 @@ impl Grid {
         Self {
             screen: Screen::Mixer,
             selected_track: 0,
+            // TRACK: level, pan, sends, output, choke — the rows the mixer
+            // page held before the screen was derived from the table, and
+            // the one group every machine has.
+            group: 0,
             page: 0,
             held: None,
             held_mask: 0,
@@ -434,6 +468,11 @@ impl Grid {
 // ---------------------------------------------------------------------------
 
 impl Grid {
+    /// The group the selector is currently on.
+    fn active_group(&self) -> ParamGroup {
+        ParamGroup::ADDRESSABLE[(self.group as usize).min(ParamGroup::ADDRESSABLE.len() - 1)]
+    }
+
     fn on_pad_down<E, const N: usize>(&mut self, x: u8, y: u8, now_ms: u32, engine: &mut E)
     where
         E: DeviceEngine<N>,
@@ -451,6 +490,7 @@ impl Grid {
                 down_at_ms: now_ms,
                 screen: self.screen,
                 track: self.selected_track,
+                group: self.group,
                 page: self.page,
             });
             return;
@@ -536,15 +576,32 @@ impl Grid {
         E: DeviceEngine<N>,
         <E::Slot as Slot<N>>::Id: DeviceModel<N>,
     {
+        let track = self.selected_track as usize;
+        let table = engine.tracks()[track].id().param_table();
+
         if y == 0 {
             if x == 0 {
                 // Back to mixer.
                 self.screen = Screen::Mixer;
                 return;
             }
-            if (12..=15).contains(&x) {
-                // Page tab.
-                self.page = x - 12;
+            if let Some(group) = group_for_col(x) {
+                // Group selector. A group the loaded machine has no rows in
+                // is not selectable: landing there would leave the screen
+                // blank with no indication why.
+                if screen_rows(table, group) > 0 {
+                    self.group = x - GROUP_COL_FIRST;
+                    self.page = 0;
+                }
+                return;
+            }
+            if (PAGE_COL_FIRST..PAGE_COL_FIRST + NUM_PAGES as u8).contains(&x) {
+                // Page tab within the group. Ignored when the group has no
+                // parameters that far in, for the same reason.
+                let page = x - PAGE_COL_FIRST;
+                if (page as usize) * ROWS_PER_PAGE < screen_rows(table, self.active_group()) {
+                    self.page = page;
+                }
                 return;
             }
             return;
@@ -558,9 +615,7 @@ impl Grid {
         }
 
         let row = y as usize - 1;
-        let track = self.selected_track as usize;
-        let machine = engine.tracks()[track].id();
-        let Some(widget) = page_widget::<N, _>(self.page, row, machine) else {
+        let Some(widget) = page_widget(table, self.active_group(), self.page, row) else {
             return;
         };
 
@@ -618,8 +673,8 @@ impl Grid {
                 }
                 let row = held.y as usize - 1;
                 let track_idx = held.track as usize;
-                let machine = engine.tracks()[track_idx].id();
-                let Some(widget) = page_widget::<N, _>(held.page, row, machine) else {
+                let table = engine.tracks()[track_idx].id().param_table();
+                let Some(widget) = page_widget(table, held_group(&held), held.page, row) else {
                     return;
                 };
                 if !widget_supports_fine_tune(widget.kind) {
@@ -672,157 +727,83 @@ where
     }
 }
 
-/// Build the widget descriptor for a given page/row and machine.
-fn page_widget<const N: usize, Id: DeviceModel<N>>(
-    page: u8,
-    row: usize,
-    machine: Id,
-) -> Option<Widget> {
-    match page {
-        0 => mixer_page_widget(row),
-        1 => strip_page_widget(row),
-        2 => lfo_page_widget(row),
-        3 => machine_page_widget(row, machine),
-        _ => None,
+/// Parameter rows on one page: grid rows 1..=6.
+pub const ROWS_PER_PAGE: usize = 6;
+/// Page tabs on the chrome row, columns 12..=15.
+pub const NUM_PAGES: usize = 4;
+/// First column of the group selector on the chrome row.
+const GROUP_COL_FIRST: u8 = 1;
+/// First column of the page tabs on the chrome row.
+const PAGE_COL_FIRST: u8 = 12;
+
+/// The group a gesture was anchored in, so a fine-tune overlay keeps
+/// editing the parameter the finger landed on even if the selector moves.
+fn held_group(held: &HeldPad) -> ParamGroup {
+    ParamGroup::ADDRESSABLE[(held.group as usize).min(ParamGroup::ADDRESSABLE.len() - 1)]
+}
+
+/// The group a selector column addresses, or `None` for a column that is
+/// not part of the selector.
+fn group_for_col(x: u8) -> Option<ParamGroup> {
+    let i = x.checked_sub(GROUP_COL_FIRST)? as usize;
+    ParamGroup::ADDRESSABLE.get(i).copied()
+}
+
+/// How many rows the parameter screen has for a group: its table rows, plus
+/// the synthetic choke row that rides along with TRACK.
+fn screen_rows<const N: usize>(table: &[ParamInfo; N], group: ParamGroup) -> usize {
+    let n = group_len(table, group);
+    if group as u8 == ParamGroup::Track as u8 {
+        n + 1
+    } else {
+        n
     }
 }
 
-fn mixer_page_widget(row: usize) -> Option<Widget> {
-    Some(match row {
-        0 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "LVL",
-            target: ParamTarget::Param(SLOT_LEVEL),
-        },
-        1 => Widget {
-            kind: WidgetKind::BipolarPan,
-            label: "PAN",
-            target: ParamTarget::Param(SLOT_PAN),
-        },
-        2 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "DLY",
-            target: ParamTarget::Param(SLOT_SEND_DELAY),
-        },
-        3 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "RVB",
-            target: ParamTarget::Param(SLOT_SEND_REVERB),
-        },
-        4 => Widget {
-            kind: WidgetKind::EnumSelector { count: 4 },
-            label: "OUT",
-            target: ParamTarget::Param(SLOT_OUT),
-        },
-        5 => Widget {
+/// The widget for one row of the parameter screen.
+///
+/// `ordinal` is the parameter's index within `group` — the same number NRPN
+/// puts in its parameter-select LSB — reconstructed from the page tab and
+/// the grid row. A row past the end of the group has no widget and renders
+/// dark.
+fn page_widget<const N: usize>(
+    table: &[ParamInfo; N],
+    group: ParamGroup,
+    page: u8,
+    row: usize,
+) -> Option<Widget> {
+    let ordinal = page as usize * ROWS_PER_PAGE + row;
+    let index = u8::try_from(ordinal).ok()?;
+    if let Some(flat) = resolve(table, ParamId { group, index }) {
+        let info = table[flat];
+        return Some(Widget {
+            kind: widget_kind(info.kind),
+            label: info.abbrev,
+            target: ParamTarget::Param(flat),
+        });
+    }
+    // One synthetic row after TRACK's own: the choke mask is a strip field,
+    // not a parameter, so it has no table row and no NRPN address.
+    if group as u8 == ParamGroup::Track as u8 && ordinal == group_len(table, ParamGroup::Track) {
+        return Some(Widget {
             kind: WidgetKind::BitmaskToggle,
             label: "CHK",
             target: ParamTarget::ChokeMask,
-        },
-        _ => return None,
-    })
-}
-
-fn strip_page_widget(row: usize) -> Option<Widget> {
-    Some(match row {
-        0 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "CUT",
-            target: ParamTarget::Param(SLOT_STRIP_CUT),
-        },
-        1 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "RES",
-            target: ParamTarget::Param(SLOT_STRIP_RESO),
-        },
-        2 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "ATK",
-            target: ParamTarget::Param(SLOT_STRIP_ATK),
-        },
-        3 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "HLD",
-            target: ParamTarget::Param(SLOT_STRIP_HOLD),
-        },
-        4 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "DEC",
-            target: ParamTarget::Param(SLOT_STRIP_DEC),
-        },
-        _ => return None,
-    })
-}
-
-fn lfo_page_widget(row: usize) -> Option<Widget> {
-    Some(match row {
-        0 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "L1R",
-            target: ParamTarget::Param(SLOT_LFO1_RATE),
-        },
-        1 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "L1D",
-            target: ParamTarget::Param(SLOT_LFO1_DEPTH),
-        },
-        2 => Widget {
-            kind: WidgetKind::EnumSelector { count: 16 },
-            label: "L1S",
-            target: ParamTarget::Param(SLOT_LFO1_DEST),
-        },
-        3 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "L2R",
-            target: ParamTarget::Param(SLOT_LFO2_RATE),
-        },
-        4 => Widget {
-            kind: WidgetKind::UnipolarFader,
-            label: "L2D",
-            target: ParamTarget::Param(SLOT_LFO2_DEPTH),
-        },
-        5 => Widget {
-            kind: WidgetKind::EnumSelector { count: 16 },
-            label: "L2S",
-            target: ParamTarget::Param(SLOT_LFO2_DEST),
-        },
-        _ => return None,
-    })
-}
-
-fn machine_page_widget<const N: usize, Id: DeviceModel<N>>(
-    row: usize,
-    machine: Id,
-) -> Option<Widget> {
-    let info: &[ParamInfo; N] = &machine.param_table();
-    let count = Id::count() as u8;
-
-    if row == 0 {
-        return Some(Widget {
-            kind: WidgetKind::EnumSelector { count },
-            label: "MCH",
-            target: ParamTarget::Param(SLOT_MACHINE),
         });
     }
-
-    // Fill rows 1..=5 with the first non-RESV machine-internal params in
-    // slots 0..=9 (MACH bank + FILT 0/1, excluding track-routed strip slots).
-    let mut found = 0;
-    for (slot, param_info) in info.iter().enumerate().take(10) {
-        if param_info.name == "RESV" {
-            continue;
-        }
-        found += 1;
-        if found == row {
-            return Some(Widget {
-                kind: WidgetKind::UnipolarFader,
-                label: param_info.abbrev,
-                target: ParamTarget::Param(slot),
-            });
-        }
-    }
-
     None
+}
+
+/// How a parameter of this kind is drawn and touched.
+fn widget_kind(kind: ParamKind) -> WidgetKind {
+    match kind {
+        ParamKind::Continuous => WidgetKind::UnipolarFader,
+        ParamKind::Bipolar => WidgetKind::BipolarPan,
+        // The renderer clamps to 16 clusters; a catalogue larger than that
+        // (mi-drum's 28 machines) is reachable in 16 steps, not one per
+        // entry. Finer selection is what NRPN is for.
+        ParamKind::Discrete { count } => WidgetKind::EnumSelector { count },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -870,18 +851,40 @@ where
     // Back button.
     set_pad(next, 0, 0, DIM);
 
-    // Page tabs, cols 12–15.
-    for x in 12..16 {
-        let page = x - 12;
-        let vel = if page == grid.page { BRIGHT } else { DIM };
-        set_pad(next, x, 0, vel);
+    let track_idx = grid.selected_track as usize;
+    let table = engine.tracks()[track_idx].id().param_table();
+    let group = grid.active_group();
+
+    // Group selector, cols 1–8. Dark for a group this machine has no
+    // parameters in, so the lit pads are exactly the reachable ones.
+    for (i, &g) in ParamGroup::ADDRESSABLE.iter().enumerate() {
+        let rows = screen_rows(table, g);
+        let vel = if rows == 0 {
+            0
+        } else if g as u8 == group as u8 {
+            BRIGHT
+        } else {
+            DIM
+        };
+        set_pad(next, GROUP_COL_FIRST + i as u8, 0, vel);
+    }
+
+    // Page tabs, cols 12–15. Same rule: a tab with nothing on it is dark.
+    let rows = screen_rows(table, group);
+    for page in 0..NUM_PAGES {
+        let vel = if page * ROWS_PER_PAGE >= rows {
+            0
+        } else if page as u8 == grid.page {
+            BRIGHT
+        } else {
+            DIM
+        };
+        set_pad(next, PAGE_COL_FIRST + page as u8, 0, vel);
     }
 
     // Parameter rows.
-    let track_idx = grid.selected_track as usize;
-    let machine = engine.tracks()[track_idx].id();
-    for row in 0..6 {
-        if let Some(widget) = page_widget::<N, _>(grid.page, row, machine) {
+    for row in 0..ROWS_PER_PAGE {
+        if let Some(widget) = page_widget(table, group, grid.page, row) {
             let value = read_target(&widget.target, &engine.tracks()[track_idx]);
             render_widget_row(row + 1, &widget, value, next);
         }
@@ -935,8 +938,9 @@ where
             // Horizontal fader held: vertical strip in the held column.
             let row = held.y as usize - 1;
             let track_idx = held.track as usize;
-            let machine = engine.tracks()[track_idx].id();
-            let Some(widget) = page_widget::<N, _>(held.page, row, machine) else {
+            let table = engine.tracks()[track_idx].id().param_table();
+            let group = held_group(&held);
+            let Some(widget) = page_widget(table, group, held.page, row) else {
                 return;
             };
             let value = read_target(&widget.target, &engine.tracks()[track_idx]);
@@ -944,8 +948,8 @@ where
             let offset = (value as i16 - base as i16).clamp(0, 7) as u8;
 
             // Dim the underlying parameter rows for context.
-            for r in 0..6 {
-                if let Some(w) = page_widget::<N, _>(held.page, r, machine) {
+            for r in 0..ROWS_PER_PAGE {
+                if let Some(w) = page_widget(table, group, held.page, r) {
                     let v = read_target(&w.target, &engine.tracks()[track_idx]);
                     render_widget_row(r + 1, &w, v, next);
                 }
@@ -1136,8 +1140,59 @@ fn enum_option_for_col(count: u8, x: u8) -> u8 {
 mod tests {
     use super::*;
     use crate::engine::Engine;
-    use crate::params::{ParamInfo, ParamRoute};
+    use crate::params::{
+        level_info, mach_info, mi, resv, ParamInfo, ParamRoute, LFO1_DEPTH_INFO, LFO1_DEST_INFO,
+        LFO1_RATE_INFO, OUT_INFO, PAN_INFO, SEND_DLY_INFO, SEND_RVB_INFO, SLOT_STRIP_CUT,
+        STRIP_ATK_INFO, STRIP_CUT_INFO, STRIP_DEC_INFO, STRIP_HOLD_INFO, STRIP_RESO_INFO,
+    };
     use crate::slot::{Slot, SlotId};
+
+    /// The drum device's layout in miniature: the same banks, the same
+    /// track-routed rows in the same places, and two machine-specific VOICE
+    /// rows. Grouped, because the grid now addresses rows by group.
+    static DUMMY_PARAMS: [ParamInfo; 32] = [
+        mi("TUNE", "TUN", 0.5, ParamGroup::Voice), // MACH 0
+        mi("DEC", "DEC", 0.5, ParamGroup::Voice),  // MACH 1
+        resv(),                                    // MACH 2
+        resv(),                                    // MACH 3
+        resv(),                                    // MACH 4
+        resv(),                                    // MACH 5
+        resv(),                                    // MACH 6
+        resv(),                                    // MACH 7
+        resv(),                                    // FILT 0
+        resv(),                                    // FILT 1
+        STRIP_CUT_INFO,                            // FILT 2
+        STRIP_RESO_INFO,                           // FILT 3
+        STRIP_ATK_INFO,                            // FILT 4
+        STRIP_HOLD_INFO,                           // FILT 5
+        STRIP_DEC_INFO,                            // FILT 6
+        resv(),                                    // FILT 7
+        mach_info(2),                              // TRACK 0
+        OUT_INFO,                                  // TRACK 1
+        PAN_INFO,                                  // TRACK 2
+        level_info(0.9),                           // TRACK 3
+        SEND_DLY_INFO,                             // TRACK 4
+        SEND_RVB_INFO,                             // TRACK 5
+        resv(),                                    // TRACK 6
+        resv(),                                    // TRACK 7
+        resv(),                                    // MOD 0
+        resv(),                                    // MOD 1
+        LFO1_RATE_INFO,                            // MOD 2
+        LFO1_DEPTH_INFO,                           // MOD 3
+        LFO1_DEST_INFO,                            // MOD 4
+        resv(),                                    // MOD 5
+        resv(),                                    // MOD 6
+        resv(),                                    // MOD 7
+    ];
+
+    /// Column of the group selector pad for `group`.
+    fn group_col(group: ParamGroup) -> u8 {
+        GROUP_COL_FIRST
+            + ParamGroup::ADDRESSABLE
+                .iter()
+                .position(|g| *g as u8 == group as u8)
+                .expect("group is addressable") as u8
+    }
 
     /// Dummy slot for testing the generic grid without pulling in the drum
     /// catalogue. Uses the full 32-param layout so the grid's hard-coded slot
@@ -1165,29 +1220,14 @@ mod tests {
     }
 
     impl DeviceModel<32> for DummyId {
-        fn param_table(self) -> [ParamInfo; 32] {
-            let mut info = [ParamInfo {
-                name: "RESV",
-                abbrev: "RESV",
-                default: 0.0,
-                route: ParamRoute::Slot,
-            }; 32];
-            info[0] = ParamInfo {
-                name: "TUNE",
-                abbrev: "TUN",
-                default: 0.5,
-                route: ParamRoute::Slot,
-            };
-            info[1] = ParamInfo {
-                name: "DEC",
-                abbrev: "DEC",
-                default: 0.5,
-                route: ParamRoute::Slot,
-            };
-            info
+        fn param_table(self) -> &'static [ParamInfo; 32] {
+            &DUMMY_PARAMS
         }
         fn param_route(self, idx: usize) -> ParamRoute {
-            self.param_table()[idx].route
+            match DUMMY_PARAMS.get(idx) {
+                Some(info) => info.route,
+                None => ParamRoute::Slot,
+            }
         }
         fn label(self) -> &'static str {
             match self.0 {
@@ -1331,12 +1371,14 @@ mod tests {
         let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
 
         grid.screen = Screen::Parameter;
-        grid.page = 0; // Mixer page, row 5 = OUT enum.
+        // TRACK ordinal 1 is OUT, so page 0 row 1, which is grid row 2.
+        grid.group = 0;
+        grid.page = 0;
         grid.selected_track = 0;
 
-        // Tap column 5 in row 5 (second cluster of 4, so Aux1).
-        grid.process_event(GridEvent::PadDown { x: 5, y: 5 }, 0, &mut engine);
-        grid.process_event(GridEvent::PadUp { x: 5, y: 5 }, 0, &mut engine);
+        // Tap column 5 (second cluster of 4, so Aux1).
+        grid.process_event(GridEvent::PadDown { x: 5, y: 2 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x: 5, y: 2 }, 0, &mut engine);
 
         assert_eq!(engine.tracks[0].strip.out, crate::OutPair::Aux1);
     }
@@ -1347,20 +1389,163 @@ mod tests {
         let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
 
         grid.screen = Screen::Parameter;
-        grid.page = 0; // Mixer page, row 6 = CHOKE bitmask.
+        // Six TRACK rows fill page 0, so the synthetic choke row is the
+        // first row of page 1 — grid row 1.
+        grid.group = 0;
+        grid.page = 1;
         grid.selected_track = 0;
 
         // Toggle bit 3.
-        grid.process_event(GridEvent::PadDown { x: 3, y: 6 }, 0, &mut engine);
-        grid.process_event(GridEvent::PadUp { x: 3, y: 6 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadDown { x: 3, y: 1 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x: 3, y: 1 }, 0, &mut engine);
 
         assert_eq!(engine.tracks[0].strip.choke_mask & (1 << 3), 1 << 3);
 
         // Toggle again.
-        grid.process_event(GridEvent::PadDown { x: 3, y: 6 }, 0, &mut engine);
-        grid.process_event(GridEvent::PadUp { x: 3, y: 6 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadDown { x: 3, y: 1 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x: 3, y: 1 }, 0, &mut engine);
 
         assert_eq!(engine.tracks[0].strip.choke_mask & (1 << 3), 0);
+    }
+
+    #[test]
+    fn group_selector_switches_groups_and_resets_the_page() {
+        let mut grid = Grid::new();
+        let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
+
+        grid.screen = Screen::Parameter;
+        grid.page = 1;
+
+        let x = group_col(ParamGroup::Filter);
+        grid.process_event(GridEvent::PadDown { x, y: 0 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x, y: 0 }, 0, &mut engine);
+
+        assert_eq!(grid.active_group(), ParamGroup::Filter);
+        assert_eq!(grid.page, 0, "a group change starts at its first page");
+
+        // FILTER ordinal 0 is the strip cutoff, now on grid row 1.
+        grid.process_event(GridEvent::PadDown { x: 5, y: 1 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x: 5, y: 1 }, 0, &mut engine);
+        let expected = 40.0 / 127.0;
+        assert!(
+            (engine.tracks[0].base_params[SLOT_STRIP_CUT] - expected).abs() < 1e-6,
+            "cutoff should be 40/127, got {}",
+            engine.tracks[0].base_params[SLOT_STRIP_CUT]
+        );
+    }
+
+    #[test]
+    fn a_group_the_machine_does_not_use_is_not_selectable() {
+        let mut grid = Grid::new();
+        let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
+
+        grid.screen = Screen::Parameter;
+        let table = engine.tracks[0].id().param_table();
+        assert_eq!(group_len(table, ParamGroup::Shaper), 0, "fixture has none");
+
+        let x = group_col(ParamGroup::Shaper);
+        grid.process_event(GridEvent::PadDown { x, y: 0 }, 0, &mut engine);
+        grid.process_event(GridEvent::PadUp { x, y: 0 }, 0, &mut engine);
+
+        assert_eq!(
+            grid.active_group(),
+            ParamGroup::Track,
+            "an empty group leaves the selection where it was"
+        );
+    }
+
+    #[test]
+    fn a_page_tab_past_the_end_of_a_group_does_nothing() {
+        let mut grid = Grid::new();
+        let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
+
+        grid.screen = Screen::Parameter;
+        grid.group = ParamGroup::ADDRESSABLE
+            .iter()
+            .position(|g| *g as u8 == ParamGroup::Voice as u8)
+            .unwrap() as u8;
+
+        // VOICE has two rows here: page 1 and beyond are empty.
+        grid.process_event(
+            GridEvent::PadDown {
+                x: PAGE_COL_FIRST + 1,
+                y: 0,
+            },
+            0,
+            &mut engine,
+        );
+        grid.process_event(
+            GridEvent::PadUp {
+                x: PAGE_COL_FIRST + 1,
+                y: 0,
+            },
+            0,
+            &mut engine,
+        );
+        assert_eq!(grid.page, 0);
+
+        // TRACK's choke row spills onto page 1, which is reachable.
+        grid.group = 0;
+        grid.process_event(
+            GridEvent::PadDown {
+                x: PAGE_COL_FIRST + 1,
+                y: 0,
+            },
+            0,
+            &mut engine,
+        );
+        grid.process_event(
+            GridEvent::PadUp {
+                x: PAGE_COL_FIRST + 1,
+                y: 0,
+            },
+            0,
+            &mut engine,
+        );
+        assert_eq!(grid.page, 1);
+    }
+
+    #[test]
+    fn widgets_are_derived_from_the_parameter_kind() {
+        let table = &DUMMY_PARAMS;
+
+        // TRACK 0 is the machine selector: discrete over the catalogue.
+        let mach = page_widget(table, ParamGroup::Track, 0, 0).unwrap();
+        assert_eq!(mach.kind, WidgetKind::EnumSelector { count: 2 });
+        assert_eq!(mach.label, "MCH");
+
+        // TRACK 2 is pan: bipolar, drawn outward from the centre.
+        let pan = page_widget(table, ParamGroup::Track, 0, 2).unwrap();
+        assert_eq!(pan.kind, WidgetKind::BipolarPan);
+
+        // A machine row is an ordinary fader.
+        let tune = page_widget(table, ParamGroup::Voice, 0, 0).unwrap();
+        assert_eq!(tune.kind, WidgetKind::UnipolarFader);
+        assert_eq!(tune.target, ParamTarget::Param(0));
+
+        // The LFO destination is discrete over ModDest.
+        let dest = page_widget(table, ParamGroup::Lfo, 0, 2).unwrap();
+        assert_eq!(
+            dest.kind,
+            WidgetKind::EnumSelector {
+                count: crate::dsp::ModDest::COUNT as u8
+            }
+        );
+
+        // Past the end of a group there is no row at all.
+        assert!(page_widget(table, ParamGroup::Voice, 0, 2).is_none());
+        assert!(page_widget(table, ParamGroup::Shaper, 0, 0).is_none());
+    }
+
+    #[test]
+    fn the_choke_row_follows_the_track_group() {
+        let table = &DUMMY_PARAMS;
+        let n = group_len(table, ParamGroup::Track);
+        assert_eq!(n, 6);
+        // Ordinal 6 = page 1, row 0.
+        let choke = page_widget(table, ParamGroup::Track, 1, 0).unwrap();
+        assert_eq!(choke.target, ParamTarget::ChokeMask);
+        assert!(page_widget(table, ParamGroup::Track, 1, 1).is_none());
     }
 
     #[test]
@@ -1369,7 +1554,12 @@ mod tests {
         let mut engine = DummyEngine::new_with_kit(&[DummyId(0), DummyId(1)]);
 
         grid.screen = Screen::Parameter;
-        grid.page = 1; // Strip page, row 1 = STRIP.CUTOFF.
+        // FILTER ordinal 0 is the strip cutoff, on grid row 1.
+        grid.group = ParamGroup::ADDRESSABLE
+            .iter()
+            .position(|g| *g as u8 == ParamGroup::Filter as u8)
+            .unwrap() as u8;
+        grid.page = 0;
         grid.selected_track = 0;
 
         // Hold column 5 row 1 for long enough, then drag to row 3 in same column.
@@ -1417,8 +1607,8 @@ mod tests {
 
         // Mixer render should emit updates for the left faders and right buttons.
         assert!(n > 0);
-        for i in 0..n {
-            assert_eq!(buf[i].0, MIDIGRID_CHANNEL);
+        for event in &buf[..n] {
+            assert_eq!(event.0, MIDIGRID_CHANNEL);
         }
     }
 
@@ -1456,11 +1646,11 @@ mod tests {
         let mut t = REFRESH_MS + 1;
         for _ in 0..(NUM_PADS / MAX_SENDS_PER_RENDER + 4) {
             let mut buf = [(0u8, 0u8, 0u8); 128];
-            let n = collect_events(&mut grid, &mut engine, t as u32, &mut buf);
+            let n = collect_events(&mut grid, &mut engine, t, &mut buf);
             total += n;
-            for i in 0..n {
-                assert_eq!(buf[i].0, MIDIGRID_CHANNEL);
-                let note = buf[i].1 as usize;
+            for event in &buf[..n] {
+                assert_eq!(event.0, MIDIGRID_CHANNEL);
+                let note = event.1 as usize;
                 assert!(note < NUM_PADS);
                 seen[note] = true;
             }

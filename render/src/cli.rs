@@ -232,10 +232,10 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 1.5)]
         per_machine: f32,
     },
-    /// Print a cheat-sheet of every param slot, split into one table for the
-    /// common (track-routed) parameters and one table per machine for the
-    /// machine-internal parameters. Generated from `MACHINE_INFO` in the
-    /// engine, so it can't drift from the code.
+    /// Print a cheat-sheet of every parameter and its NRPN `(group, index)`
+    /// address, split into one table for the parameters every machine
+    /// shares and one per machine for its own. Generated from
+    /// `MACHINE_INFO` in the engine, so it can't drift from the code.
     ///
     /// `--format html` produces a self-contained styled HTML page; the
     /// default is markdown.

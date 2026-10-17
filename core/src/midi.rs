@@ -7,17 +7,14 @@
 //!
 //! [`handle_midi`], [`apply_cc`] and [`schedule_midi`] are generic over
 //! [`DeviceEngine`](crate::engine::DeviceEngine) so every device interprets
-//! MIDI bytes the same way. Device-specific routing (for example, which param
-//! slot swaps the machine) is handled inside the engine's `set_param_target`;
-//! the router itself only knows the flat param index and the track count.
+//! MIDI bytes the same way.
 //!
-//! # Control surface: CC, and NRPN over it
+//! # Control surface: NRPN
 //!
-//! Two address spaces reach the same `Track::set_param_target`. The flat
-//! param map — channel `N`, CC [`CC_TRACK_BASE` + flat] sets track `N`'s
-//! param — is the address the Deluge and the firmware knobs speak. NRPN
-//! addresses the same params as `(group, index)` (`ParamId`, resolved
-//! through [`resolve`](crate::params::resolve)) at 14-bit resolution.
+//! Parameters are addressed as `(group, index)` — a [`ParamId`], resolved
+//! against the track's machine table through
+//! [`resolve`](crate::params::resolve) — at 14-bit resolution. MIDI channel
+//! `N` selects track `N`, matching the note routing.
 //!
 //! The NRPN machine lives in [`MidiParser`], because the selection is
 //! per-channel state the byte stream carries between messages:
@@ -38,27 +35,37 @@
 //! [`apply_nrpn_step`], which resolve the address against the track's
 //! *machine* table (group membership is per machine: VOICE has four rows on
 //! Peaks and nine on Plaits, and only the track knows which is loaded).
-//! Both paths end at the same `set_param_target`, so a param edited by a
-//! CC or by an NRPN behaves identically, smoother included.
+//! Both paths end at `set_param_target`, so the smoother treats an NRPN
+//! edit exactly as it treated a CC one.
 //!
-//! All eight CCs are spec-assigned NRPN/RPN/data-entry controls, so the
-//! parser consumes them outright: they never fall through to the CC param
-//! map, CC 38 included, which the flat map used as pan until phase F
-//! removes the map. `apply_cc` is unchanged; the wire no longer carries
-//! CC 38.
+//! # What is left on plain CC
+//!
+//! Three controllers, and nothing else:
+//!
+//! | CC         | Role |
+//! |------------|------|
+//! | 7          | master gain, global on any channel |
+//! | 120, 123   | panic — all sound / all notes off, any channel |
+//!
+//! The flat `CC 20 + index` parameter map is **gone** (phase F of #1). It
+//! was 7-bit, which is too coarse for a resonant filter cutoff or a shaper
+//! drive, and exactly 32 entries wide, which mi-drum had already outgrown.
+//! Its removal is what makes the flat index an internal detail: nothing
+//! outside the engine addresses it any more, so the layout can be
+//! reorganised without breaking a controller mapping. See
+//! [`crate::params`].
+//!
+//! Every CC the NRPN machine owns is a MIDI-spec-assigned NRPN/RPN/data-entry
+//! control, so the parser consumes all eight outright and none reaches
+//! [`apply_cc`].
 
 use crate::engine::DeviceEngine;
-use crate::params::{resolve, ParamGroup, ParamId};
+use crate::params::{resolve, ParamGroup, ParamId, ParamInfo, ParamKind};
 use crate::slot::DeviceModel;
 
 /// MIDI note that plays a track at its param-configured pitch. Middle C.
 /// Every semitone away transposes the voice by that many semitones.
 pub const CHROMATIC_REFERENCE_NOTE: u8 = 60;
-
-/// First CC number reserved for track params. On channel `N`, CC
-/// `CC_TRACK_BASE..CC_TRACK_BASE + NUM_PARAMS` sets track `N`'s params, where
-/// `NUM_PARAMS` is the device's own count.
-pub const CC_TRACK_BASE: u8 = 20;
 
 /// CC for the master gain. Following MIDI convention. Global on any channel.
 pub const CC_MASTER_GAIN: u8 = 7;
@@ -98,8 +105,9 @@ const NRPN_NO_SELECTION: u8 = ParamGroup::Reserved as u8;
 /// picks the track, the note picks the pitch. `NoteOff` routes through
 /// [`DeviceEngine::release_channel`], the same channel-to-track mapping, so a
 /// voice that sustains ends when the key comes up.
-/// `ControlChange` reaches that channel's track-param block or the master
-/// gain. `Panic` silences everything.
+/// `ControlChange` reaches the master gain, the only parameter still on a
+/// plain CC. `Nrpn` / `NrpnStep` reach a track parameter by its
+/// `(group, index)` address. `Panic` silences everything.
 pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: MidiEvent) {
     match event {
         MidiEvent::NoteOn {
@@ -143,31 +151,26 @@ pub fn handle_midi<E: DeviceEngine<N>, const N: usize>(engine: &mut E, event: Mi
     }
 }
 
-/// Map CC numbers onto engine parameters — channel-scoped track params +
-/// master.
+/// Apply a plain (non-NRPN) control change.
 ///
-/// A CC on channel `N` edits track `N`, matching the note routing. `CC 7`
-/// stays global. Params are set through the track's `set_param_target` so
-/// the value ramps to its target at block rate inside the audio callback's
-/// control pass.
+/// Only [`CC_MASTER_GAIN`] does anything: it is global, on any channel, and
+/// it is the sole parameter that is not addressed as `(group, index)`
+/// because it is not a track parameter. Panic (CC 120/123) never reaches
+/// here — the parser turns it into [`MidiEvent::Panic`] — and the
+/// NRPN/RPN/data-entry controls are consumed by the parser too.
+///
+/// `channel` is accepted and ignored, so the signature still matches the
+/// other routers and a caller does not have to special-case the one CC that
+/// is channel-independent.
 pub fn apply_cc<E: DeviceEngine<N>, const N: usize>(
     engine: &mut E,
     channel: u8,
     controller: u8,
     value: f32,
 ) {
+    let _ = channel;
     if controller == CC_MASTER_GAIN {
         engine.set_master_gain(value);
-        return;
-    }
-
-    if controller >= CC_TRACK_BASE {
-        let param_idx = (controller - CC_TRACK_BASE) as usize;
-        let track = channel as usize;
-        let n_tracks = engine.tracks().len();
-        if track < n_tracks && param_idx < N {
-            engine.tracks_mut()[track].set_param_target(param_idx, value);
-        }
     }
 }
 
@@ -190,36 +193,63 @@ fn nrpn_id(group: u8, index: u8) -> Option<ParamId> {
 ///
 /// The scan is control-rate, so the linear lookup is deliberate: a
 /// `GROUP_BASE`-style table would make it O(1) but force every group's
-/// rows contiguous, which would reorder the flat array the CC map
-/// addresses.
+/// rows contiguous, for a saving that rounds to zero.
+///
+/// Returns the track index, the flat param index, and the row — callers
+/// need the row's [`ParamKind`] to quantise the value.
 fn resolve_track_param<E: DeviceEngine<N>, const N: usize>(
     engine: &E,
     channel: u8,
     id: ParamId,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, ParamInfo)> {
     let track = channel as usize;
     let table = engine.tracks().get(track)?.id().param_table();
-    let idx = resolve(&table, id)?;
-    Some((track, idx))
+    let idx = resolve(table, id)?;
+    Some((track, idx, table[idx]))
+}
+
+/// Normalise a raw 14-bit NRPN value onto `0..=1` for one parameter.
+///
+/// A [`ParamKind::Discrete`] row snaps: the 14-bit value picks the nearest
+/// of `count` options and the parameter is set to that option's exact
+/// value, `k / (count - 1)`. Without the snap, a controller sending a
+/// value one LSB off a boundary lands between two options and the engine's
+/// own quantiser decides which — reproducibly, but not predictably from
+/// the wire. With it, selecting machine 7 of 15 means sending anything
+/// inside that option's 1/14th of the range.
+///
+/// Continuous and bipolar rows divide by [`NRPN_MAX`] and keep every one of
+/// the 16,384 steps, which is the whole point of the 14-bit address.
+fn nrpn_value(info: &ParamInfo, raw: u16) -> f32 {
+    match info.kind {
+        ParamKind::Discrete { count } if count > 1 => {
+            let steps = (count - 1) as u32;
+            // Round-to-nearest without `f32::round`, which is std-only.
+            let k = (raw as u32 * steps + NRPN_MAX as u32 / 2) / NRPN_MAX as u32;
+            k.min(steps) as f32 / steps as f32
+        }
+        _ => raw.min(NRPN_MAX) as f32 / NRPN_MAX as f32,
+    }
 }
 
 /// Set one parameter from an NRPN data entry.
 ///
-/// The raw 14-bit value is normalized once, here, against [`NRPN_MAX`]:
-/// discrete parameters can later be quantised exactly from the raw `u16`
-/// (there is more information in it than in an `f32` in `0..1`), and the
-/// value is set through the same [`set_param_target`](crate::track::Track::set_param_target)
-/// a CC takes — identical smoother, identical routing, identical ramp.
+/// The raw 14-bit value is normalised once, here, by [`nrpn_value`]: a
+/// discrete row snaps onto an exact option, everything else keeps all
+/// 16,384 steps. The result goes through
+/// [`set_param_target`](crate::track::Track::set_param_target), so routing
+/// and smoothing are the same as for any other way of setting the
+/// parameter.
 pub fn apply_nrpn<E: DeviceEngine<N>, const N: usize>(
     engine: &mut E,
     channel: u8,
     id: ParamId,
     value: u16,
 ) {
-    let Some((track, idx)) = resolve_track_param(engine, channel, id) else {
+    let Some((track, idx, info)) = resolve_track_param(engine, channel, id) else {
         return;
     };
-    let v = value as f32 / NRPN_MAX as f32;
+    let v = nrpn_value(&info, value);
     engine.tracks_mut()[track].set_param_target(idx, v);
 }
 
@@ -237,15 +267,32 @@ pub fn apply_nrpn<E: DeviceEngine<N>, const N: usize>(
 /// The step magnitude is whatever the data byte carried, unmodified by
 /// any engine-side scaling: acceleration is the controller's curve, which
 /// is what keeps the engine free of per-param timing state.
+///
+/// A [`ParamKind::Discrete`] parameter is the exception: there, only the
+/// *sign* is read and the value moves one option. An encoder detent should
+/// advance the machine selector by one machine, and a magnitude in LSBs
+/// would either do nothing (one LSB is far inside an option's width) or
+/// jump an arbitrary distance once the controller's acceleration engaged.
 pub fn apply_nrpn_step<E: DeviceEngine<N>, const N: usize>(
     engine: &mut E,
     channel: u8,
     id: ParamId,
     step: i16,
 ) {
-    let Some((track, idx)) = resolve_track_param(engine, channel, id) else {
+    let Some((track, idx, info)) = resolve_track_param(engine, channel, id) else {
         return;
     };
+    // A discrete parameter steps by options, not by LSBs: one detent of an
+    // encoder should advance the machine selector by one machine, not by
+    // 1/16383 of the catalogue, which rounds back to where it started.
+    if let Some(count) = info.option_count() {
+        let steps = (count - 1) as i32;
+        let current = engine.tracks()[track].param_target(idx);
+        let k = (current * steps as f32 + 0.5) as i32 + (step.signum() as i32);
+        let v = k.clamp(0, steps) as f32 / steps as f32;
+        engine.tracks_mut()[track].set_param_target(idx, v);
+        return;
+    }
     let current = engine.tracks()[track].param_target(idx);
     // +0.5 then truncate: round-to-nearest, matching the `set_param` Out
     // route's quantisation style (`round` is std-only in a no_std world).
@@ -502,8 +549,7 @@ impl MidiParser {
                     return Some(MidiEvent::Panic);
                 }
                 // The NRPN CCs are spec-assigned controls, so the parser
-                // consumes every one of them outright — none falls through
-                // to the CC param map, CC 38 included.
+                // consumes every one of them outright.
                 if is_nrpn_cc(controller) {
                     return self.nrpn_message(channel, controller, value);
                 }
@@ -602,9 +648,7 @@ impl MidiParser {
 /// True for the CCs the NRPN state machine owns.
 ///
 /// Every one is a MIDI-spec-assigned NRPN/RPN/data-entry control, so they
-/// never reach [`apply_cc`] — including CC 38, which the flat param map
-/// used as pan before phase F removes the map. The param map runs
-/// CC 20..=51, and 96..=101 sits above it, so 38 was the only collision.
+/// never reach [`apply_cc`].
 fn is_nrpn_cc(controller: u8) -> bool {
     matches!(
         controller,
@@ -1020,8 +1064,7 @@ mod tests {
     }
 
     /// No selection: a data entry (CC 6/38) or a step (CC 96/97) is
-    /// consumed and dropped. It must not reach the CC map either — CC 38
-    /// was the map's pan entry until phase F removes the map.
+    /// consumed and dropped rather than landing on TRACK 0.
     #[test]
     fn nrpn_data_without_a_selection_is_ignored() {
         let mut p = MidiParser::new();

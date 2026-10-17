@@ -427,7 +427,8 @@ where
         let route = self.slot.id().param_route(idx);
         match route {
             // Machine selector: quantise 0..1 onto the slot catalogue.
-            // Track-routed, so CC 25 swaps engines without a program change.
+            // Track-routed, so `(TRACK, 0)` swaps engines without a
+            // program change.
             // Loading a different slot resets params to its defaults — the
             // old voice's param values mean nothing on the new one.
             ParamRoute::Machine => {
@@ -553,7 +554,15 @@ where
         if idx >= N {
             return;
         }
-        if idx == SLOT_MACHINE || idx == SLOT_OUT {
+        // The two instant routes bypass the smoother: ramping a discrete
+        // choice would walk a track through every output pair, or load
+        // every machine between here and the target. Dispatched on the
+        // route rather than on a flat index, so a device that puts them
+        // elsewhere in its table still gets the jump.
+        if matches!(
+            self.slot.id().param_route(idx),
+            ParamRoute::Machine | ParamRoute::Out
+        ) {
             self.set_param(idx, value);
             return;
         }
@@ -708,14 +717,14 @@ where
             self.pan_r = r;
         }
         // Mirror the aux levels into the send params so a strip edit keeps the
-        // param view (MIDI CC 41/42) consistent. The send params are the
+        // param view consistent. The send params are the
         // routing authority; the strip fields are derived storage.
         self.base_params[SLOT_SEND_DELAY] = params.send_delay;
         self.base_params[SLOT_SEND_REVERB] = params.send_reverb;
         // Mirror the strip pan into the PAN param slot so a strip edit keeps
-        // the param view (MIDI CC 37) consistent, like the sends.
+        // the param view consistent, like the sends.
         self.base_params[SLOT_PAN] = params.pan * 0.5 + 0.5;
-        // Mirror routing into the OUT param slot (MIDI CC 46). Same shape as
+        // Mirror routing into the OUT param slot. Same shape as
         // `set_param(SLOT_OUT)`: the param view shows the canonical centre of
         // the variant, so MIDI feedback reports the value the user expects.
         self.base_params[SLOT_OUT] = params.out.index() as f32 / (OutPair::COUNT - 1) as f32;

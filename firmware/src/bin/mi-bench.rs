@@ -116,8 +116,9 @@ use teensy4_panic as _;
 
 use cortex_m::peripheral::DWT;
 use mi_drum_engine::{
-    DeviceEngine, MiDrumEngine, SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0,
-    SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_DRIVE, BLOCK, SAMPLE_RATE, TRACKS,
+    seed_random, DeviceEngine, MiDrumEngine, DEFAULT_RANDOM_SEED, SLOT_AD_FILTER_DEPTH,
+    SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_LFO_FILTER_DEPTH, SLOT_LFO_SHAPER_DEPTH,
+    SLOT_SHAPER_DRIVE, BLOCK, SAMPLE_RATE, TRACKS,
 };
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
@@ -456,6 +457,25 @@ fn measure(
     // state only), so the scenarios that set those before calling in here are
     // unaffected -- see `measure_fx_only`, which already relied on that.
     engine.panic();
+
+    // Reseed the noise generator every scenario.
+    //
+    // `stmlib::Random` is one process-global LCG shared by every Plaits
+    // engine, and nothing in the firmware ever seeded it, so where a
+    // scenario started in the sequence depended on how many draws the
+    // scenarios before it had made -- which depends on how many voices
+    // were sounding, which is the thing being measured. The symptom was
+    // the stochastic scenarios (`1/2/4 sounding`, `6 no SHAPE`, the FX and
+    // MOD variants) varying by up to ~50k cycles between runs of an
+    // *identical binary*, with values occasionally recurring exactly
+    // across different ones: carried-over generator state, not code.
+    //
+    // Seeding here, after the reset and before the warm-up pass, makes
+    // every scenario start from the same noise and makes the whole sweep
+    // comparable between builds. It does change the absolute numbers
+    // against any pre-seeding baseline, which is the point: those were not
+    // measuring one thing.
+    seed_random(DEFAULT_RANDOM_SEED);
 
     // One untimed pass so the branch predictor and caches are warm. Matters
     // more here than on the drum device: the first pass also forces each

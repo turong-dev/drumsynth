@@ -190,8 +190,11 @@ fn daw_note_on_triggers_the_engine() {
 }
 
 #[test]
-fn daw_cc_reaches_the_track_param_grid() {
-    let port_name = port_name("cc");
+fn daw_nrpn_reaches_the_track_params() {
+    use drum_engine::machines::ParamGroup;
+    use drum_engine::midi::NRPN_MAX;
+
+    let port_name = port_name("nrpn");
     let (_in_conn, mut consumer) = spawn_device_input(&port_name);
 
     let out = MidiOutput::new("drumkit-engine-test-out").unwrap();
@@ -202,49 +205,88 @@ fn daw_cc_reaches_the_track_param_grid() {
         .unwrap();
     let mut conn = out.connect(&port, "drumkit-engine-test-sender").unwrap();
 
-    // CC 20 + 3 → track 0, param 3 (SWEEP). Value 64 → 0.5.
-    conn.send(&[0xB0, 23, 64]).unwrap();
+    // A full NRPN transaction the way a controller sends one: select
+    // (VOICE, 4) — BD Classic's DRIVE, flat 7 — then the data pair.
+    // (64 << 7) | 0 = 8192, half scale.
+    //
+    // One CoreMIDI packet per message, not one packet with running status:
+    // that is what a controller emits, and midir validates each `send` as a
+    // single well-formed message.
+    let voice = ParamGroup::Voice as u8;
+    for msg in [
+        [0xB0, 99, voice],
+        [0xB0, 98, 4],
+        [0xB0, 6, 64],
+        [0xB0, 38, 0],
+    ] {
+        conn.send(&msg).unwrap();
+    }
 
-    let ev = pop_timeout(&mut consumer, Duration::from_secs(2)).expect("CC never reached the ring");
-    let MidiEvent::ControlChange {
-        controller, value, ..
+    // CC 99 and CC 98 are consumed by the parser and emit nothing; the two
+    // data messages each produce an event.
+    let ev = pop_timeout(&mut consumer, Duration::from_secs(2))
+        .expect("the data MSB never reached the ring");
+    let MidiEvent::Nrpn {
+        channel,
+        group,
+        index,
+        value,
     } = ev
     else {
-        panic!("expected ControlChange, got {ev:?}");
+        panic!("expected Nrpn, got {ev:?}");
     };
-    assert_eq!(controller, 23);
-    assert!((value - 64.0 / 127.0).abs() < 1e-3);
+    assert_eq!((channel, group, index), (0, voice, 4));
+    // MSB alone is the coarse value, 64<<7 | 64.
+    assert_eq!(value, (64 << 7) | 64);
+
+    let ev = pop_timeout(&mut consumer, Duration::from_secs(2))
+        .expect("the data LSB never reached the ring");
+    let MidiEvent::Nrpn { value, .. } = ev else {
+        panic!("expected Nrpn, got {ev:?}");
+    };
+    assert_eq!(value, 64 << 7, "the LSB recomputes the full 14-bit value");
 
     let mut engine = DrumEngine::new();
     handle_midi(&mut engine, ev);
     // Track params are block-rate smoothed (see the midi module docs): the
     // base param must not jump to the target instantly, so converge the
     // smoother before asserting the final value.
+    let target = 8192.0 / NRPN_MAX as f32;
     assert!(
-        (engine.tracks[0].base_params[3] - value).abs() > 0.3,
-        "CC should not apply instantly — it is block-rate smoothed"
+        (engine.tracks[0].base_params[7] - target).abs() > 0.3,
+        "an NRPN value should not apply instantly — it is block-rate smoothed"
     );
     for _ in 0..200 {
         engine.tracks[0].control();
     }
-    assert_eq!(engine.tracks[0].base_params[3], value);
+    assert_eq!(engine.tracks[0].base_params[7], target);
 
-    // Same CC on channel 3 edits track 3 only — channel scoping over the wire.
-    conn.send(&[0xB3, 23, 32]).unwrap();
+    // The same address on channel 3 edits track 3 only — channel scoping
+    // over the wire, with its own per-channel selection state in the parser.
+    for msg in [
+        [0xB3, 99, voice],
+        [0xB3, 98, 4],
+        [0xB3, 6, 32],
+        [0xB3, 38, 0],
+    ] {
+        conn.send(&msg).unwrap();
+    }
+    // Drop the coarse event, keep the 14-bit one.
+    let _ = pop_timeout(&mut consumer, Duration::from_secs(2))
+        .expect("the channel-3 data MSB never reached the ring");
     let ev = pop_timeout(&mut consumer, Duration::from_secs(2))
-        .expect("channel-3 CC never reached the ring");
-    let MidiEvent::ControlChange { channel, value, .. } = ev else {
-        panic!("expected ControlChange, got {ev:?}");
+        .expect("the channel-3 data LSB never reached the ring");
+    let MidiEvent::Nrpn { channel, .. } = ev else {
+        panic!("expected Nrpn, got {ev:?}");
     };
     assert_eq!(channel, 3);
     handle_midi(&mut engine, ev);
     for _ in 0..200 {
         engine.tracks[3].control();
     }
-    assert_eq!(engine.tracks[3].base_params[3], value);
+    assert_eq!(engine.tracks[3].base_params[7], 4096.0 / NRPN_MAX as f32);
     assert_eq!(
-        engine.tracks[0].base_params[3],
-        64.0 / 127.0,
+        engine.tracks[0].base_params[7], target,
         "channel 3 must not touch track 0"
     );
 }

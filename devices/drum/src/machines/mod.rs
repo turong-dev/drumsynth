@@ -11,6 +11,14 @@ pub use device_core::params::*;
 /// machine's parameter table, and of the track's smoothing state.
 pub const NUM_PARAMS: usize = 32;
 
+/// This device's machine-selector row.
+///
+/// [`device_core::params::mach_info`] takes the catalogue size because it
+/// is the one per-device part of the row: a control surface draws the
+/// selector from it, and NRPN quantises onto it, without either knowing
+/// what a drum machine is.
+pub const MACH_INFO: ParamInfo = mach_info(MachineId::COUNT as u8);
+
 pub mod bd_classic;
 pub mod bd_fm;
 pub mod bd_va;
@@ -156,17 +164,20 @@ impl MachineId {
     }
 
     /// Params this machine exposes, with their default values.
-    pub fn params(self) -> [ParamInfo; NUM_PARAMS] {
-        MACHINE_INFO[self.index()].params
+    ///
+    /// Borrowed from the static table: the callers that walk it (NRPN
+    /// address resolution, the grid) read one row and should not copy 32.
+    pub fn params(self) -> &'static [ParamInfo; NUM_PARAMS] {
+        &MACHINE_INFO[self.index()].params
     }
 
     /// Look up a param's metadata by name. Case-insensitive, ASCII only.
     pub fn param_by_name(self, name: &str) -> Option<(usize, ParamInfo)> {
-        for (i, m) in self.params().into_iter().enumerate() {
+        for (i, m) in self.params().iter().enumerate() {
             // `eq_ignore_ascii_case` is core-only; `to_ascii_lowercase`
             // would allocate and break the no-alloc contract.
             if m.name.eq_ignore_ascii_case(name.trim()) {
-                return Some((i, m));
+                return Some((i, *m));
             }
         }
         None
@@ -176,7 +187,7 @@ impl MachineId {
     /// `Track::set_params`.
     pub fn default_params(self) -> [f32; NUM_PARAMS] {
         let mut out = [0.0f32; NUM_PARAMS];
-        for (i, m) in self.params().into_iter().enumerate() {
+        for (i, m) in self.params().iter().enumerate() {
             out[i] = m.default;
         }
         out
@@ -1064,7 +1075,7 @@ mod tests {
     fn every_machine_has_named_params_and_defaults() {
         for m in MachineId::ALL {
             let params = m.params();
-            for info in &params {
+            for info in params {
                 assert!(!info.name.is_empty(), "empty name on {m:?}");
                 assert!(
                     info.default >= 0.0 && info.default <= 1.0,

@@ -29,7 +29,7 @@
 //! 8 sounding ...                                  (worst case, no FX)
 //! fx idle  ...                                    (FX advanced, no sends)
 //! 8 + FX   ...                                    (worst case with delay + reverb)
-//! 8+FX+CC   ...                                    (…plus a CC automation lane)
+//! 8+FX+NRPN ...                                  (…plus a param automation lane)
 //! 8+FX+SWFX ...  (Phase 12: one track a sustained SweepFx, worst case)
 //! ```
 //!
@@ -41,13 +41,22 @@
 //! callback has to make its deadline every single time, and an average that
 //! fits while the peak does not is a click you will hear.
 //!
-//! `8+FX+CC` is the Phase 8-M regate: the first four scenarios are
+//! `8+FX+NRPN` is the Phase 8-M regate: the first four scenarios are
 //! steady-state, with params parked at their values so `control()` takes its
 //! single-branch early return every block. Real MIDI moves params, and every
-//! moving param costs one coefficient recompute per block (the block-rate CC
-//! smoother re-arms itself on every message). The regate drives `apply_cc` —
-//! the exact main-loop API — every block on top of the full playing + FX
-//! case, so the number it reports is what the Deluge actually asks for.
+//! moving param costs one coefficient recompute per block (the block-rate
+//! smoother re-arms itself on every message). The regate drives
+//! `apply_nrpn` — the exact main-loop API — every block on top of the full
+//! playing + FX case, so the number it reports is what a controller
+//! actually asks for.
+//!
+//! It was `8+FX+CC` and drove `apply_cc` until the flat CC param map was
+//! removed (phase F of #1). The measured path is not the same one: NRPN
+//! resolves a `(group, index)` address against the machine table before it
+//! reaches the smoother, so this scenario now includes a linear scan the CC
+//! version did not. The label changed with it, deliberately — a run
+//! diffed against a pre-F baseline should report the scenario as missing
+//! rather than quietly compare two different code paths.
 //!
 //! `8 + BD VA` is the Phase 11 regate: track 0 swapped to the virtual-analogue
 //! bridged-T kick, configured for its worst case — full pitch sweep, deep
@@ -223,14 +232,14 @@ fn main() -> ! {
         let with_fx = measure_with_fx(&mut *engine, &mut left, &mut right);
         report("8 + FX    ", with_fx, &mut poller, &mut pit);
 
-        // --- Phase 8-M regate: playing + FX + CC automation ---
+        // --- Phase 8-M regate: playing + FX + param automation ---
         // Everything the groove box does at once: all 8 tracks retriggered,
         // sends routed, and a filter-param automation lane moved every block
-        // through `apply_cc`. This is the case the "must fit in the remaining
-        // ~32%" gate is really about (see the first four scenarios, which are
-        // steady-state and never exercise the CC recompute path).
-        let with_cc = measure_with_cc_automation(&mut *engine, &mut left, &mut right);
-        report("8+FX+CC   ", with_cc, &mut poller, &mut pit);
+        // through `apply_nrpn`. This is the case the "must fit in the
+        // remaining ~32%" gate is really about (see the first four scenarios,
+        // which are steady-state and never exercise the recompute path).
+        let with_params = measure_with_param_automation(&mut *engine, &mut left, &mut right);
+        report("8+FX+NRPN ", with_params, &mut poller, &mut pit);
 
         // --- Phase 11 regate: 8 tracks with BdVa on track 0, worst case ---
         // Swap track 0 (BdClassic in the default kit) for BdVa configured
@@ -426,26 +435,37 @@ fn measure_with_fx(
     }
 }
 
-/// The Phase 8-M regate: playing + FX + CC automation, all at once.
+/// The Phase 8-M regate: playing + FX + param automation, all at once.
 ///
 /// The steady-state scenarios above park params at their values, so
-/// `control()` early-returns every block and the CC recompute path is never
+/// `control()` early-returns every block and the recompute path is never
 /// exercised. Real MIDI moves params, and every moving param costs one
 /// coefficient recompute per block — `set_param_target` re-arms the
 /// block-rate smoother on each message, so a lane that is driven every block
 /// recomputes every block, forever.
 ///
-/// This drives `apply_cc` — the exact main-loop API, routing through the
+/// This drives `apply_nrpn` — the exact main-loop API, routing through the
 /// shared `midi` module just like the firmware and the host harness — on
-/// track 0's filter-cutoff param while all 8 tracks retrigger and the sends
+/// track 0's strip-cutoff param while all 8 tracks retrigger and the sends
 /// stay routed, the composite case the "remaining ~32%" gate in the plan is
-/// really about.
-fn measure_with_cc_automation(
+/// really about. The address resolution (a scan of the 32-row machine
+/// table) is inside the measured region on purpose: it is work the device
+/// does per message now, and leaving it out would understate the cost of
+/// the control plane.
+fn measure_with_param_automation(
     engine: &mut DrumEngine,
     left: &mut [f32; BLOCK],
     right: &mut [f32; BLOCK],
 ) -> Stats {
-    use drum_engine::midi::{apply_cc, CC_TRACK_BASE};
+    use drum_engine::machines::{ParamGroup, ParamId};
+    use drum_engine::midi::{apply_nrpn, NRPN_MAX};
+
+    // `(FILTER, 0)` is the strip cutoff — flat 12 under the drum device's
+    // layout, which is the param the CC version of this scenario drove.
+    let id = ParamId {
+        group: ParamGroup::Filter,
+        index: 0,
+    };
 
     // Punch in sends for tracks 1 and 4, mirroring `measure_with_fx`.
     set_send(engine, 1, 0.0, 0.5);
@@ -456,12 +476,17 @@ fn measure_with_cc_automation(
 
     engine.process(left, right);
 
-    // One filter-cutoff automation lane (param 12 → CC 32 on the track's
-    // channel). The value sweeps 0.1..0.9 in 1/127 steps — CC resolution,
-    // bouncing at the ends — so the smoother is re-armed and mid-ramp on
-    // every block, one recompute per block, exactly what a knob being spun
-    // in real time does.
-    let mut cc_val = 0.1f32;
+    // One strip-cutoff automation lane on track 0's channel. The value
+    // sweeps 0.1..0.9 in 1/127 steps — bouncing at the ends — so the
+    // smoother is re-armed and mid-ramp on every block, one recompute per
+    // block, exactly what a knob being spun in real time does. The step
+    // size is deliberately the old 7-bit one: this scenario is about the
+    // per-block recompute, not about resolution, and a 14-bit step would
+    // settle inside one block and measure nothing.
+    let lo = (0.1 * NRPN_MAX as f32) as u16;
+    let hi = (0.9 * NRPN_MAX as f32) as u16;
+    let step = (NRPN_MAX as u32 / 127) as u16;
+    let mut value = lo;
     let mut rising = true;
 
     for _ in 0..RUNS {
@@ -471,14 +496,19 @@ fn measure_with_cc_automation(
             t += 1;
         }
 
-        apply_cc(engine, 0, CC_TRACK_BASE + 12, cc_val);
-        cc_val += if rising { 1.0 / 127.0 } else { -(1.0 / 127.0) };
-        if cc_val > 0.9 {
-            cc_val = 0.9;
-            rising = false;
-        } else if cc_val < 0.1 {
-            cc_val = 0.1;
-            rising = true;
+        apply_nrpn(engine, 0, id, value);
+        if rising {
+            value += step;
+            if value >= hi {
+                value = hi;
+                rising = false;
+            }
+        } else {
+            value -= step;
+            if value <= lo {
+                value = lo;
+                rising = true;
+            }
         }
 
         let start = DWT::cycle_count();

@@ -35,7 +35,12 @@ pub trait SlotId<const N: usize>: Copy + Eq + Debug {
 pub trait DeviceModel<const N: usize>: SlotId<N> {
     /// Per-param metadata for the machine identified by `self` — the device's
     /// parameter table, one row per param slot.
-    fn param_table(self) -> [ParamInfo; N];
+    ///
+    /// Borrowed rather than returned by value: the table is a `static` on
+    /// both devices, and the callers that walk it — NRPN address resolution
+    /// on every data message, the grid on every render — would otherwise
+    /// copy 33 rows to read one.
+    fn param_table(self) -> &'static [ParamInfo; N];
 
     /// Where param `idx`'s value goes when it is set — the dispatch datum for
     /// [`Track::set_param`](crate::track::Track::set_param).

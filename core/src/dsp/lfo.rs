@@ -92,13 +92,21 @@ pub enum ModDest {
 }
 
 impl ModDest {
+    /// Number of positions [`from_param`](Self::from_param) quantises onto.
+    ///
+    /// The destination param rows carry this as their
+    /// [`ParamKind::Discrete`](crate::params::ParamKind::Discrete) count, so
+    /// a control surface and an NRPN sender land on the same steps the
+    /// quantiser does.
+    pub const COUNT: usize = 16;
+
     /// Quantise a normalised `0..1` param value onto a [`ModDest`].
     ///
     /// Sixteen steps, evenly spaced: the eight param knobs, then the strip
     /// destinations, then [`ModDest::None`] as a final "off" position. This is
     /// the mapping the LFO-destination param slots use.
     pub fn from_param(v: f32) -> Self {
-        const DESTS: [ModDest; 16] = [
+        const DESTS: [ModDest; ModDest::COUNT] = [
             ModDest::Param(0),
             ModDest::Param(1),
             ModDest::Param(2),
