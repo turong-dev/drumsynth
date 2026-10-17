@@ -33,6 +33,7 @@ use drum_engine::{BLOCK, TRACKS};
 mod cheatsheet;
 mod cli;
 mod measure;
+mod mermaid;
 mod render;
 mod shaper_probe;
 mod verify;

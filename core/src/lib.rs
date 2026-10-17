@@ -20,6 +20,11 @@ pub mod sound;
 pub mod strip;
 pub mod track;
 
+// Host-only documentation data: the signal-path graphs the cheat-sheet
+// draws. Off by default so the firmware never carries them.
+#[cfg(feature = "topology")]
+pub mod topology;
+
 /// Sample rate the engine is built for.
 ///
 /// Fixed rather than runtime-configurable on purpose: every filter and

@@ -35,6 +35,10 @@ pub mod sweep_fx;
 pub mod sy_tone;
 pub mod tom;
 
+// Host-only documentation: the signal paths the cheat-sheet draws.
+#[cfg(feature = "topology")]
+pub mod topology;
+
 pub use bd_classic::BdClassic;
 pub use bd_fm::BdFm;
 pub use bd_va::BdVa;

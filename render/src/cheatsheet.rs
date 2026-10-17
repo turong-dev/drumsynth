@@ -27,9 +27,12 @@
 //! device that varied only some of its machines would fall out correctly
 //! without anyone revisiting this.
 
+use device_core::topology::Topology;
 use drum_engine::machines::{MachineId, ParamGroup, ParamKind, NUM_PARAMS as DRUM_PARAMS};
 use drum_engine::DeviceModel;
 use mi_drum_engine::{MiMachineId, NUM_PARAMS as MI_PARAMS};
+
+use crate::mermaid;
 
 /// What the cheat-sheet needs from a device on top of [`DeviceModel`].
 ///
@@ -42,6 +45,14 @@ pub(crate) trait CheatDevice<const N: usize>: DeviceModel<N> {
     /// Short canonical name, as used in CLI args. Becomes the HTML anchor.
     fn short_name(self) -> &'static str;
 
+    /// This machine's signal path.
+    fn topology(self) -> &'static Topology;
+
+    /// The path everything downstream of a machine shares — the track
+    /// strip. Drawn once, in the shared section, so the per-machine
+    /// diagrams can stop at its input instead of repeating it.
+    fn strip_topology() -> &'static Topology;
+
     /// Title of the generated sheet.
     const TITLE: &'static str;
 }
@@ -51,12 +62,28 @@ impl CheatDevice<DRUM_PARAMS> for MachineId {
         self.name()
     }
 
+    fn topology(self) -> &'static Topology {
+        drum_engine::machines::topology::topology(self)
+    }
+
+    fn strip_topology() -> &'static Topology {
+        &drum_engine::machines::topology::STRIP
+    }
+
     const TITLE: &'static str = "Drum Synth Param Cheat-Sheet";
 }
 
 impl CheatDevice<MI_PARAMS> for MiMachineId {
     fn short_name(self) -> &'static str {
         self.name()
+    }
+
+    fn topology(self) -> &'static Topology {
+        mi_drum_engine::topology::topology(self)
+    }
+
+    fn strip_topology() -> &'static Topology {
+        &mi_drum_engine::topology::STRIP_PATH
     }
 
     const TITLE: &'static str = "MI-Drum Param Cheat-Sheet";
@@ -257,6 +284,42 @@ fn markdown_catalogue<D: CheatDevice<N>, const N: usize>(out: &mut String, machi
     out.push('\n');
 }
 
+/// A topology as a fenced mermaid block, with its summary above it and its
+/// modulation table below.
+fn markdown_diagram(out: &mut String, topology: &Topology) {
+    if !topology.summary.is_empty() {
+        out.push_str(topology.summary);
+        out.push_str("\n\n");
+    }
+    out.push_str("```mermaid\n");
+    out.push_str(&mermaid::render(topology));
+    out.push_str("```\n\n");
+    markdown_mod_routes(out, topology);
+}
+
+/// Modulation as a table rather than as graph edges.
+///
+/// A destination chosen by a parameter value has no fixed edge to draw:
+/// every possible one is unreadable, and the default is wrong as soon as it
+/// is changed. The table states the choice instead.
+fn markdown_mod_routes(out: &mut String, topology: &Topology) {
+    if topology.mod_routes.is_empty() {
+        return;
+    }
+    out.push_str("| Modulator | Destination | Params |\n");
+    out.push_str("|-----------|-------------|--------|\n");
+    for r in topology.mod_routes {
+        let params: Vec<String> = r.params.iter().map(|p| format!("`{p}`")).collect();
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            r.source,
+            r.dest,
+            params.join(", ")
+        ));
+    }
+    out.push('\n');
+}
+
 /// Markdown output: one heading + table per section.
 fn generate_markdown<D: CheatDevice<N>, const N: usize>(
     machines: &[D],
@@ -278,10 +341,12 @@ fn generate_markdown<D: CheatDevice<N>, const N: usize>(
         out.push_str(
             "Track-level routing, the strip, and the LFOs. Values are factory defaults.\n\n",
         );
+        markdown_diagram(&mut out, D::strip_topology());
         markdown_rows(&mut out, &sheet.common);
 
         for (m, rows) in &sheet.per_machine {
             out.push_str(&format!("## {}\n\n", m.label()));
+            markdown_diagram(&mut out, m.topology());
             markdown_rows(&mut out, rows);
         }
     } else {
@@ -291,6 +356,7 @@ fn generate_markdown<D: CheatDevice<N>, const N: usize>(
              changes what the voice does with the VOICE rows, not which rows exist. \
              Values are factory defaults.\n\n",
         );
+        markdown_diagram(&mut out, D::strip_topology());
         markdown_rows(&mut out, &sheet.common);
     }
 
@@ -382,6 +448,7 @@ fn generate_html<D: CheatDevice<N>, const N: usize>(machines: &[D], sheet: &Shee
         out.push_str(
             "<p>Track-level routing, the strip, and the LFOs. Values are factory defaults.</p>\n",
         );
+        html_diagram(&mut out, D::strip_topology());
         html_table(&mut out, &sheet.common);
         out.push_str("</section>\n\n");
 
@@ -389,6 +456,7 @@ fn generate_html<D: CheatDevice<N>, const N: usize>(machines: &[D], sheet: &Shee
             let id = machine_anchor::<D, N>(*m);
             out.push_str(&format!("<section id=\"{id}\">\n"));
             out.push_str(&format!("<h2>{}</h2>\n", m.label()));
+            html_diagram(&mut out, m.topology());
             html_table(&mut out, rows);
             out.push_str("</section>\n\n");
         }
@@ -396,15 +464,93 @@ fn generate_html<D: CheatDevice<N>, const N: usize>(machines: &[D], sheet: &Shee
         out.push_str("<section id=\"params\">\n");
         out.push_str("<h2>Parameters <span class=\"badge\">same on every machine</span></h2>\n");
         out.push_str("<p>Every machine on this device shares one parameter table: the machine changes what the voice does with the VOICE rows, not which rows exist. Values are factory defaults.</p>\n");
+        html_diagram(&mut out, D::strip_topology());
         html_table(&mut out, &sheet.common);
         out.push_str("</section>\n\n");
     }
 
     out.push_str("<footer>\n<p><strong>Address</strong> is what a controller sends: <code>(group, index)</code> over NRPN. <strong>Slot</strong> is the flat index into the engine's parameter array — internal, shown because the device's tables and <code>set_params</code> are written in those terms. Reserved slots have no address and are not listed.</p>\n");
     out.push_str("</footer>\n");
+    html_mermaid_script(&mut out);
     out.push_str("</body>\n</html>\n");
 
     out
+}
+
+/// A topology as a collapsible panel holding mermaid source.
+///
+/// The source sits in the DOM as text and mermaid replaces it in place, so
+/// a reader with no network sees the graph written out rather than an empty
+/// box. That is the whole mitigation for the CDN — see the module docs on
+/// `html_mermaid_script`.
+///
+/// Collapsed by default: fifteen expanded diagrams is a long scroll past
+/// the tables people came for.
+fn html_diagram(out: &mut String, topology: &Topology) {
+    out.push_str("<details class=\"diagram\">\n");
+    out.push_str("<summary>Signal path</summary>\n");
+    if !topology.summary.is_empty() {
+        out.push_str(&format!("<p>{}</p>\n", topology.summary));
+    }
+    out.push_str("<pre class=\"mermaid\">\n");
+    out.push_str(&html_escape(&mermaid::render(topology)));
+    out.push_str("</pre>\n");
+    html_mod_routes(out, topology);
+    out.push_str("</details>\n");
+}
+
+fn html_mod_routes(out: &mut String, topology: &Topology) {
+    if topology.mod_routes.is_empty() {
+        return;
+    }
+    out.push_str("<table>\n<thead>\n<tr><th>Modulator</th><th>Destination</th><th>Params</th></tr>\n</thead>\n<tbody>\n");
+    for r in topology.mod_routes {
+        let params: Vec<String> = r
+            .params
+            .iter()
+            .map(|p| format!("<code>{p}</code>"))
+            .collect();
+        out.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            r.source,
+            r.dest,
+            params.join(", ")
+        ));
+    }
+    out.push_str("</tbody>\n</table>\n");
+}
+
+/// Mermaid, loaded from a CDN.
+///
+/// This is the one thing on the page that is not self-contained, and it is
+/// a deliberate, temporary trade: one diagram source for both outputs, at
+/// the cost of the diagrams not drawing without a network. The tables —
+/// which are what the sheet is mostly for — still render offline, and the
+/// `<pre>` fallback above means the graph is still *readable* offline, just
+/// as text rather than as boxes.
+///
+/// Replacing this with SVG emitted from the same graph data restores a
+/// fully offline page; the graph data does not change, only the renderer.
+fn html_mermaid_script(out: &mut String) {
+    out.push_str("<script type=\"module\">\n");
+    out.push_str(
+        "import mermaid from \"https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs\";\n",
+    );
+    // `securityLevel: strict` keeps the renderer from honouring click
+    // handlers or HTML in labels; the labels are ours, but the page is a
+    // generated artifact people pass around.
+    out.push_str(
+        "mermaid.initialize({ startOnLoad: true, theme: \"dark\", securityLevel: \"strict\" });\n",
+    );
+    out.push_str("</script>\n");
+}
+
+/// The three characters that would otherwise end the `<pre>` early or open
+/// a tag inside it. Mermaid reads `textContent`, so these round-trip.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn html_table(out: &mut String, rows: &[CheatRow]) {
@@ -505,6 +651,33 @@ tr.resv td { font-style: italic; }
 tr:hover { background: rgba(122, 162, 247, 0.05); }
 footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 footer p { font-size: 0.8rem; }
+details.diagram {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+  background: var(--bg);
+}
+details.diagram > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
+  list-style-position: outside;
+}
+details.diagram[open] > summary { margin-bottom: 0.75rem; }
+details.diagram p { font-size: 0.85rem; }
+/* Until mermaid replaces it, this holds the graph as readable text — which
+   is all an offline reader gets, and is deliberately legible. */
+pre.mermaid {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: pre;
+  margin-bottom: 1rem;
+}
+pre.mermaid svg { max-width: 100%; height: auto; }
 "#;
 
 #[cfg(test)]
@@ -637,5 +810,67 @@ mod tests {
     #[test]
     fn an_unknown_device_is_an_error() {
         assert!(generate_cheatsheet("nope", "markdown").is_err());
+    }
+
+    #[test]
+    fn every_section_carries_a_diagram() {
+        // One per machine plus one for the strip. A section without one is
+        // a machine whose signal path the sheet does not show.
+        let md = generate_cheatsheet("drum", "markdown").unwrap();
+        assert_eq!(
+            md.matches("```mermaid").count(),
+            MachineId::COUNT + 1,
+            "expected a diagram per machine plus the strip"
+        );
+
+        // mi-drum draws one path, because it has one.
+        let mi = generate_cheatsheet("mi-drum", "markdown").unwrap();
+        assert_eq!(mi.matches("```mermaid").count(), 1);
+    }
+
+    #[test]
+    fn modulation_is_a_table_not_an_edge() {
+        // Decision from #17: a destination chosen by a param value has no
+        // fixed edge, so the LFOs are described in a table instead. If they
+        // ever appear as graph edges, that decision has been undone.
+        let md = generate_cheatsheet("drum", "markdown").unwrap();
+        assert!(md.contains("| Modulator | Destination | Params |"));
+        assert!(md.contains("`LFO1.DST`"));
+        let diagrams: String = md
+            .split("```mermaid")
+            .skip(1)
+            .filter_map(|s| s.split("```").next())
+            .collect();
+        assert!(
+            !diagrams.contains("LFO1.DST"),
+            "selectable destinations should not be drawn as edges"
+        );
+    }
+
+    #[test]
+    fn html_diagrams_are_collapsed_and_degrade_without_the_cdn() {
+        let html = generate_cheatsheet("drum", "html").unwrap();
+        // Collapsed: `<details>` with no `open` attribute.
+        assert!(html.contains("<details class=\"diagram\">"));
+        assert!(!html.contains("<details class=\"diagram\" open"));
+        // The source sits in the DOM, so an offline reader sees the graph
+        // as text rather than an empty panel.
+        assert!(html.contains("<pre class=\"mermaid\">"));
+        assert!(html.contains("flowchart LR"));
+        assert!(html.contains("cdn.jsdelivr.net"));
+    }
+
+    #[test]
+    fn mermaid_source_is_escaped_for_the_html_page() {
+        // `<br/>` in a node label would end the <pre> early if it went in
+        // raw. Mermaid reads textContent, so the escaped form round-trips.
+        let html = generate_cheatsheet("drum", "html").unwrap();
+        let pre = html
+            .split("<pre class=\"mermaid\">")
+            .nth(1)
+            .and_then(|s| s.split("</pre>").next())
+            .expect("a diagram");
+        assert!(pre.contains("&lt;br/&gt;"), "label breaks must be escaped");
+        assert!(!pre.contains("<br/>"));
     }
 }

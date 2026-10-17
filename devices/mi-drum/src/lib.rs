@@ -40,6 +40,10 @@ pub use device_core::{
 
 pub use device_core::params::{SLOT_FILT_0, SLOT_FILT_1};
 
+// Host-only documentation: the signal path the cheat-sheet draws.
+#[cfg(feature = "topology")]
+pub mod topology;
+
 use device_core::dsp::ahd::{AhdEnv, HoldMode};
 use device_core::dsp::lfo::{Lfo, LfoMode, LfoWave, ModDest};
 use device_core::dsp::svf::stability_ceiling_hz;

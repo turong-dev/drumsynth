@@ -6,8 +6,12 @@ license.workspace = true
 description = "Host-side renderer. Auditions the engine without any hardware."
 
 [dependencies]
-drum-engine = { workspace = true, features = ["debug-params"] }
-mi-drum-engine = { workspace = true }
+# `topology` carries the signal-path graphs the cheat-sheet draws. Host-only
+# documentation data, which is why it is a feature the firmware leaves off
+# and the renderer turns on — same disposition as `debug-params`.
+drum-engine = { workspace = true, features = ["debug-params", "topology"] }
+mi-drum-engine = { workspace = true, features = ["topology"] }
+device-core = { workspace = true, features = ["topology"] }
 hound = "3.5"
 clap = { version = "4", features = ["derive"] }
 
