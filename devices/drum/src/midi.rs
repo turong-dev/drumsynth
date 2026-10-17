@@ -65,6 +65,23 @@
 //! A CC outside those ranges is ignored. `CC 120` / `CC 123` on any channel
 //! emits [`MidiEvent::Panic`], which silences the whole engine.
 //!
+//! # NRPN
+//!
+//! The same params also answer to NRPN at 14-bit resolution, addressed
+//! `(group, index)`: CC 99 selects the group, CC 98 the index in it, and
+//! the data-entry pair (CC 6 / CC 38) or the step pair (CC 96 / CC 97)
+//! carries the value. A data message arrives as [`MidiEvent::Nrpn`] /
+//! [`MidiEvent::NrpnStep`], resolves against the track's own machine table
+//! through [`apply_nrpn`], and sets the same smoothed target a CC does —
+//! so a param edited by either path behaves identically.
+//!
+//! All eight NRPN/RPN/data-entry CCs are spec-assigned controls, so the
+//! parser consumes them outright and none falls through to the CC param
+//! map. CC 38 is the one overlap: the flat map used it as pan
+//! (`CC_TRACK_BASE + SLOT_PAN`) until the NRPN system took the wire, so pan
+//! is now reached by name — `(TRACK, 2)` — or by the grid, and the map
+//! itself is removed in the next phase.
+//!
 //! # Sample-accurate notes
 //!
 //! [`schedule_midi`] is the main-loop variant of [`handle_midi`]. `NoteOn`
@@ -87,8 +104,10 @@
 //! path. The machine selector is exempt — it jumps instantly.
 
 pub use device_core::midi::{
-    apply_cc, handle_midi, schedule_midi, MidiEvent, MidiParser, CC_MASTER_GAIN, CC_TRACK_BASE,
-    CHROMATIC_REFERENCE_NOTE,
+    apply_cc, apply_nrpn, apply_nrpn_step, handle_midi, schedule_midi, MidiEvent, MidiParser,
+    CC_DATA_DECREMENT, CC_DATA_ENTRY_LSB, CC_DATA_ENTRY_MSB, CC_DATA_INCREMENT, CC_MASTER_GAIN,
+    CC_NRPN_PARAM_LSB, CC_NRPN_PARAM_MSB, CC_RPN_PARAM_LSB, CC_RPN_PARAM_MSB, CC_TRACK_BASE,
+    CHROMATIC_REFERENCE_NOTE, NRPN_MAX,
 };
 
 /// General MIDI percussion note numbers, for convenience and documentation.
@@ -523,5 +542,326 @@ mod tests {
             e.tracks[0].base_params[7], 0.2,
             "the pending ramp should have been cancelled"
         );
+    }
+
+    // ----- NRPN -----
+
+    /// Push wire bytes through a parser and route the events, exactly as
+    /// the firmware receives them. Keep the parser: an NRPN transaction
+    /// spans messages, and the selection is per-parser state.
+    fn feed_nrpn(p: &mut MidiParser, e: &mut crate::DrumEngine, bytes: &[u8]) {
+        for &b in bytes {
+            if let Some(ev) = p.push(b) {
+                handle_midi(e, ev);
+            }
+        }
+    }
+
+    /// NRPN bytes for one transaction: select `(group, index)`, then the
+    /// 14-bit data value.
+    fn nrpn_bytes(group: u8, index: u8, msb: u8, lsb: u8) -> [u8; 9] {
+        [
+            0xB0,
+            CC_NRPN_PARAM_MSB,
+            group,
+            CC_NRPN_PARAM_LSB,
+            index,
+            CC_DATA_ENTRY_MSB,
+            msb,
+            CC_DATA_ENTRY_LSB,
+            lsb,
+        ]
+    }
+
+    /// The path the issue cares about: bytes in, a param set through the
+    /// *track's machine table* — which is what makes a per-machine group
+    /// ordinal land on the right flat row without any reordering.
+    #[test]
+    fn nrpn_sets_a_param_the_track_machine_names() {
+        use crate::DrumEngine;
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        use device_core::slot::DeviceModel;
+        let mut e = DrumEngine::new();
+        let mut p = MidiParser::new();
+        let table = e.tracks[0].id().param_table();
+        let id = ParamId {
+            group: ParamGroup::Voice,
+            index: 0,
+        };
+        let flat = resolve(&table, id).expect("VOICE 0 on the default machine");
+        let neighbour = e.tracks[1].base_params[flat];
+
+        let msb = 80u8;
+        let lsb = 33u8;
+        feed_nrpn(
+            &mut p,
+            &mut e,
+            &nrpn_bytes(ParamGroup::Voice as u8, 0, msb, lsb),
+        );
+        converge_params(&mut e, 0);
+        let raw = ((msb as u16) << 7) | lsb as u16;
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            raw as f32 / NRPN_MAX as f32,
+            epsilon = 1e-4
+        );
+        assert_eq!(
+            e.tracks[1].base_params[flat], neighbour,
+            "channel 0 must not touch track 1"
+        );
+    }
+
+    /// The phase-C pin: the CC map and NRPN are two addresses for the
+    /// same parameter. Drive the same param both ways and each lands its
+    /// own value on the same flat row.
+    #[test]
+    fn cc_and_nrpn_address_the_same_param() {
+        use crate::DrumEngine;
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        use device_core::slot::DeviceModel;
+        let mut a = DrumEngine::new();
+        let mut b = DrumEngine::new();
+        let mut p = MidiParser::new();
+        let table = a.tracks[0].id().param_table();
+        let id = ParamId {
+            group: ParamGroup::Voice,
+            index: 1,
+        };
+        let flat = resolve(&table, id).expect("VOICE 1 on the default machine");
+
+        // CC: 20 + flat, the flat address the Deluge speaks.
+        handle_midi(
+            &mut a,
+            MidiEvent::ControlChange {
+                channel: 0,
+                controller: CC_TRACK_BASE + flat as u8,
+                value: 0.5,
+            },
+        );
+        converge_params(&mut a, 0);
+
+        // NRPN: (VOICE, 1), the same param by name. The data pair lands the
+        // full 14-bit value: (64 << 7) | 0.
+        feed_nrpn(
+            &mut p,
+            &mut b,
+            &nrpn_bytes(ParamGroup::Voice as u8, 1, 64, 0),
+        );
+        converge_params(&mut b, 0);
+
+        approx::assert_abs_diff_eq!(a.tracks[0].base_params[flat], 0.5, epsilon = 1e-4);
+        approx::assert_abs_diff_eq!(
+            b.tracks[0].base_params[flat],
+            8192.0 / 16383.0,
+            epsilon = 1e-4
+        );
+    }
+
+    /// Pan is now reached by name — `(TRACK, 2)` — and the wire CC that
+    /// used to be pan is data-entry LSB, consumed by the NRPN parser.
+    #[test]
+    fn nrpn_sets_pan_via_the_track_group() {
+        use crate::{DrumEngine, SLOT_PAN};
+        let mut e = DrumEngine::new();
+        let mut p = MidiParser::new();
+        feed_nrpn(&mut p, &mut e, &nrpn_bytes(0, 2, 100, 0));
+        converge_params(&mut e, 0);
+        // The data pair lands the 14-bit value: (100 << 7) | 0.
+        let v = (100u16 << 7) as f32 / NRPN_MAX as f32;
+        approx::assert_abs_diff_eq!(e.tracks[0].base_params[SLOT_PAN], v, epsilon = 1e-4);
+        approx::assert_abs_diff_eq!(e.tracks[0].strip.pan, v * 2.0 - 1.0, epsilon = 1e-4);
+        assert!(
+            e.tracks[0].strip.pan > 0.1,
+            "an off-centre pan must move the strip's pan off centre"
+        );
+
+        // CC 38 on the wire: it was pan on the flat map, it is data LSB to
+        // the parser now, and it reaches no param when there is no active
+        // NRPN selection.
+        let before = e.tracks[0].base_params[SLOT_PAN];
+        let mut fresh = MidiParser::new();
+        feed_nrpn(&mut fresh, &mut e, &[0xB0, CC_DATA_ENTRY_LSB, 127]);
+        converge_params(&mut e, 0);
+        assert_eq!(
+            e.tracks[0].base_params[SLOT_PAN], before,
+            "CC 38 is NRPN data LSB, not the pan entry"
+        );
+    }
+
+    /// The machine selector is TRACK 0: an NRPN data entry onto it jumps
+    /// instantly, exactly as CC 36 does — and resets params to the new
+    /// machine's defaults.
+    #[test]
+    fn nrpn_swaps_the_machine_instantly() {
+        use crate::{DrumEngine, MachineId, SLOT_MACHINE};
+        let mut e = DrumEngine::new();
+        let mut p = MidiParser::new();
+        assert_eq!(e.tracks[0].id(), MachineId::BdClassic);
+        feed_nrpn(&mut p, &mut e, &nrpn_bytes(0, 0, 64, 0));
+        assert_eq!(
+            e.tracks[0].id().index(),
+            7,
+            "0.5 quantises to catalogue index 7 and jumps without a ramp"
+        );
+        let divisor = (MachineId::ALL.len() - 1) as f32;
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[SLOT_MACHINE],
+            7.0f32 / divisor,
+            epsilon = 1e-4
+        );
+    }
+
+    /// Increments and decrements: one LSB snaps on the first block, a
+    /// burst inside one block accumulates, and the value clamps at the
+    /// 14-bit rails.
+    #[test]
+    fn nrpn_step_nudges_by_lsbs_and_clamps() {
+        use crate::DrumEngine;
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        use device_core::slot::DeviceModel;
+        let mut e = DrumEngine::new();
+        // One parser for the whole transaction: the selection persists
+        // across messages, exactly as it does on a real controller.
+        let mut p = MidiParser::new();
+        let table = e.tracks[0].id().param_table();
+        let flat = resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Voice,
+                index: 0,
+            },
+        )
+        .expect("VOICE 0 on the default machine");
+
+        // Land on an exact 14-bit value: (62 << 7) | 64 = 8000.
+        feed_nrpn(
+            &mut p,
+            &mut e,
+            &nrpn_bytes(ParamGroup::Voice as u8, 0, 62, 64),
+        );
+        converge_params(&mut e, 0);
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            8000.0 / 16383.0,
+            epsilon = 1e-5
+        );
+
+        // One LSB: below the snap epsilon, so it applies exactly on the
+        // first block after the message.
+        feed_nrpn(&mut p, &mut e, &[0xB0, CC_DATA_INCREMENT, 1]);
+        e.tracks[0].control();
+        assert_eq!(
+            e.tracks[0].base_params[flat],
+            8001.0 / 16383.0,
+            "a single-LSB nudge snaps on the first block"
+        );
+
+        // Three steps inside one block accumulate on the destination.
+        feed_nrpn(
+            &mut p,
+            &mut e,
+            &[
+                0xB0,
+                CC_DATA_INCREMENT,
+                100,
+                0xB0,
+                CC_DATA_INCREMENT,
+                100,
+                0xB0,
+                CC_DATA_INCREMENT,
+                100,
+            ],
+        );
+        converge_params(&mut e, 0);
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            8301.0 / 16383.0,
+            epsilon = 1e-5
+        );
+
+        // A big accelerated jump ramps rather than snapping: mid-ramp the
+        // param is pending and has not arrived.
+        feed_nrpn(&mut p, &mut e, &[0xB0, CC_DATA_INCREMENT, 100]);
+        e.tracks[0].control();
+        assert!(
+            e.tracks[0].is_param_pending(flat),
+            "a 100-LSB jump must still be moving"
+        );
+
+        // Decrement past the bottom rail clamps there.
+        for _ in 0..200 {
+            feed_nrpn(&mut p, &mut e, &[0xB0, CC_DATA_DECREMENT, 127]);
+        }
+        converge_params(&mut e, 0);
+        assert_eq!(
+            e.tracks[0].base_params[flat], 0.0,
+            "clamped at the bottom rail"
+        );
+
+        // Increment past the top rail clamps at full scale.
+        for _ in 0..200 {
+            feed_nrpn(&mut p, &mut e, &[0xB0, CC_DATA_INCREMENT, 127]);
+        }
+        converge_params(&mut e, 0);
+        assert_eq!(
+            e.tracks[0].base_params[flat], 1.0,
+            "200 steps of 127 pass 16383 and clamp at full scale"
+        );
+    }
+
+    /// An address the device cannot answer resolves nothing: an index past
+    /// its group, a group this build has no identifier for, and a channel
+    /// with no track are all dropped without touching a param.
+    #[test]
+    fn nrpn_addresses_nothing_is_dropped_silently() {
+        use crate::DrumEngine;
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        use device_core::slot::DeviceModel;
+        let mut e = DrumEngine::new();
+        let mut p = MidiParser::new();
+        let table = e.tracks[0].id().param_table();
+        let flat = resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Voice,
+                index: 0,
+            },
+        )
+        .expect("VOICE 0 on the default machine");
+        let before = e.tracks[0].base_params[flat];
+
+        // Index past the group's members.
+        feed_nrpn(
+            &mut p,
+            &mut e,
+            &nrpn_bytes(ParamGroup::Voice as u8, 40, 100, 100),
+        );
+        converge_params(&mut e, 0);
+        assert_eq!(e.tracks[0].base_params[flat], before);
+
+        // A group this build has no identifier for: the parser emits it,
+        // the router drops it.
+        feed_nrpn(&mut p, &mut e, &nrpn_bytes(8, 0, 100, 100));
+        converge_params(&mut e, 0);
+        assert_eq!(e.tracks[0].base_params[flat], before);
+
+        // A channel with no track (drum routes channels 1..=8 to tracks).
+        feed_nrpn(
+            &mut p,
+            &mut e,
+            &[
+                0xBF,
+                CC_NRPN_PARAM_MSB,
+                1,
+                0xBF,
+                CC_NRPN_PARAM_LSB,
+                0,
+                0xBF,
+                CC_DATA_ENTRY_MSB,
+                100,
+            ],
+        );
+        converge_params(&mut e, 0);
+        assert_eq!(e.tracks[0].base_params[flat], before);
     }
 }

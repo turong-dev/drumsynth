@@ -39,8 +39,9 @@
 //! 15, 22 and 23 — deliberately, because folding them into a bank would have
 //! meant reordering the flat array, and the flat array is what CC 20..51
 //! addresses. The two addressings coexist: the flat index is the ABI the CC
-//! map and the Deluge depend on, and `(group, index)` is the one NRPN will
-//! speak. They agree on what a param *is* and disagree only on layout.
+//! map and the Deluge depend on, and `(group, index)` is the one NRPN
+//! speaks (see [`crate::midi`]). They agree on what a param *is* and
+//! disagree only on layout.
 //!
 //! Resolution is a linear scan rather than a base-offset table. That lookup
 //! runs when an NRPN message arrives — control rate, never the audio path —
@@ -207,6 +208,33 @@ pub enum ParamGroup {
     /// A [`resv`] row. Never matches a [`ParamId`], so a reserved slot cannot
     /// be addressed — which is the point of it being reserved.
     Reserved = 255,
+}
+
+impl ParamGroup {
+    /// Map a wire group value onto a [`ParamGroup`], or `None` if this build
+    /// has no identifier for it.
+    ///
+    /// The discriminants are wire values (the enum is `repr(u8)` with
+    /// explicit numbers), so the byte arriving on CC 99 lands here. A
+    /// controller selecting a group that does not exist is asking for a
+    /// parameter this build cannot have; the caller drops the message
+    /// rather than guessing at the nearest group. `Reserved` is deliberately
+    /// unreachable: a reserved slot is a hole in the address space, not a
+    /// target.
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ParamGroup::Track),
+            1 => Some(ParamGroup::Voice),
+            2 => Some(ParamGroup::Filter),
+            3 => Some(ParamGroup::Shaper),
+            4 => Some(ParamGroup::Amp),
+            5 => Some(ParamGroup::Lfo),
+            6 => Some(ParamGroup::Env),
+            7 => Some(ParamGroup::Matrix),
+            127 => Some(ParamGroup::Global),
+            _ => None,
+        }
+    }
 }
 
 /// An address: a group, and a position within it.
@@ -481,6 +509,41 @@ mod tests {
                 .with_route(ParamRoute::Pan)
                 .route,
             ParamRoute::Pan
+        );
+    }
+
+    #[test]
+    fn discriminants_are_the_wire_values() {
+        // `from_u8` matches these numbers as literals; the match is what
+        // keeps them wire values, so renumbering an identifier must not
+        // pass silently.
+        assert_eq!(ParamGroup::Track as u8, 0);
+        assert_eq!(ParamGroup::Voice as u8, 1);
+        assert_eq!(ParamGroup::Filter as u8, 2);
+        assert_eq!(ParamGroup::Shaper as u8, 3);
+        assert_eq!(ParamGroup::Amp as u8, 4);
+        assert_eq!(ParamGroup::Lfo as u8, 5);
+        assert_eq!(ParamGroup::Env as u8, 6);
+        assert_eq!(ParamGroup::Matrix as u8, 7);
+        assert_eq!(ParamGroup::Global as u8, 127);
+        assert_eq!(ParamGroup::Reserved as u8, 255);
+    }
+
+    #[test]
+    fn from_u8_covers_the_known_groups_only() {
+        assert_eq!(ParamGroup::from_u8(0), Some(ParamGroup::Track));
+        assert_eq!(ParamGroup::from_u8(3), Some(ParamGroup::Shaper));
+        assert_eq!(ParamGroup::from_u8(7), Some(ParamGroup::Matrix));
+        assert_eq!(ParamGroup::from_u8(127), Some(ParamGroup::Global));
+        // Between Matrix and Global, and anything above Global but below
+        // Reserved, is a group this build has no identifier for.
+        assert_eq!(ParamGroup::from_u8(8), None);
+        assert_eq!(ParamGroup::from_u8(126), None);
+        assert_eq!(ParamGroup::from_u8(128), None);
+        assert_eq!(
+            ParamGroup::from_u8(255),
+            None,
+            "Reserved is a row label, not a selectable group"
         );
     }
 

@@ -2155,6 +2155,152 @@ mod tests {
         );
     }
 
+    /// NRPN end-to-end: wire bytes in, resolve through the track's own
+    /// machine table, land on a scattered SHAPER row. This is the whole
+    /// reason the address is `(group, index)` rather than a flat bank.
+    #[test]
+    fn nrpn_sets_a_scattered_shaper_row() {
+        use device_core::midi::{handle_midi, MidiParser, NRPN_MAX};
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+
+        let mut p = MidiParser::new();
+        let msb = 0x55u8;
+        let lsb = 0x12u8;
+        for &b in &[
+            0xB0,
+            99,
+            ParamGroup::Shaper as u8,
+            0xB0,
+            98,
+            2,
+            0xB0,
+            6,
+            msb,
+            0xB0,
+            38,
+            lsb,
+        ] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut *e, ev);
+            }
+        }
+        for _ in 0..200 {
+            e.tracks[0].control();
+        }
+        let table = MiMachineId::SixOp1.params();
+        let flat = resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Shaper,
+                index: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(table[flat].name, "SHAPE.DRV");
+        let raw = ((msb as u16) << 7) | lsb as u16;
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            raw as f32 / NRPN_MAX as f32,
+            epsilon = 1e-4
+        );
+    }
+
+    /// NRPN data increment accumulates on the destination, not the base,
+    /// so a burst of steps inside one block adds up instead of overwriting
+    /// itself.
+    #[test]
+    fn nrpn_step_accumulates_on_the_destination() {
+        use device_core::midi::{handle_midi, MidiParser, NRPN_MAX};
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+        let table = MiMachineId::SixOp1.params();
+        let flat = resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Voice,
+                index: 0,
+            },
+        )
+        .unwrap();
+
+        let mut p = MidiParser::new();
+        // Set to an exact 14-bit value: (50 << 7) | 0 = 6400.
+        for &b in &[
+            0xB0,
+            99,
+            ParamGroup::Voice as u8,
+            0xB0,
+            98,
+            0,
+            0xB0,
+            6,
+            50,
+            0xB0,
+            38,
+            0,
+        ] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut *e, ev);
+            }
+        }
+        for _ in 0..200 {
+            e.tracks[0].control();
+        }
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            6400.0 / NRPN_MAX as f32,
+            epsilon = 1e-5
+        );
+
+        // Three +100-LSB steps in one block.
+        for &b in &[0xB0, 96, 100, 0xB0, 96, 100, 0xB0, 96, 100] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut *e, ev);
+            }
+        }
+        for _ in 0..200 {
+            e.tracks[0].control();
+        }
+        approx::assert_abs_diff_eq!(
+            e.tracks[0].base_params[flat],
+            6700.0 / NRPN_MAX as f32,
+            epsilon = 1e-5
+        );
+    }
+
+    /// A group this build has no identifier for resolves no parameter.
+    #[test]
+    fn nrpn_unknown_group_is_dropped() {
+        use device_core::midi::{handle_midi, MidiParser};
+        use device_core::params::{resolve, ParamGroup, ParamId};
+        let mut e = engine_box();
+        e.tracks_mut()[0].load_machine(MiMachineId::SixOp1);
+        let table = MiMachineId::SixOp1.params();
+        let flat = resolve(
+            &table,
+            ParamId {
+                group: ParamGroup::Voice,
+                index: 0,
+            },
+        )
+        .unwrap();
+        let before = e.tracks[0].base_params[flat];
+
+        let mut p = MidiParser::new();
+        for &b in &[0xB0, 99, 8, 0xB0, 98, 0, 0xB0, 6, 127] {
+            if let Some(ev) = p.push(b) {
+                handle_midi(&mut *e, ev);
+            }
+        }
+        for _ in 0..200 {
+            e.tracks[0].control();
+        }
+        assert_eq!(e.tracks[0].base_params[flat], before);
+    }
+
     /// Heap-allocate the engine so the huge struct is not placed on the test
     /// thread's stack. The firmware uses static `.uninit` placement instead.
     #[allow(unsafe_code)]

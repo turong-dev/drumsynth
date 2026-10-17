@@ -741,6 +741,46 @@ mod tests {
         assert!(!track.is_param_pending(63));
     }
 
+    /// `param_target` returns the destination a relative write (NRPN data
+    /// increment) nudges from, not the unmoved base. This is what makes a
+    /// burst of steps inside one block accumulate instead of overwriting
+    /// itself.
+    #[test]
+    fn param_target_names_the_destination() {
+        let mut engine = Engine::<WideSlot, 64, 1>::new_with_kit(&[WideId(0)]);
+        let track = &mut engine.tracks_mut()[0];
+        track.set_param_target(40, 0.6);
+        assert_eq!(track.param_target(40), 0.6, "target is the destination");
+        track.control();
+        assert_eq!(
+            track.param_target(40),
+            0.6,
+            "mid-ramp the destination stays where set_param_target put it"
+        );
+        assert!(track.base_params[40] < 0.6, "the base has not arrived yet");
+        assert_eq!(track.param_target(64), 0.0, "out of range is guarded");
+    }
+
+    /// A direct `set_param` restates the destination, so an increment
+    /// after a programmatic set nudges from the value the param actually
+    /// holds rather than from a stale smoother target.
+    #[test]
+    fn direct_set_param_updates_the_destination() {
+        let mut engine = Engine::<WideSlot, 64, 1>::new_with_kit(&[WideId(0)]);
+        let track = &mut engine.tracks_mut()[0];
+        track.set_param_target(40, 0.8);
+        for _ in 0..10 {
+            track.control();
+        }
+        track.set_param(40, 0.25);
+        assert_eq!(
+            track.param_target(40),
+            0.25,
+            "direct set restates the destination"
+        );
+        assert!(!track.is_param_pending(40), "and cancels the stale ramp");
+    }
+
     struct DummySlot {
         active: bool,
     }

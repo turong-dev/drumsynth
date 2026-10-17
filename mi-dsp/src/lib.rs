@@ -22,10 +22,10 @@
 extern crate std;
 
 pub mod clouds;
+pub mod gate;
 pub mod peaks;
 pub mod plaits;
 pub mod spike_stages;
-pub mod gate;
 pub mod sys;
 pub mod warps;
 

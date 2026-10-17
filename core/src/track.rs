@@ -160,7 +160,10 @@ where
     pub base_params: [f32; N],
     /// CC param targets: [`Track::control`] slews `base_params` toward these
     /// at block rate. Only params touched by [`Track::set_param_target`] are
-    /// tracked (see `param_pending`); everything else is direct.
+    /// tracked (see `param_pending`); everything else is direct. A direct
+    /// set updates the target as well as the base, so this always names the
+    /// value the param is *heading to* — which is what an NRPN increment
+    /// reads (see [`Track::param_target`]).
     param_targets: [f32; N],
     /// One-pole state used to slew a pending param toward its target.
     param_smooth: [f32; N],
@@ -397,7 +400,26 @@ where
     /// rows route to the slot even at indices the drum device routes to the
     /// strip, and no `strip_bypass` special case is needed in the control
     /// path.
+    ///
+    /// A direct set is also an absolute statement of where the param is
+    /// *heading*: the smoothing target follows the stored value, so
+    /// `param_targets` never holds a destination the param has been set
+    /// away from. The read side ([`param_target`](Self::param_target)) is
+    /// where a relative write — an NRPN data increment — nudges from. The
+    /// ramp itself writes through [`set_param_inner`](Self::set_param_inner):
+    /// an intermediate value must not move the destination it is heading to.
     pub fn set_param(&mut self, idx: usize, value: f32) {
+        self.set_param_inner(idx, value);
+        if idx < N {
+            self.param_targets[idx] = self.param_smooth[idx];
+        }
+    }
+
+    /// [`set_param`](Self::set_param)'s route dispatch, without the target
+    /// restatement. The CC smoother writes each ramp value through here
+    /// (`advance_param_smoothing`) while the destination stays where
+    /// [`set_param_target`](Self::set_param_target) put it.
+    fn set_param_inner(&mut self, idx: usize, value: f32) {
         if idx >= N {
             return;
         }
@@ -497,6 +519,26 @@ where
         idx < N && self.param_pending.is_set(idx)
     }
 
+    /// The value param `idx` is heading to: the pending target if one is
+    /// armed, otherwise the current value.
+    ///
+    /// The read side of [`set_param_target`](Self::set_param_target). It
+    /// matters for *relative* writes — NRPN data increment/decrement
+    /// (`CC 96/97`, see
+    /// [`apply_nrpn_step`](crate::midi::apply_nrpn_step)): a burst of steps
+    /// arriving inside one block must accumulate on the destination, not
+    /// the unmoved base, or every step after the first would overwrite
+    /// its predecessors and a fast turn would edit one LSB. Reading the
+    /// base instead would be right only for a controller that sends at
+    /// most one step per block.
+    pub fn param_target(&self, idx: usize) -> f32 {
+        if idx < N {
+            self.param_targets[idx]
+        } else {
+            0.0
+        }
+    }
+
     /// Set the *target* for a CC-driven param.
     ///
     /// The value ramps to it at block rate via [`Track::control`] (see
@@ -533,12 +575,13 @@ where
     }
 
     /// Advance every pending param one block toward its target. At most one
-    /// `set_param` per moving param per block, so a CC burst costs one
+    /// param dispatch per moving param per block, so a CC burst costs one
     /// coefficient recompute per param per block instead of one per message.
     fn advance_param_smoothing(&mut self) {
         for w in 0..Self::MASK_WORDS {
-            // Walk a copy of the word: `set_param` clears and re-arms bits in
-            // the live mask, and each pending param steps exactly once.
+            // Walk a copy of the word: `set_param_inner` clears and re-arms
+            // bits in the live mask, and each pending param steps exactly
+            // once.
             let mut pending = self.param_pending.words[w];
             while pending != 0 {
                 let i = w * 32 + pending.trailing_zeros() as usize;
@@ -546,12 +589,12 @@ where
                 let target = self.param_targets[i];
                 let next = self.param_smooth[i] + (target - self.param_smooth[i]) * PARAM_SMOOTH_K;
                 if (target - next).abs() < PARAM_SMOOTH_EPS {
-                    // Converged: snap; `set_param` clears the pending bit.
-                    self.set_param(i, target);
+                    // Converged: snap; the inner set clears the pending bit.
+                    self.set_param_inner(i, target);
                 } else {
-                    // Still moving: `set_param` clears the pending bit as
+                    // Still moving: the inner set clears the pending bit as
                     // part of syncing the smoother, so re-arm it.
-                    self.set_param(i, next);
+                    self.set_param_inner(i, next);
                     self.param_pending.set(i);
                 }
             }
