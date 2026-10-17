@@ -352,6 +352,52 @@ pub(crate) enum Command {
         /// Show real-time messages (clock, start, stop, continue).
         #[arg(long)]
         realtime: bool,
+        /// Put a Launch Control XL 3 into DAW mode before monitoring, with
+        /// relative encoders and touch events on.
+        ///
+        /// Phase 0 of #13: the programmer's reference is v1.0 and the
+        /// relative encoding in particular is documented loosely across
+        /// Novation's sources, so what the surface *actually* sends has to
+        /// be captured before a driver is written against it. `monitor`
+        /// only opens an input, and these messages have to be sent to the
+        /// device first — hence a flag here rather than a new mode.
+        ///
+        /// Opens an output port alongside the input (same `--port` match),
+        /// sends the enables, and takes the device back out of DAW mode on
+        /// exit. Pair it with `--hex`.
+        #[arg(long)]
+        daw: bool,
+    },
+
+    /// Drive the engine from a Novation Launch Control XL 3 (#13).
+    ///
+    /// `render device` with the controller attached as a front panel: the
+    /// same engine, the same audio output, the same `handle_midi` router,
+    /// plus 24 encoders and 8 faders editing the selected track with the
+    /// parameter's name and value on the controller's screen.
+    ///
+    /// The controller must be on its DAW In/Out USB port; the driver finds
+    /// it by name and puts it into DAW mode on start, then returns it to
+    /// standalone mode on exit.
+    #[cfg(feature = "live")]
+    Lcxl3 {
+        /// Device to run. `drum` (the default) or `mi-drum`.
+        #[arg(value_name = "DEVICE", default_value = "drum")]
+        device: String,
+        /// Substring to match against output device names.
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Substring matched against the controller's MIDI port names.
+        /// Defaults to the Launch Control XL 3's own name.
+        #[arg(long)]
+        surface_port: Option<String>,
+        /// Name of the virtual MIDI input port other apps see, so a DAW can
+        /// sequence the engine while you play the surface.
+        #[arg(long, default_value = "Drumkit Engine")]
+        port: String,
+        /// Per-track multi-out: 18 channels. See `device --multi-out`.
+        #[arg(long)]
+        multi_out: bool,
     },
 }
 

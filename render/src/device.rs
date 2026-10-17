@@ -63,8 +63,38 @@ pub fn run<E, const N: usize>(
 ) -> Result<(), Box<dyn Error>>
 where
     E: DeviceEngine<N> + Send + 'static,
+    <E::Slot as drum_engine::Slot<N>>::Id: drum_engine::DeviceModel<N> + 'static,
+{
+    run_with_surface(engine, out, port, list, multi_out, None)
+}
+
+/// Run the device, optionally with a Launch Control XL 3 attached as its
+/// front panel.
+///
+/// The surface gets a ring of its own rather than sharing the CoreMIDI
+/// one. Two producers is simpler than one shared under a lock, and the
+/// audio callback drains both between blocks at no measurable cost: the
+/// second `pop` loop runs once per 32-sample block against a queue that is
+/// almost always empty.
+pub fn run_with_surface<E, const N: usize>(
+    engine: Box<E>,
+    out: &Option<String>,
+    port: &str,
+    list: bool,
+    multi_out: bool,
+    surface: Option<crate::lcxl3::Config>,
+) -> Result<(), Box<dyn Error>>
+where
+    E: DeviceEngine<N> + Send + 'static,
+    <E::Slot as drum_engine::Slot<N>>::Id: drum_engine::DeviceModel<N> + 'static,
 {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    // Before the audio device, so a controller that is not there fails
+    // with the ports listed rather than after the engine's banner.
+    if let Some(config) = &surface {
+        crate::lcxl3::preflight(config)?;
+    }
 
     let host = cpal::default_host();
 
@@ -92,6 +122,8 @@ where
 
     // Engine and its MIDI queue are owned by the audio callback thread.
     let (producer, consumer) = RingBuffer::<MidiEvent>::new(EVENT_QUEUE_CAP);
+    // A second queue for the control surface, drained in the same place.
+    let (surface_tx, surface_rx) = RingBuffer::<MidiEvent>::new(EVENT_QUEUE_CAP);
 
     // Virtual MIDI input: appears system-wide as an input port any app can
     // route to. The callback runs on a CoreMIDI thread; parse and queue.
@@ -124,7 +156,13 @@ where
     let mut wet_l = [0.0f32; BLOCK];
     let mut wet_r = [0.0f32; BLOCK];
     let mut cursor = BLOCK; // force a render on the first frame
+                            // Snapshot the loaded kit before the engine moves into the audio
+                            // callback. The surface shadows parameters from here on; it is the
+                            // only writer while it runs, which is why no reverse channel from the
+                            // audio thread is needed (#13).
+    let kit = crate::lcxl3::snapshot::<E, N>(&*engine);
     let mut consumer = consumer;
+    let mut surface_rx = surface_rx;
     let mut engine = engine;
     let master_gain = engine.master_gain();
     let fx_drive = engine.fx_drive();
@@ -165,6 +203,9 @@ where
                     // then render one engine block. Same discipline as the
                     // firmware: sequence between blocks, never inside.
                     while let Ok(ev) = consumer.pop() {
+                        handle_midi(&mut *engine, ev);
+                    }
+                    while let Ok(ev) = surface_rx.pop() {
                         handle_midi(&mut *engine, ev);
                     }
                     if multi_out {
@@ -249,13 +290,19 @@ where
 
     stream.play()?;
 
-    loop {
-        if let Ok(e) = err_rx.try_recv() {
-            eprintln!("stream error: {e}");
-            return Err("audio stream failed".into());
+    let Some(config) = surface else {
+        loop {
+            if let Ok(e) = err_rx.try_recv() {
+                eprintln!("stream error: {e}");
+                return Err("audio stream failed".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    };
+
+    crate::lcxl3::run_surface::<<E::Slot as drum_engine::Slot<N>>::Id, N>(
+        &config, &kit, surface_tx, &err_rx,
+    )
 }
 
 /// Pick the output device: substring match on `--out`, else BlackHole if
