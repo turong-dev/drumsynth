@@ -419,12 +419,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
-        Command::Cheatsheet { format, output } => {
+        Command::Cheatsheet {
+            device,
+            format,
+            output,
+        } => {
             let fmt = match format {
                 CheatsheetFormat::Markdown => "markdown",
                 CheatsheetFormat::Html => "html",
             };
-            let content = generate_cheatsheet(fmt);
+            let content = generate_cheatsheet(&device, fmt)?;
             if let Some(path) = output {
                 std::fs::write(&path, &content)?;
             } else {

@@ -233,13 +233,20 @@ pub(crate) enum Command {
         per_machine: f32,
     },
     /// Print a cheat-sheet of every parameter and its NRPN `(group, index)`
-    /// address, split into one table for the parameters every machine
-    /// shares and one per machine for its own. Generated from
-    /// `MACHINE_INFO` in the engine, so it can't drift from the code.
+    /// address. Generated from the device's own parameter tables, so it
+    /// can't drift from the code.
+    ///
+    /// A device whose machines each have their own table (`drum`) is split
+    /// into one table for the rows every machine shares and one per machine
+    /// for its own. A device whose machines share one table (`mi-drum`) gets
+    /// a single table, with its catalogue listed as the `MACH` options.
     ///
     /// `--format html` produces a self-contained styled HTML page; the
     /// default is markdown.
     Cheatsheet {
+        /// Device to document. `drum` (the default) or `mi-drum`.
+        #[arg(value_name = "DEVICE", default_value = "drum")]
+        device: String,
         /// Output format.
         #[arg(short, long, value_enum, default_value = "markdown")]
         format: CheatsheetFormat,

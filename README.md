@@ -143,11 +143,17 @@ CC  6 = value, high 7 bits      CC 38 = value, low 7 bits
 CC 96 = increment               CC 97 = decrement
 ```
 
-`cargo run -p render -- cheatsheet` prints every address, generated from
-the engine's own tables so it cannot drift. To see what a controller is
-actually sending, `cargo run -p render --features live -- monitor`
-decodes NRPN on the wire — address, 14-bit value and all — instead of
-four unrelated CC lines.
+`cargo run -p render -- cheatsheet [DEVICE]` prints every address,
+generated from the engine's own tables so it cannot drift. `DEVICE` is
+`drum` (the default) or `mi-drum`. The two sheets are shaped differently
+because the devices are: `drum` gives each machine its own parameter
+table, so it gets a common table plus one section per machine, while
+every `mi-drum` machine shares one table, so it gets a single table with
+its 28 engines listed as the options of `MACH`.
+
+To see what a controller is actually sending, `cargo run -p render
+--features live -- monitor` decodes NRPN on the wire — address, 14-bit
+value and all — instead of four unrelated CC lines.
 
 The remaining plain CCs are 7 (master gain) and 120/123 (panic). There
 used to be a flat `CC 20 + slot` map; 7 bits put the smallest move on a
