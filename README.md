@@ -154,10 +154,6 @@ used to be a flat `CC 20 + slot` map; 7 bits put the smallest move on a
 filter cutoff at nearly a semitone, and 32 slots was one short of what
 the mi-drum device needed, so it is gone.
 
-A Monome grid on MIDI channel 16 is the other control surface: a mixer
-screen of track faders, and a parameter screen whose rows come from the
-same table NRPN addresses. Build with `--features grid`.
-
 ## Hardware
 
 | | |

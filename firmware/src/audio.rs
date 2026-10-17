@@ -170,8 +170,8 @@ const CORE_HZ: u32 = 600_000_000;
 ///
 /// `600 MHz / 48 kHz * 32` = 400,000. This is the real deadline: the main loop
 /// has to finish rendering the next block within it, and everything else the
-/// loop does — USB polling, MIDI parsing, grid LED feedback — comes out of the
-/// same budget, as does the SAI ISR preempting all of it.
+/// loop does — USB polling, MIDI parsing — comes out of the same budget, as
+/// does the SAI ISR preempting all of it.
 pub const BUDGET_CYCLES: u32 = (CORE_HZ / SAMPLE_RATE_HZ) * BLOCK as u32;
 
 /// `DWT::cycle_count()` sampled at the block boundary, by the ISR, immediately
@@ -203,8 +203,8 @@ static BLOCKS_RENDERED: AtomicU32 = AtomicU32::new(0);
 ///
 /// This is the measurement the `~70%` ceiling in `BENCHMARKS.md` was always a
 /// stand-in for. `mi-bench` times `engine.process()` alone, with USB
-/// interrupts disabled, nothing on MIDI, no grid and a warm cache — every
-/// term the ceiling was meant to cover is exactly what it leaves out. This
+/// interrupts disabled, nothing on MIDI and a warm cache — every term the
+/// ceiling was meant to cover is exactly what it leaves out. This
 /// counts from the block boundary to the render finishing, on the real
 /// binary, so it includes the ISR preempting the render, the main loop's USB
 /// and MIDI polling happening *before* the render gets a turn, and whatever

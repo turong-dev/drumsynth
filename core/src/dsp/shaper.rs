@@ -25,7 +25,7 @@
 //!    bits, to model an ADC and a DAC that are not there.
 //! 3. **It assumes a whole CPU.** One stereo pair at 96 kHz on an STM32F4
 //!    with nothing else running, against six instances at 48 kHz sharing a
-//!    core with MIDI, USB, the grid and the sequencer.
+//!    core with MIDI, USB and the sequencer.
 //!
 //! # How ADAA replaces the oversampling
 //!

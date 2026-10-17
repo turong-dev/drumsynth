@@ -57,8 +57,8 @@
 //!
 //! [`ParamKind`] says what the 0..1 value *means*: a continuous sweep, a
 //! bipolar control centred at 0.5, or a choice among `count` discrete
-//! options. It is display and quantisation data, not routing: the grid picks
-//! a widget from it, the cheat-sheet prints it, and
+//! options. It is display and quantisation data, not routing: a control
+//! surface picks a widget from it, the cheat-sheet prints it, and
 //! [`apply_nrpn`](crate::midi::apply_nrpn) snaps a discrete parameter onto an
 //! exact option instead of landing between two of them.
 
@@ -249,7 +249,7 @@ impl ParamGroup {
     /// Short display name, as a control surface and the cheat-sheet print it.
     ///
     /// The same spelling the NRPN documentation uses, so a name read off a
-    /// grid tab or a monitor line is the name to look up.
+    /// control surface or a monitor line is the name to look up.
     pub const fn name(self) -> &'static str {
         match self {
             ParamGroup::Track => "TRACK",
@@ -284,8 +284,8 @@ impl ParamGroup {
 
 /// What a parameter's normalised `0..1` value means.
 ///
-/// Display and quantisation data, independent of [`ParamRoute`]: the grid
-/// picks a widget from it, the cheat-sheet prints it, and
+/// Display and quantisation data, independent of [`ParamRoute`]: a control
+/// surface picks a widget from it, the cheat-sheet prints it, and
 /// [`apply_nrpn`](crate::midi::apply_nrpn) uses
 /// [`Discrete`](ParamKind::Discrete) to snap a 14-bit value onto an exact
 /// option rather than a float that lands between two of them.

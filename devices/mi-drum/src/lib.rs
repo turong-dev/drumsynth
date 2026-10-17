@@ -521,8 +521,7 @@ impl MiMachineId {
     /// Per-param metadata. All MI machines share the same layout.
     ///
     /// Borrowed from the static table: NRPN address resolution walks it on
-    /// every data message and the grid on every render, and neither should
-    /// copy 33 rows to read one.
+    /// every data message, and should not copy 33 rows to read one.
     pub fn params(self) -> &'static [ParamInfo; NUM_PARAMS] {
         let _ = self;
         &PARAMS

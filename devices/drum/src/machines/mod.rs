@@ -166,7 +166,8 @@ impl MachineId {
     /// Params this machine exposes, with their default values.
     ///
     /// Borrowed from the static table: the callers that walk it (NRPN
-    /// address resolution, the grid) read one row and should not copy 32.
+    /// address resolution, the cheat-sheet) read one row and should not
+    /// copy 32.
     pub fn params(self) -> &'static [ParamInfo; NUM_PARAMS] {
         &MACHINE_INFO[self.index()].params
     }
