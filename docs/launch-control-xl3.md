@@ -322,19 +322,33 @@ cargo run -p render --features live -- monitor --daw --hex --port LCXL3
 
 Five things to settle, in rough order of how much depends on them.
 
-**1. What a fast turn of a relative encoder sends.** The reference gives
-the pivot and the unit steps — `41h` (65) is +1, `3Fh` (63) is −1 — and
-says nothing about speed. Either the magnitude grows with speed (binary
-offset: 70 is +6) or the magnitude stays 1 and the messages simply arrive
-more often. Turn one encoder slowly, then as fast as you can, at each of
-the three encoder-curve settings (feature CC 121 = 0, 1, 2), and record the
-data bytes.
+**1. ~~What a fast turn of a relative encoder sends.~~**
+**Settled on hardware, 2026-10-18.** Binary offset, and the magnitude does
+grow with speed: the data byte carries ±1, ±2, ±4 around the pivot at the
+medium curve. `wire::relative_delta` was right.
 
-This decides whether the driver can pass the delta straight through to
-CC 96/97 as a step size or has to apply its own acceleration. It lands in
-exactly one function, `wire::relative_delta`, which currently assumes the
-first reading. The state machine above it is written in detents and does
-not care either way.
+That measurement also settled the half the question did not ask. ±4 is
+nowhere near enough to cross a 14-bit range, so handing the delta to the
+engine unscaled makes one detent worth 1/16383 of a parameter — a full
+sweep of about four thousand detents, and nothing audible. The encoders
+work and the sound does not change, which is exactly how it presented.
+
+So the driver converts, which is what #13 asked for: "the driver decides
+what a detent is worth in 14-bit LSBs". `step_lsbs` squares the
+controller's magnitude and scales by `--detent-lsb` (default 32), giving
+0.2% of travel on a slow detent and 3.1% on a fast one — roughly 500
+detents for a careful full sweep, 32 for a quick one. Squared rather than
+linear because the same three magnitudes have to be both fine enough for a
+resonant filter and fast enough to cross the range; linear can be one or
+the other.
+
+`DESIGN.md` still holds. The engine applies whatever magnitude arrives and
+keeps no per-parameter timing state, and the controller still supplies the
+acceleration curve. What a detent is worth in a 14-bit space is a unit
+conversion, and only the driver knows both ends of it.
+
+Still to capture: what the slow and fast curve settings (feature CC 121 =
+0 and 2) report. Only the medium curve has been measured.
 
 **2. Hold threshold.** `surface::HOLD_MS` is 300 ms, inherited from the
 removed grid surface, where it was the threshold for a *pad*. A button
