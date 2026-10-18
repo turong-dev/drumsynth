@@ -192,6 +192,8 @@ struct Held {
     /// The screen that was active at press, restored if this turns out to
     /// be a hold rather than a tap.
     restore: Screen,
+    /// The page that screen was on, restored with it.
+    restore_page: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +625,7 @@ impl<const N: usize> Surface<N> {
                         group: g,
                         at_ms: now_ms,
                         restore: self.screen,
+                        restore_page: self.page,
                     });
                     // The modal opens on *press*, not after HOLD_MS. A
                     // threshold here would give every hold a window in
@@ -642,12 +645,31 @@ impl<const N: usize> Surface<N> {
                     }
                     if now_ms.saturating_sub(held.at_ms) >= HOLD_MS {
                         // A hold: the modal collapses and the screen the
-                        // finger came from comes back.
+                        // finger came from comes back, on the page it was
+                        // on. Opening the modal reset the page, so without
+                        // restoring it a quick look at another group would
+                        // quietly cost you your place.
                         self.screen = held.restore;
+                        self.page = held.restore_page;
                         self.clamp_page();
                         out.repaint = true;
+                    } else if held.restore == Screen::Group(g) {
+                        // A tap on the group that was *already* latched:
+                        // the way back to the resting screen.
+                        //
+                        // #13 describes a tap as latching "until another
+                        // is chosen" and never says how to get back, and
+                        // with all sixteen buttons spoken for there is no
+                        // spare one to spend. Toggling the latched group
+                        // is the standard idiom and costs nothing: every
+                        // other tap still latches, and a hold is
+                        // unaffected because it never reaches here.
+                        self.screen = Screen::Macros;
+                        self.page = 0;
+                        out.repaint = true;
                     }
-                    // A tap latches: the screen set on press simply stays.
+                    // Any other tap latches: the screen set on press
+                    // simply stays.
                 }
             }
             Button::PageUp | Button::PageDown => {
@@ -1331,6 +1353,94 @@ mod tests {
         press(&mut s, Button::Group(g), 1_000);
         release(&mut s, Button::Group(g), 1_000 + HOLD_MS - 1);
         assert_eq!(s.screen(), Screen::Group(g), "a tap latches");
+    }
+
+    /// Tapping the group you are already on is the way back to the
+    /// resting screen.
+    ///
+    /// #13 describes a tap as latching "until another is chosen" and
+    /// never says how to leave. With all sixteen buttons spoken for there
+    /// is no spare one, so the latched group toggles.
+    #[test]
+    fn tapping_the_latched_group_returns_to_the_resting_screen() {
+        let (mut s, _) = surface();
+        let g = gcol(ParamGroup::Filter);
+
+        press(&mut s, Button::Group(g), 0);
+        release(&mut s, Button::Group(g), 10);
+        assert_eq!(s.screen(), Screen::Group(g), "first tap latches");
+
+        press(&mut s, Button::Group(g), 100);
+        let out = release(&mut s, Button::Group(g), 110);
+        assert_eq!(s.screen(), Screen::Macros, "second tap returns");
+        assert_eq!(s.page(), 0);
+        assert!(out.repaint);
+
+        // And it is a toggle, not a one-way door.
+        press(&mut s, Button::Group(g), 200);
+        release(&mut s, Button::Group(g), 210);
+        assert_eq!(s.screen(), Screen::Group(g));
+    }
+
+    /// Tapping a *different* group still switches to it rather than
+    /// toggling out — the toggle must not swallow a normal change.
+    #[test]
+    fn tapping_another_group_still_switches_to_it() {
+        let (mut s, _) = surface();
+        let filter = gcol(ParamGroup::Filter);
+        let amp = gcol(ParamGroup::Amp);
+        press(&mut s, Button::Group(filter), 0);
+        release(&mut s, Button::Group(filter), 10);
+        press(&mut s, Button::Group(amp), 100);
+        release(&mut s, Button::Group(amp), 110);
+        assert_eq!(s.screen(), Screen::Group(amp));
+    }
+
+    /// A *hold* of the latched group is still a hold: it collapses back
+    /// to the same group, it does not toggle out.
+    #[test]
+    fn holding_the_latched_group_does_not_toggle_out() {
+        let (mut s, _) = surface();
+        let g = gcol(ParamGroup::Filter);
+        press(&mut s, Button::Group(g), 0);
+        release(&mut s, Button::Group(g), 10); // tap: latch
+        press(&mut s, Button::Group(g), 100);
+        release(&mut s, Button::Group(g), 100 + HOLD_MS);
+        assert_eq!(s.screen(), Screen::Group(g));
+    }
+
+    /// A hold gives back the page you were on, not page 1. Opening the
+    /// modal resets the page, so without restoring it a quick look at
+    /// another group quietly costs you your place.
+    #[test]
+    fn a_hold_gives_back_the_page_it_interrupted() {
+        let (mut s, _) = surface();
+        // Latch a group with more than one page, and move off page 0.
+        let Some(g) = (0..ParamGroup::ADDRESSABLE.len() as u8).find(|&g| {
+            s.group_is_reachable(g)
+                && group_len(s.table(0), ParamGroup::ADDRESSABLE[g as usize]) > ENCODERS
+        }) else {
+            // No group on this device spans a page; use the resting
+            // screen, which does.
+            assert!(s.pages() > 1, "nothing here pages at all");
+            press(&mut s, Button::PageDown, 0);
+            assert_eq!(s.page(), 1);
+            let other = gcol(ParamGroup::Filter);
+            press(&mut s, Button::Group(other), 100);
+            release(&mut s, Button::Group(other), 100 + HOLD_MS);
+            assert_eq!(s.screen(), Screen::Macros);
+            assert_eq!(s.page(), 1, "the resting screen kept its page");
+            return;
+        };
+        press(&mut s, Button::Group(g), 0);
+        release(&mut s, Button::Group(g), 10);
+        press(&mut s, Button::PageDown, 20);
+        assert_eq!(s.page(), 1);
+        let other = gcol(ParamGroup::Track);
+        press(&mut s, Button::Group(other), 100);
+        release(&mut s, Button::Group(other), 100 + HOLD_MS);
+        assert_eq!(s.screen(), Screen::Group(g));
+        assert_eq!(s.page(), 1, "the interrupted screen kept its page");
     }
 
     /// A hold started from a latched group returns to that group, not to

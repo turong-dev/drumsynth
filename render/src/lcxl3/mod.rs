@@ -168,7 +168,8 @@ where
     println!();
     println!("Launch Control XL 3 in DAW mode.");
     println!("  top buttons     select a track and audition it (shift: select only)");
-    println!("  bottom buttons  hold for that group's parameters, tap to latch");
+    println!("  bottom buttons  hold for that group's parameters, tap to latch;");
+    println!("                  tap the latched one again to return to the macros");
     println!("  encoders        the parameters on screen, for the selected track");
     println!("  faders          track levels, always");
     println!("  page up/down    the rest of the group");

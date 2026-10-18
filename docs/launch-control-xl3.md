@@ -195,8 +195,16 @@ parameters of each column's track. Macros (#14) are not landed, so the
 resting screen falls back to the `TRACK` group as #13 anticipates.
 
 The top button row selects a track and auditions it — hold Shift to select
-silently. The bottom row is the eight addressable groups: hold one for a
-quick edit and the screen comes back on release, tap one to latch it.
+silently. The bottom row is the eight addressable groups:
+
+- **Hold** one for a quick edit; releasing gives back the screen *and the
+  page* you were on.
+- **Tap** one to latch it.
+- **Tap the latched one again** to return to the macro screen. #13
+  describes a tap as latching "until another is chosen" and does not say
+  how to leave; with all sixteen buttons spoken for there is no spare one,
+  so the latched group toggles.
+
 Buttons for groups the loaded machine has no parameters in are dark.
 
 On mi-drum specifically: there are six tracks, so **columns 7 and 8 are
