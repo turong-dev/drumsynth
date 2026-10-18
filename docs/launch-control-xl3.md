@@ -104,13 +104,25 @@ reference does say so, as "once a display is configured for a given
 target, it can be triggered" — which reads as a capability rather than a
 required step.
 
+The arrangement table has a **`Numeric`** column, and it decides whether
+the value on screen is yours to send or the device's to render. It is easy
+to read past and it is the difference between a readout and a permanent
+`0`.
+
 Arrangements used here:
 
-- **3** — "1 line + 2×4: Title and 8 names", 9 fields. Field 0 is the
-  title, 1–8 the names under one row of eight encoders. This is the
-  stationary display.
-- **4** — "Parameter Name and Numeric Parameter Value", the per-control
-  default, for the temporary display a turn raises.
+- **3** — "1 line + 2×4: Title and 8 names". `Numeric: No`, 9 fields:
+  field 0 is the title, 1–8 the names under one row of eight encoders.
+  This is the stationary display.
+- **1** — "Parameter Name and **Text** Parameter Value". `Numeric: No`,
+  2 fields: name and value. This is the per-control display a turn
+  raises.
+
+Not **4**, which is the per-control *default* and the obvious-looking
+choice. It is the table's only `Numeric: Yes`, carries **one** text field
+(the name), and renders the value itself from the control's raw MIDI
+value. Relative encoders have no raw value, so it shows `0` regardless of
+what is sent to field 1 — that field does not exist.
 
 Text is ASCII `20h`–`7Eh`, plus four reassigned control codes (`1Bh` empty
 box, `1Ch` filled box, `1Dh` flat, `1Eh` heart) that nothing here uses.
@@ -405,6 +417,11 @@ session:
 - DAW mode entry, the feature-control enables, and relative encoder
   output. Parameters move from the encoders.
 - The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
+- Relative encoder deltas: **±1, ±2, ±4** around the pivot at the medium
+  curve, and the driver has to scale them — see open question 1.
+- The per-control readout needs arrangement **1**, not the default 4:
+  4 is `Numeric: Yes` and renders the value itself, which for a relative
+  encoder is always 0.
 - The upper button row starts at **CC 37** on channel 1, as the diagram
   said: button 1 sends `B0 25 7F` on press and `B0 25 00` on release. The
   rest of the row is still inferred from the diagram rather than seen.

@@ -92,9 +92,23 @@ const SCREEN_BRIGHTNESS: u8 = 100;
 /// question 1, which phase 0 settles.
 const ENCODER_CURVE: u8 = 1;
 
-/// Display arrangement 4 — "2 lines: Parameter Name and Numeric Parameter
-/// Value", the per-control default and the right shape for one control.
-const ARRANGEMENT_NAME_AND_VALUE: u8 = 4;
+/// Display arrangement 1 — "2 lines: Parameter Name and **Text**
+/// Parameter Value". Two fields: 0 is the name, 1 is the value.
+///
+/// Not arrangement 4, which is the per-control *default* and looks like
+/// the obvious choice. The reference's arrangement table has a `Numeric`
+/// column, and 4 is the only `Yes` in it: it carries **one** text field,
+/// the name, and renders the value itself from the control's raw MIDI
+/// value. With relative encoders there is no raw value to render, so it
+/// shows 0 no matter what text is sent to field 1 — the field does not
+/// exist. Arrangement 1 is `Numeric: No` with two text fields, which is
+/// what a driver supplying its own value in the parameter's own units
+/// needs.
+const ARRANGEMENT_NAME_AND_VALUE: u8 = wire::ARRANGEMENT_NAME_AND_TEXT_VALUE;
+
+/// Fields of [`ARRANGEMENT_NAME_AND_VALUE`].
+const READOUT_NAME_FIELD: u8 = 0;
+const READOUT_VALUE_FIELD: u8 = 1;
 
 /// Fields of display arrangement 3: a title and eight names.
 const TITLE_FIELD: u8 = 0;
@@ -392,8 +406,8 @@ impl<const N: usize> Driver<N> {
         let _ = self
             .out
             .send(&wire::display_config(target, ARRANGEMENT_NAME_AND_VALUE));
-        send_text(&mut self.out, target, 0, readout.name);
-        send_text(&mut self.out, target, 1, &value);
+        send_text(&mut self.out, target, READOUT_NAME_FIELD, readout.name);
+        send_text(&mut self.out, target, READOUT_VALUE_FIELD, &value);
         // Configured and filled is not the same as shown.
         let _ = self.out.send(&wire::display_trigger(target));
     }

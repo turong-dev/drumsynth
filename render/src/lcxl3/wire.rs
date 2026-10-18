@@ -164,6 +164,25 @@ pub const TARGET_STATIONARY: u8 = 0x35;
 /// Display target: the global overlay / temporary display.
 pub const TARGET_OVERLAY: u8 = 0x36;
 
+/// Display arrangement 1 — "2 lines: Parameter Name and Text Parameter
+/// Value". Two text fields: 0 is the name, 1 is the value.
+///
+/// The arrangement table's `Numeric` column decides whether the value is
+/// *ours* to send or the device's to render, and it is the difference
+/// between a readout and a 0. This one is `No`, so both fields are text.
+pub const ARRANGEMENT_NAME_AND_TEXT_VALUE: u8 = 1;
+
+/// Display arrangement 4 — "2 lines: Parameter Name and Numeric Parameter
+/// Value", the per-control default.
+///
+/// `Numeric: Yes` and **one** text field. The device renders the value
+/// from the control's raw MIDI value, so with relative encoders — which
+/// have no absolute value — it shows 0, and text sent to field 1 goes
+/// nowhere because that field does not exist. Documented here so the
+/// next person reaching for "the per-control default" knows why it is
+/// the wrong one.
+pub const ARRANGEMENT_NAME_AND_NUMERIC_VALUE: u8 = 4;
+
 /// Display arrangement 3 — "1 line + 2x4: Title and 8 names".
 ///
 /// Nine fields: field 0 is the title, fields 1..=8 are the names under the
@@ -856,6 +875,20 @@ mod tests {
     #[test]
     fn leading_data_without_status_is_dropped() {
         assert_eq!(messages(&[40, 127, 0xB0, 37, 1]), vec![(0xB0, 37, 1)]);
+    }
+
+    /// The arrangement that supplies its own value text is 1, not the
+    /// per-control default of 4. 4 renders the value from the control's
+    /// raw MIDI value and has no text field for it, which with relative
+    /// encoders means a readout permanently showing 0.
+    #[test]
+    fn the_readout_arrangement_is_the_text_one() {
+        assert_eq!(ARRANGEMENT_NAME_AND_TEXT_VALUE, 1);
+        assert_eq!(ARRANGEMENT_NAME_AND_NUMERIC_VALUE, 4);
+        assert_ne!(
+            ARRANGEMENT_NAME_AND_TEXT_VALUE, ARRANGEMENT_NAME_AND_NUMERIC_VALUE,
+            "picking the default here is the bug"
+        );
     }
 
     #[test]

@@ -118,10 +118,21 @@ fn steps() -> Vec<Step> {
             trigger: Some(wire::ARRANGEMENT_TRIGGER),
         },
         Step {
-            what: "per-control: encoder 1 (0Dh), arrangement 4 (Name/Value), trigger 31",
+            what: "per-control: encoder 1 (0Dh), arrangement 1 (Name/TEXT value), trigger 31",
+            target: 0x0D,
+            config: 1,
+            fields: &["STEP 9", "42%"],
+            trigger: Some(wire::ARRANGEMENT_TRIGGER),
+        },
+        Step {
+            // The control: arrangement 4 is `Numeric: Yes` and has one
+            // text field, so the value here should stay blank or 0 no
+            // matter what is sent to field 1.
+            what:
+                "per-control: encoder 1, arrangement 4 (Name/NUMERIC value) — value should NOT take",
             target: 0x0D,
             config: 4,
-            fields: &["STEP 9", "42%"],
+            fields: &["STEP 10", "42%"],
             trigger: Some(wire::ARRANGEMENT_TRIGGER),
         },
     ]
