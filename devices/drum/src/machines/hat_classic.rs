@@ -11,18 +11,20 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range          | notes |
-//! |-----|-----|-----------|----------------|-------|
-//! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
-//! | 8   | 28  | HPF       | 2000..11000 Hz | highpass colour |
-//! | 9   | 29  | LPF       | 4000..16000 Hz | lowpass top; takes the fizz off |
-//! | 16  | 36  | LEVEL     | 0..1           | per-machine output level |
-//! | 18  | 38  | DEC       | 10..510 ms     | decay time; <100 ms reads as closed |
-//! | 22  | 42  | SEND.DLY  | 0..1           | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//! | name     | range          | notes                                            |
+//! |----------|----------------|--------------------------------------------------|
+//! | MACH     | 0..1           | machine selector (quantised over MachineId::ALL) |
+//! | HPF      | 2000..11000 Hz | highpass colour                                  |
+//! | LPF      | 4000..16000 Hz | lowpass top; takes the fizz off                  |
+//! | LEVEL    | 0..1           | per-machine output level                         |
+//! | DEC      | 10..510 ms     | decay time; <100 ms reads as closed              |
+//! | SEND.DLY | 0..1           | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1           | reverb send (track-routed)                       |
 //!
 //! Noise-only, so the PITCH bank is RESV (default 0.0) and ignored apart
 //! from the track-routed machine selector at slot 5.

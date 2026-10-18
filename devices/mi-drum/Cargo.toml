@@ -16,6 +16,9 @@ approx = "0.5"
 [features]
 default = []
 debug-params = []
+# Signal-path graph for the generated cheat-sheet. Host-only documentation
+# data; the firmware never turns it on. See `core`'s `topology` feature.
+topology = ["device-core/topology"]
 
 [[bench]]
 name = "mi_drum"

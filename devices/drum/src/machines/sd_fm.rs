@@ -8,22 +8,24 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range         | notes |
-//! |-----|-----|-----------|---------------|-------|
-//! | 0   | 20  | TUNE      | 100..400 Hz   | carrier pitch |
-//! | 1   | 21  | RAT       | 1.0..4.0      | modulator-to-carrier ratio |
-//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
-//! | 18  | 38  | BDEC      | 40..480 ms    | body decay |
-//! | 19  | 39  | NDEC      | 30..830 ms    | noise decay |
-//! | 21  | 41  | NMIX      | 0..1          | body↔rattle crossfade |
-//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
-//! | 24  | 44  | AMT       | 0..3          | FM amount in carrier cycles |
-//! | 25  | 45  | MENV      | 5..105 ms     | mod-envelope decay (FM thins over time) |
+//! | name     | range       | notes                                            |
+//! |----------|-------------|--------------------------------------------------|
+//! | TUNE     | 100..400 Hz | carrier pitch                                    |
+//! | RAT      | 1.0..4.0    | modulator-to-carrier ratio                       |
+//! | MACH     | 0..1        | machine selector (quantised over MachineId::ALL) |
+//! | LEVEL    | 0..1        | per-machine output level                         |
+//! | BDEC     | 40..480 ms  | body decay                                       |
+//! | NDEC     | 30..830 ms  | noise decay                                      |
+//! | NMIX     | 0..1        | body↔rattle crossfade                            |
+//! | SEND.DLY | 0..1        | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1        | reverb send (track-routed)                       |
+//! | AMT      | 0..3        | FM amount in carrier cycles                      |
+//! | MENV     | 5..105 ms   | mod-envelope decay (FM thins over time)          |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

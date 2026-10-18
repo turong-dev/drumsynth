@@ -12,21 +12,23 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range          | notes |
-//! |-----|-----|-----------|----------------|-------|
-//! | 0   | 20  | TUNE      | 200..1000 Hz   | fundamental of the osc bank |
-//! | 1   | 21  | TONE      | 0..1           | bipolar — shrill to deep detune spread |
-//! | 5   | 25  | MACH      | 0..1           | machine selector (quantised over MachineId::ALL) |
-//! | 8   | 28  | BPF       | 2000..12000 Hz | bandpass center |
-//! | 16  | 36  | LEVEL     | 0..1           | per-machine output level |
-//! | 18  | 38  | DEC       | 10..510 ms     | main decay |
-//! | 19  | 39  | TDEC      | 5..80 ms       | transient decay (initial bright tick) |
-//! | 21  | 41  | RST       | 0..1           | osc reset on trigger (0=free, 1=reset) |
-//! | 22  | 42  | SEND.DLY  | 0..1           | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1           | reverb send (track-routed) |
+//! | name     | range          | notes                                            |
+//! |----------|----------------|--------------------------------------------------|
+//! | TUNE     | 200..1000 Hz   | fundamental of the osc bank                      |
+//! | TONE     | 0..1           | bipolar — shrill to deep detune spread           |
+//! | MACH     | 0..1           | machine selector (quantised over MachineId::ALL) |
+//! | BPF      | 2000..12000 Hz | bandpass center                                  |
+//! | LEVEL    | 0..1           | per-machine output level                         |
+//! | DEC      | 10..510 ms     | main decay                                       |
+//! | TDEC     | 5..80 ms       | transient decay (initial bright tick)            |
+//! | RST      | 0..1           | osc reset on trigger (0=free, 1=reset)           |
+//! | SEND.DLY | 0..1           | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1           | reverb send (track-routed)                       |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

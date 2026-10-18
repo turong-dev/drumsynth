@@ -7,21 +7,23 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range         | notes |
-//! |-----|-----|-----------|---------------|-------|
-//! | 0   | 20  | TUNE      | 200..800 Hz   | body pitch |
-//! | 1   | 21  | DET       | 1.0..1.08     | osc2 relative to osc1 (up to ~8%) |
-//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 8   | 28  | HPF       | 1000..6000 Hz | noise tick colour |
-//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
-//! | 18  | 38  | DEC       | 15..150 ms    | body decay — intentionally short |
-//! | 19  | 39  | NDEC      | 5..60 ms      | noise-tick decay (shorter than body) |
-//! | 20  | 40  | NLEV      | 0..1          | tick level |
-//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | name     | range         | notes                                            |
+//! |----------|---------------|--------------------------------------------------|
+//! | TUNE     | 200..800 Hz   | body pitch                                       |
+//! | DET      | 1.0..1.08     | osc2 relative to osc1 (up to ~8%)                |
+//! | MACH     | 0..1          | machine selector (quantised over MachineId::ALL) |
+//! | HPF      | 1000..6000 Hz | noise tick colour                                |
+//! | LEVEL    | 0..1          | per-machine output level                         |
+//! | DEC      | 15..150 ms    | body decay — intentionally short                 |
+//! | NDEC     | 5..60 ms      | noise-tick decay (shorter than body)             |
+//! | NLEV     | 0..1          | tick level                                       |
+//! | SEND.DLY | 0..1          | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1          | reverb send (track-routed)                       |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 

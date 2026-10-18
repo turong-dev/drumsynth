@@ -11,20 +11,22 @@
 //!
 //! # Params
 //!
-//! Canonical 4-bank layout (PITCH/FILTER/AMP/MOD), flat index `bank*8+slot`,
-//! MIDI CC `20 + flat` on the track's channel:
+//! What each control does and the range it spans. NRPN addresses are in
+//! the generated cheat-sheet (`cargo run -p render -- cheatsheet`) and are
+//! not repeated here: a second copy drifts, as the `CC 20 + slot` column
+//! that used to be in this table did.
 //!
-//! | idx | CC  | name      | range         | notes |
-//! |-----|-----|-----------|---------------|-------|
-//! | 0   | 20  | TUNE      | 200..1200 Hz  | osc A frequency |
-//! | 1   | 21  | TONE      | 0..1          | osc B/A ratio (1.3..3.0) |
-//! | 5   | 25  | MACH      | 0..1          | machine selector (quantised over MachineId::ALL) |
-//! | 8   | 28  | NCOL      | 1000..18000 Hz | noise HP colour |
-//! | 16  | 36  | LEVEL     | 0..1          | per-machine output level |
-//! | 18  | 38  | DEC       | 100..2000 ms  | main decay (long — it's a cymbal) |
-//! | 19  | 39  | TDEC      | 5..100 ms     | transient (noise) decay |
-//! | 22  | 42  | SEND.DLY  | 0..1          | delay send (track-routed) |
-//! | 23  | 43  | SEND.RVB  | 0..1          | reverb send (track-routed) |
+//! | name     | range          | notes                                            |
+//! |----------|----------------|--------------------------------------------------|
+//! | TUNE     | 200..1200 Hz   | osc A frequency                                  |
+//! | TONE     | 0..1           | osc B/A ratio (1.3..3.0)                         |
+//! | MACH     | 0..1           | machine selector (quantised over MachineId::ALL) |
+//! | NCOL     | 1000..18000 Hz | noise HP colour                                  |
+//! | LEVEL    | 0..1           | per-machine output level                         |
+//! | DEC      | 100..2000 ms   | main decay (long — it's a cymbal)                |
+//! | TDEC     | 5..100 ms      | transient (noise) decay                          |
+//! | SEND.DLY | 0..1           | delay send (track-routed)                        |
+//! | SEND.RVB | 0..1           | reverb send (track-routed)                       |
 //!
 //! All other slots are RESV (default 0.0) and ignored.
 
