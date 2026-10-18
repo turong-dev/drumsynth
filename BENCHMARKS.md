@@ -141,6 +141,15 @@ is made of* below, which the per-block distribution finally cracked.
   worst block sits beyond it. A high `max/p99` with a normal `p99/p50` is
   a contaminated block, not a regression. `over budget` is the only
   number that says whether the deadline is actually missed.
+- **Compare contamination as `max − p99` in cycles, not as the `max/p99`
+  ratio**, whenever the rows being compared have different magnitudes. The
+  ratio has the denominator in it and an intrusion is additive, so it
+  flatters big rows and slanders small ones. The per-machine sweep made this
+  concrete: ranked by ratio its single-voice rows look catastrophic
+  (`pk-fm bare` at 5.79) and the six-track scenarios look clean; ranked by
+  cycles it inverts, with 82% of the standard scenarios over 10k excess
+  against 25% of the sweep rows, and the largest single excess in the whole
+  run belonging to `6 sounding`. Both readings are of the same data. See #12.
 - The `phase` column is the spread between the three positions in the
   voice-render cycle. Flat on `idle`; around 10% when six voices sound.
   A jump there means something changed about render scheduling.
