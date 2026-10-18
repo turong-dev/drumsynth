@@ -167,8 +167,12 @@ fn enter_daw_mode(port: Option<&str>) -> Result<midir::MidiOutputConnection, Box
         out.send(&wire::feature(row, 0x7F))?;
     }
     out.send(&wire::feature(wire::FEAT_TOUCH, 0x7F))?;
-    out.send(&wire::feature(wire::FEAT_FADER_PICKUP, 0x7F))?;
-    println!("DAW mode on: relative encoder rows 1-3, touch events, fader pickup");
+    // Pickup is turned *off* here, deliberately. It suppresses fader
+    // output until the fader crosses the value the device holds, which is
+    // exactly the output a monitor exists to show — leaving it on would
+    // make a working fader look like a dead one.
+    out.send(&wire::feature(wire::FEAT_FADER_PICKUP, 0x00))?;
+    println!("DAW mode on: relative encoder rows 1-3, touch events, fader pickup OFF");
     println!("turn an encoder slowly, then fast — the data byte is what phase 0 needs");
     Ok(out)
 }

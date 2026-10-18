@@ -192,6 +192,36 @@ dark** and do nothing, and the `AMP` button is dark on every machine
 because mi-drum runs its envelope inside the voice and has no `AMP` rows.
 Both are correct, and both are covered by tests.
 
+## Fader pickup is off, and that reverses what #13 asked for
+
+#13 says "fader pickup on (feature CC 70), so a fader physically out of
+position does not jump the level on first touch". That is the right
+instinct and the wrong setting, for a reason the issue could not have
+known: **pickup makes a fader silent until it passes through the value the
+device holds for it, and nothing tells the device what that value is.**
+
+The reference describes the feedback channel only for encoders — "if the
+DAW sends them position information, they automatically pick that up" —
+and says nothing about faders. With pickup on and no positions sent, the
+pickup reference is whatever the device defaulted to, so the faders are
+dead until they happen to cross it. Which is what they did.
+
+So the driver now *explicitly disables* pickup rather than leaving it
+alone, because some feature controls are non-volatile and a device
+carrying the setting from an earlier session would have dead faders for a
+reason nothing in this run had set. `--fader-pickup` turns it back on for
+measurement.
+
+`monitor --daw` disables it too, and must: pickup suppresses exactly the
+output a monitor exists to show, so leaving it on makes a working fader
+look like a dead one.
+
+**To get #13's intent back**, phase 0 needs to answer whether sending
+`BFh <5..12> <value>` to the device sets a fader's stored pickup position
+the way it does for encoders. If it does, the driver can send the current
+levels at startup and after every machine change, and pickup becomes
+usable. Until then it is a setting that only breaks things.
+
 ## Phase 0: what to capture, and what each capture decides
 
 `render monitor --daw --hex` puts the controller into DAW mode with
@@ -273,6 +303,8 @@ session:
 - DAW mode entry, the feature-control enables, and relative encoder
   output. Parameters move from the encoders.
 - The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
+- Faders are silent while fader pickup is on, because nothing sends the
+  device the positions it would pick up against. Pickup is now off.
 
 ## Not yet confirmed
 

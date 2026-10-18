@@ -417,6 +417,14 @@ pub(crate) enum Command {
         /// Per-track multi-out: 18 channels. See `device --multi-out`.
         #[arg(long)]
         multi_out: bool,
+        /// Enable the controller's fader pickup (feature CC 70).
+        ///
+        /// Off by default. Pickup keeps a fader silent until it passes
+        /// through the value the *device* holds for it, and nothing sends
+        /// the device those values yet — so turning it on makes the
+        /// faders look broken. Here to measure against, not to use.
+        #[arg(long)]
+        fader_pickup: bool,
     },
 }
 

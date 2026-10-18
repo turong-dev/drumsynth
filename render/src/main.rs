@@ -496,8 +496,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             surface_port,
             port,
             multi_out,
+            fader_pickup,
         } => {
-            let config = lcxl3::Config { port: surface_port };
+            let config = lcxl3::Config {
+                port: surface_port,
+                fader_pickup,
+            };
             match device.as_str() {
                 "drum" => device::run_with_surface(
                     Box::new(DrumEngine::new()),

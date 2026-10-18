@@ -105,6 +105,21 @@ pub struct Config {
     /// Substring matched against MIDI port names. `None` uses
     /// [`DEFAULT_PORT_FILTERS`].
     pub port: Option<String>,
+    /// Enable the controller's fader pickup (feature CC 70).
+    ///
+    /// Off by default, and that is a reversal of what #13 asked for.
+    /// Pickup makes a fader silent until it passes through the value the
+    /// *device* holds for it — which is only useful if the device has
+    /// been told what that value is. Nothing here tells it: the reference
+    /// describes position feedback for encoders ("if the DAW sends them
+    /// position information, they automatically pick that up") and the
+    /// driver sends none, so the pickup reference is whatever the device
+    /// happened to default to. The result is faders that look broken.
+    ///
+    /// The flag stays so the behaviour can be measured against the
+    /// hardware once the position-feedback question is settled; see
+    /// `docs/launch-control-xl3.md`.
+    pub fader_pickup: bool,
 }
 
 /// The driver's own copy of what the controller is currently showing, so a
@@ -146,6 +161,8 @@ impl Painted {
 /// A connected Launch Control XL 3 in DAW mode.
 pub struct Driver<const N: usize> {
     out: MidiOutputConnection,
+    /// Whether the controller's fader pickup was asked for.
+    fader_pickup: bool,
     surface: Surface<N>,
     painted: Painted,
     /// Encoder row the screen's names are drawn from — the last row
@@ -162,6 +179,7 @@ impl<const N: usize> Driver<N> {
         let out = open_output_port(config.port.as_deref())?;
         let mut driver = Driver {
             out,
+            fader_pickup: config.fader_pickup,
             surface,
             painted: Painted::unknown(),
             row: 0,
@@ -200,9 +218,14 @@ impl<const N: usize> Driver<N> {
         ] {
             let _ = self.out.send(&wire::feature(row, 0x7F));
         }
-        // Faders are absolute, so a fader physically out of position would
-        // jump the level on first touch. Pickup is the fix.
-        let _ = self.out.send(&wire::feature(wire::FEAT_FADER_PICKUP, 0x7F));
+        // Pickup is explicitly *disabled* rather than left alone: it is
+        // non-volatile on some feature controls and the device may be
+        // carrying it from a previous session, in which case the faders
+        // would be dead for a reason nothing here had set.
+        let _ = self.out.send(&wire::feature(
+            wire::FEAT_FADER_PICKUP,
+            if self.fader_pickup { 0x7F } else { 0x00 },
+        ));
         // Touch events: used only to keep a turn in progress on its target
         // when a modal opens underneath it.
         let _ = self.out.send(&wire::feature(wire::FEAT_TOUCH, 0x7F));
@@ -706,6 +729,61 @@ mod tests {
         let ports = names(&["LCXL3 1 DAW In", "Some Other Thing"]);
         assert_eq!(pick_port(&ports, Some("other")), Some(1));
         assert_eq!(pick_port(&ports, Some("nothing here")), None);
+    }
+
+    /// A fader's raw bytes, all the way to the engine's level.
+    ///
+    /// Written because the faders appeared dead on hardware and the cause
+    /// turned out to be a feature control (pickup) rather than anything
+    /// on this path. The test pins the path so the next time faders go
+    /// quiet the question is immediately "is the device sending?" rather
+    /// than "is any of this wired up?".
+    #[test]
+    fn a_fader_cc_moves_that_tracks_level() {
+        use drum_engine::machines::{MachineId, NUM_PARAMS, SLOT_LEVEL};
+        use drum_engine::midi::handle_midi;
+        use drum_engine::{DeviceEngine, DrumEngine};
+
+        let mut engine = DrumEngine::new();
+        let kit = crate::lcxl3::snapshot::<_, NUM_PARAMS>(&engine);
+        let mut surface = Surface::<NUM_PARAMS>::new(
+            crate::lcxl3::catalogue_for::<MachineId, NUM_PARAMS>(),
+            &kit,
+        );
+
+        // Fader 4 is control index 5 + 3, on the analogue channel.
+        let msg = wire::decode(0xB0 | wire::CH_ANALOGUE, wire::FADER_FIRST + 3, 127)
+            .expect("a fader CC must decode");
+        let input = to_input(msg).expect("a fader must reach the surface");
+        let outcome = surface.handle(input, 0);
+
+        let mut sent = 0;
+        for ev in outcome.events() {
+            handle_midi(&mut engine, ev);
+            sent += 1;
+        }
+        assert_eq!(sent, 1, "one absolute write");
+        assert_eq!(
+            engine.tracks()[3].param_target(SLOT_LEVEL),
+            1.0,
+            "a fader at 127 is full level on track 3, and nothing else"
+        );
+        for t in 0..engine.tracks().len() {
+            if t != 3 {
+                assert_ne!(engine.tracks()[t].param_target(SLOT_LEVEL), 1.0);
+            }
+        }
+    }
+
+    /// Pickup is off unless explicitly asked for, because nothing sends
+    /// the device the values it would pick up against.
+    #[test]
+    fn fader_pickup_is_off_by_default() {
+        let config = Config {
+            port: None,
+            fader_pickup: false,
+        };
+        assert!(!config.fader_pickup);
     }
 
     #[test]
