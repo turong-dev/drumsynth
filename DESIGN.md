@@ -110,15 +110,16 @@ indices:
   positions drive the core strip.
 - `group` is the external address.
 - `kind` is what the 0..1 value means: continuous, bipolar, or a choice
-  among `count` options. The grid picks a widget from it, the
+  among `count` options. A control surface picks a widget from it, the
   cheat-sheet prints it, and the NRPN router snaps a discrete parameter
   onto an exact option rather than a value between two.
 
-The grid's parameter screen is derived from the table through all three:
-the group selector pages by `group`, rows come from `resolve`, and
-widgets come from `kind`. A device adds a parameter by adding a row and
-it appears on the grid, in the cheat-sheet, and at its NRPN address,
-with no UI change.
+A control surface's parameter screen is derived from the table through
+all three: it pages by `group`, takes its rows from `resolve`, and picks
+widgets from `kind`. A device adds a parameter by adding a row and it
+appears on every surface, in the cheat-sheet, and at its NRPN address,
+with no UI change. The Monome grid was the first surface built this way;
+it has been removed, but the property is the one any replacement keeps.
 
 ### Enum dispatch, not trait objects
 
@@ -218,7 +219,7 @@ drumsynth/
 A device is one engine crate containing: a machine catalog
 (`MachineId`/`MachineSlot`/`MACHINE_INFO`), an engine struct over
 `core::Track<YourSlot>`, a default kit, and a `DeviceEngine` impl. The rest
-(MIDI router, grid UX, firmware bin, render harness, bench scaffolding, SendFx)
+(MIDI router, firmware bin, render harness, bench scaffolding, SendFx)
 comes through shared traits.
 
 Static dispatch via the `Slot` trait; `Track<S, N>` monomorphizes. No trait
@@ -399,7 +400,7 @@ Peaks or Plaits source → Warps → Ripples
   width limit, and a device adds a parameter by adding a table row.
 
 `DeviceModel::param_table` is still per-device; because the strip is fixed,
-the grid does not need to relabel knobs when a "stage" changes. The old
+a control surface does not need to relabel knobs when a "stage" changes. The old
 `macro_info(&self, stages: StageConfig)` widening is no longer required.
 
 ### mi-drum gate
@@ -500,6 +501,7 @@ depending on the digest at all.
 | Parameter count | per device, not core-wide; ceiling 256 (`MAX_PARAMS`) |
 | Flat slot index | internal layout, not an ABI |
 | *Macro* | reserved for a later named-combination feature; a knob is a parameter |
+| Monome grid surface | removed; recoverable from git history. A surface derives from the parameter table — that property stays |
 
 ## Anti-decisions (do not do these)
 

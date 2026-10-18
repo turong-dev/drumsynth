@@ -28,7 +28,7 @@ pub trait SlotId<const N: usize>: Copy + Eq + Debug {
 
 /// Display and control metadata for a slot identifier.
 ///
-/// This is the narrow surface the grid UI needs from a device: param names,
+/// This is the narrow surface a control surface needs from a device: param names,
 /// abbreviations, defaults, and a human-readable label per machine. It extends
 /// [`SlotId`] so a device can vend both identity and metadata from the same
 /// type.
@@ -38,8 +38,8 @@ pub trait DeviceModel<const N: usize>: SlotId<N> {
     ///
     /// Borrowed rather than returned by value: the table is a `static` on
     /// both devices, and the callers that walk it — NRPN address resolution
-    /// on every data message, the grid on every render — would otherwise
-    /// copy 33 rows to read one.
+    /// runs on every data message — would otherwise copy 33 rows to read
+    /// one.
     fn param_table(self) -> &'static [ParamInfo; N];
 
     /// Where param `idx`'s value goes when it is set — the dispatch datum for

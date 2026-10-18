@@ -4,8 +4,8 @@
 //! that are reusable across devices: DSP primitives, the param/CC slot system,
 //! a MIDI parser, and timing/event plumbing.
 //!
-//! Device-specific code — machine catalogs, engine structs, MIDI routing,
-//! and the grid screens — lives in per-device engine crates.
+//! Device-specific code — machine catalogs, engine structs and MIDI
+//! routing — lives in per-device engine crates.
 
 #![no_std]
 #![deny(unsafe_code)]
@@ -19,9 +19,6 @@ pub mod slot;
 pub mod sound;
 pub mod strip;
 pub mod track;
-
-#[cfg(feature = "grid")]
-pub mod grid;
 
 /// Sample rate the engine is built for.
 ///

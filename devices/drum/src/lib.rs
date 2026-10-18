@@ -50,8 +50,6 @@
 
 pub use device_core::dsp;
 
-#[cfg(feature = "grid")]
-pub mod grid;
 pub mod machines;
 pub mod midi;
 

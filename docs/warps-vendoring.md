@@ -118,7 +118,7 @@ sample per channel. That is cycles spent and a 32-bit signal path quantised to
 
 **3. It assumes a whole CPU.** One stereo pair at 96 kHz on an STM32F4 with
 nothing else running, against six instances at 48 kHz sharing a core with MIDI,
-USB, the grid and the sequencer.
+USB and the sequencer.
 
 ## The default is the second most expensive algorithm
 

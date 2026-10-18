@@ -65,7 +65,7 @@ fn a_kit_load_does_not_realign_the_voices() {
 fn a_machine_swap_does_not_realign_the_voices() {
     let mut e = engine_box();
     let before = phases(&e);
-    // The path the NRPN machine selector and the grid both take.
+    // The path the NRPN machine selector takes.
     e.tracks_mut()[3].load_machine(MiMachineId::String);
     e.tracks_mut()[0].load_machine(MiMachineId::PeaksFmDrum);
     assert_eq!(

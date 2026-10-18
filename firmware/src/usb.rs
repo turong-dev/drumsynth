@@ -53,8 +53,8 @@ use usb_device::{LangID, Result, UsbDirection};
 // It was 64, and the symptom was specific and quiet: the device enumerated,
 // the host accepted every packet it sent, and the firmware received roughly
 // one before the OUT endpoint stopped delivering. Outbound traffic was
-// unaffected, so the board looked alive — the grid's LED stream kept
-// flowing — while MIDI input had never worked at all.
+// unaffected, so the board looked alive while MIDI input had never worked
+// at all.
 const EP_MEMORY_BYTES: usize = 512 * 2 + 64 * 2 + 128;
 static EP_MEMORY: EndpointMemory<EP_MEMORY_BYTES> = EndpointMemory::new();
 

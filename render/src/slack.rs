@@ -16,17 +16,15 @@
 //!
 //! Cycles from a block boundary to that block's render completing, as a
 //! fraction of the 400,000-cycle block period. Unlike `mi-bench`, which times
-//! `engine.process()` with USB interrupts disabled, nothing on MIDI, no grid
-//! and a warm cache, this is measured on the real binary and therefore
-//! includes:
+//! `engine.process()` with USB interrupts disabled, nothing on MIDI and a
+//! warm cache, this is measured on the real binary and therefore includes:
 //!
 //! - the SAI ISR preempting the render, roughly every 333 µs
 //! - the main loop's USB and DIN MIDI polling, which happen *before* the
 //!   render gets a turn and are polled rather than interrupt-driven
-//! - the grid's LED feedback pass
 //! - whatever all of that does to the engine's cache residency
 //!
-//! Those four are exactly what the informal `~70%` ceiling in `BENCHMARKS.md`
+//! Those are exactly what the informal `~70%` ceiling in `BENCHMARKS.md`
 //! was a stand-in for, and none of them has ever been measured. This replaces
 //! the stand-in.
 

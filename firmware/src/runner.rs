@@ -9,8 +9,6 @@ use drum_engine::{DeviceEngine, DeviceModel, Slot};
 use drum_engine::midi::{schedule_midi, MidiParser};
 use drum_engine::BLOCK;
 
-#[cfg(feature = "grid")]
-use drum_engine::grid::{Grid, GridParser, MIDIGRID_CHANNEL};
 
 use teensy4_bsp::board;
 
@@ -96,12 +94,6 @@ where
 
     let mut parser_usb = MidiParser::new();
     let mut parser_uart = MidiParser::new();
-    #[cfg(feature = "grid")]
-    let mut parser_grid_usb = GridParser::new();
-    #[cfg(feature = "grid")]
-    let mut parser_grid_uart = GridParser::new();
-    #[cfg(feature = "grid")]
-    let mut grid = Grid::new();
     // `usb::poll` reads through its own full-size scratch buffer, so this one
     // only has to hold what we want to parse in a single pass.
     let mut usb_midi_buf = [0u8; 256];
@@ -112,10 +104,10 @@ where
     let mut last_stress_ms: u32 = 0;
     // The report in flight: three control changes, sent one per loop pass
     // until each one lands. `usb::send_midi` returns false when the bulk
-    // endpoint is still busy, and the grid's LED feedback keeps it busy
-    // constantly, so a fire-and-forget send is simply dropped — which is how
-    // the first version of this measured nothing at all while the board was
-    // visibly transmitting. `REPORT_IDLE` means nothing is pending.
+    // endpoint is still busy, so a fire-and-forget send is simply dropped —
+    // which is how the first version of this measured nothing at all while
+    // the board was visibly transmitting. `REPORT_IDLE` means nothing is
+    // pending.
     const REPORT_IDLE: usize = 5;
     let mut report: [(u8, u8); 5] = [(0, 0); 5];
     let mut report_idx: usize = REPORT_IDLE;
@@ -123,8 +115,8 @@ where
     loop {
         let now_ms = (crate::audio::sample_counter() / 48) as u32;
 
-        // Drain the pending report before the grid gets a turn at the
-        // endpoint, so a saturated LED stream cannot starve it indefinitely.
+        // Drain the pending report before anything else gets a turn at the
+        // endpoint.
         if report_idx < REPORT_IDLE {
             let (cc, value) = report[report_idx];
             if crate::usb::send_midi(&[0x0B, 0xB0 | SLACK_CHANNEL, cc, value]) {
@@ -132,8 +124,7 @@ where
             }
         }
 
-        // USB MIDI: the host sends 4-byte USB MIDI event packets. Channel 16
-        // is reserved for the Monome Grid; feed it to the grid parser as well.
+        // USB MIDI: the host sends 4-byte USB MIDI event packets.
         let n = crate::usb::poll(&mut usb_midi_buf);
 
         // Reboot-to-bootloader command, checked on the raw packets before
@@ -154,10 +145,6 @@ where
         let mut i = 0;
         while i < n {
             for &b in &usb_midi_buf[i + 1..i + 4] {
-                #[cfg(feature = "grid")]
-                if let Some(event) = parser_grid_usb.push(b) {
-                    grid.process_event(event, now_ms, engine);
-                }
                 if let Some(event) = parser_usb.push(b) {
                     let offset = arrival_offset(crate::audio::sample_counter());
                     schedule_midi(engine, event, offset);
@@ -168,23 +155,11 @@ where
 
         // Drain DIN MIDI.
         while let Ok(byte) = midi_uart.read() {
-            #[cfg(feature = "grid")]
-            if let Some(event) = parser_grid_uart.push(byte) {
-                grid.process_event(event, now_ms, engine);
-            }
             if let Some(event) = parser_uart.push(byte) {
                 let offset = arrival_offset(crate::audio::sample_counter());
                 schedule_midi(engine, event, offset);
             }
         }
-
-        // Render grid LED feedback. Only the USB path carries the midigrid
-        // class; DIN MIDI has no LED return.
-        #[cfg(feature = "grid")]
-        grid.render(engine, now_ms, |_ch, note, vel| {
-            let packet = [0x09, 0x90 | MIDIGRID_CHANNEL, note, vel];
-            crate::usb::send_midi(&packet)
-        });
 
         // Render the next audio block when the ISR asks for it.
         crate::audio::render_next(engine);
@@ -228,9 +203,8 @@ const SLACK_REPORT_MS: u32 = 1_000;
 
 /// MIDI channel the headroom report is sent on.
 ///
-/// 14, immediately below the grid's 15. Both are reserved: a kit would have
-/// to be using all sixteen channels before this collided with anything, and
-/// the grid already set that precedent.
+/// 14. Reserved: a kit would have to be using all sixteen channels before
+/// this collided with anything.
 const SLACK_CHANNEL: u8 = 14;
 
 /// Cycles represented by one step of a 7-bit report value.
@@ -254,8 +228,7 @@ const CC_PROCESS_PCT: u8 = 23;
 ///
 /// Diagnostic: the host-side driver and the `MidiParser` both check out on
 /// the host, so if this stays at zero while the host is streaming notes, the
-/// firmware's USB MIDI *receive* path is where they are being lost — which
-/// nothing has ever exercised, the grid being the only other consumer.
+/// firmware's USB MIDI *receive* path is where they are being lost.
 const CC_MIDI_RX: u8 = 24;
 
 /// Total USB MIDI bytes `usb::poll` has handed back since boot.
@@ -268,7 +241,7 @@ const CC_REBOOT: u8 = 119;
 ///
 /// Packets are 4 bytes: a cable/CIN header then the MIDI status and data.
 /// Checked raw rather than through `MidiParser` so it cannot be swallowed by
-/// running-status handling or by the grid parser consuming the bytes first.
+/// running-status handling.
 fn reboot_requested(buf: &[u8]) -> bool {
     buf.chunks_exact(4).any(|p| {
         p[1] == 0xB0 | SLACK_CHANNEL && p[2] == CC_REBOOT && p[3] >= 64

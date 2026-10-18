@@ -16,7 +16,6 @@ approx = "0.5"
 [features]
 default = []
 debug-params = []
-grid = ["device-core/grid"]
 
 [[bench]]
 name = "mi_drum"

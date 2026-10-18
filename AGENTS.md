@@ -29,10 +29,9 @@ drumsynth/
 ```bash
 # host tests — run these first.
 #
-# Use --all-features. The `grid` feature (core/devices) and the `live`
-# feature (render: device mode, monitor) are off by default, and a plain
-# `cargo test` does not compile their code — both have silently broken
-# before.
+# Use --all-features. The `live` feature (render: device mode, monitor) is
+# off by default, and a plain `cargo test` does not compile its code — it
+# has silently broken before.
 cargo test --workspace --all-features
 
 # host render
@@ -44,7 +43,6 @@ cargo test -p render mi_drum_baseline_is_unchanged
 
 # cross-compile (catches std/alloc leakage)
 cargo build -p device-core --target thumbv7em-none-eabihf
-cargo build -p device-core --features grid --target thumbv7em-none-eabihf
 cargo build -p drum-engine --target thumbv7em-none-eabihf
 cargo build -p mi-drum-engine --target thumbv7em-none-eabihf
 

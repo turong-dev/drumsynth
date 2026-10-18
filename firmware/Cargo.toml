@@ -6,8 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Teensy 4.1 target for drum-engine."
 
 [features]
-default = ["grid", "cache"]
-grid = ["drum-engine/grid"]
+default = ["cache"]
 
 # The Plaits device. Off by default because `mi-dsp` cross-compiles vendored
 # C++ and so needs a bare-metal C++ toolchain (`arm-none-eabi-g++`, or set
