@@ -92,11 +92,17 @@ arrangement field is overloaded: 0 cancels, 1–30 select an arrangement, and
 holds. `7Fh` is the documented shorthand for "trigger with both automatic
 bits set".
 
-This is the one that cost an evening. Every other part of the integration
-worked — DAW mode on, relative encoders reporting, parameters moving — and
-the OLED stayed blank, because the driver configured the arrangement and
-wrote the fields and never triggered. `render screen-probe` exists to
-settle it empirically rather than by re-reading the paragraph.
+**Confirmed on hardware, 2026-10-18** (`screen-probe` step 2): target
+`35h`, config `03h`, text fields 0–8, then config `1Fh`. The screen showed
+the title on its top line and the eight names below it. Step 1 — the same
+sequence without the trigger — showed nothing, which is what the bug was.
+
+Every other part of the integration worked while the OLED stayed blank:
+DAW mode on, relative encoders reporting, parameters moving. The driver
+configured the arrangement, wrote the fields, and never triggered. The
+reference does say so, as "once a display is configured for a given
+target, it can be triggered" — which reads as a capability rather than a
+required step.
 
 Arrangements used here:
 
@@ -231,16 +237,19 @@ and confirm the ch 7 CC 30 report arrives, and with what value. The driver
 re-enters DAW mode and repaints from scratch whenever it sees a mode that
 is not DAW Control, which needs the report observed rather than assumed.
 
-**5. The display-target overlap.** The reference says targets `05h`–`24h`
+**5. The display-target overlap.** Partly settled. `35h` is confirmed as
+the stationary display for configure-and-text, so the `20h`/`21h`
+numbering in the bitmap section applies to that command alone rather than
+contradicting this one. Steps 6 and 7 of the probe were not needed.
+
+What is still open is narrower: the reference says targets `05h`–`24h`
 (5–36) are the per-control temporary displays, and separately that "the
 arrangement is ignored for targets only setting names (`22h`(34) –
-`28h`(40))". Those two ranges overlap at 34–36, which are encoders 22–24.
-One of the two statements is wrong. Set text on target 36 and see which.
-
-The target numbering is stated twice in the document with *different
-numbers*: configure-and-text calls the stationary display `35h` and the
-overlay `36h`, while the bitmap command calls them `20h` and `21h`.
-`render screen-probe` tries all four.
+`28h`(40))". Those ranges overlap at 34–36, which are encoders 22–24. Set
+text on target 36 and see which statement holds. Nothing depends on it
+today: the driver aims per-control displays at the encoder being turned,
+and only reaches 34–36 for the three right-hand encoders of the bottom
+row.
 
 ### `render screen-probe`
 
@@ -256,9 +265,18 @@ Step 0 lights two encoder LEDs first — one through RGB SysEx, one through
 a palette CC — so "nothing is reaching the device" is distinguishable from
 "the screen wants something else" before any display message is sent.
 
+## Confirmed on hardware
+
+As of 2026-10-18, by `render screen-probe` and a live `render lcxl3`
+session:
+
+- DAW mode entry, the feature-control enables, and relative encoder
+  output. Parameters move from the encoders.
+- The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
+
 ## Not yet confirmed
 
-- Everything in *Phase 0*, above.
+- Everything else in *Phase 0*, above — above all what a fast turn sends.
 - The upper/lower button rows are **assumed** to be 37–44 and 45–52
   respectively, read off the diagram. If they turn out to be swapped, the
   fix is two constants in `wire.rs`; nothing above them changes.
