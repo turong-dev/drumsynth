@@ -733,7 +733,14 @@ mod mi_drum_baseline {
     // carrier, which is the degenerate case `SHAPE.IN` exists to avoid. Only
     // the machine-sweep section moves: `mi-wavetable` is not in
     // `DEFAULT_KIT`, so the kit sections are untouched.
-    const BASELINE_DIGEST: u64 = 0x5035_ea1d_f5c5_7a55;
+    //
+    // Re-pinned for #41: a note-on that landed while Plaits' trigger input
+    // was still armed produced no edge, so the voice never restruck. The
+    // baseline pattern hits tracks faster than they end, so this moves every
+    // Plaits section that has a second hit in it — which is the fix being
+    // visible, not collateral. The Peaks sections are untouched: their edge
+    // was always an explicit per-sample flag.
+    const BASELINE_DIGEST: u64 = 0xba95_93e8_ac74_9b8d;
 
     /// One test, one render, deliberately.
     ///

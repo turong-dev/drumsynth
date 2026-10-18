@@ -415,6 +415,26 @@ in the rendered baseline were exactly `-inf`. Holding the level fixes them and
 gives every level-reading engine a note to sustain, while the edge still fires
 once because Plaits derives both from the same value with hysteresis.
 
+Once per *level*, though — not once per note, which is the part that was
+missed (#41). The trigger input is a Schmitt trigger, armed above 0.3 and
+re-armed only below 0.1, so a note-on arriving while the level is still high
+produced no edge at all: no `lpg_envelope_.Trigger()`, no internal decay, and
+no `TRIGGER_RISING_EDGE`, which on the resonator engines is the strike itself.
+`MiSlot` therefore writes one `VOICE_BLOCK` of zero before raising the level
+again whenever the voice was last told high. One block is enough because
+`trigger_delay_` is a single tap rather than a filter, and the edge that
+follows still waits the same five blocks a first hit waits, so a retrigger has
+first-hit latency rather than worse.
+
+The condition is "was last told high", not "the gate is open", and the
+difference is a second bug. When a one-shot ends itself the silence counter
+closes the gate and clears `active` in the same block; the slot then stops
+rendering, so the low level that would re-arm the input is never written. A
+voice left armed that way is deaf to every note after its first — which is
+every Plaits machine driven from a grid that sends no note-offs. For the same
+reason the mirror deliberately survives `Slot::reset`: a reset leaves the C++
+voice standing, so it cannot clear the delay line it is mirroring.
+
 - Peaks gets real per-sample gate flags instead: `GATE_RISING` on the note-on
   sample, `GATE_HIGH` for the rest of the note, `GATE_FALLING` on the note-off
   sample. The shim translates these to Peaks' own bit values, which are **not**

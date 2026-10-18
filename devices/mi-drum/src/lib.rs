@@ -962,6 +962,34 @@ pub struct MiSlot {
     /// operator envelopes rest at zero and only rise while the gate is high —
     /// they emitted digital silence for the whole hit.
     gate_open: bool,
+    /// A note-on arrived while Plaits' trigger input was still armed, so the
+    /// level has to fall for one block before it can rise again.
+    ///
+    /// That input is a Schmitt trigger: it arms above 0.3 and only re-arms
+    /// below 0.1 (`voice.cc:103`-`:116`). A level left high is therefore one
+    /// note forever — no `lpg_envelope_.Trigger()`, no
+    /// `decay_envelope_.Trigger()`, and no `TRIGGER_RISING_EDGE` for the
+    /// engine, which is the strike itself on the resonator models. Plaits
+    /// only, because Peaks' edge is an explicit per-sample flag and a hole in
+    /// its gate would just cut the note.
+    retrigger_gap_pending: bool,
+    /// The last trigger level written into the Plaits voice was high.
+    ///
+    /// Not the same question as [`Self::gate_open`], and that difference is
+    /// two distinct bugs rather than one. A note-on during a held note is the
+    /// obvious case. The other is a one-shot: when a voice's own envelope ends
+    /// the note, the silence counter closes the gate and `active` goes false
+    /// in the same block — and after that the slot stops rendering, so the
+    /// low level that would re-arm the input is never written. The voice is
+    /// left armed indefinitely, and the next note-on from a source that sends
+    /// no note-off is silent. That is every Plaits machine on a drum grid,
+    /// after its first hit.
+    ///
+    /// So the gap is owed whenever the voice was last told *high*, whatever
+    /// the gate is doing now. Deliberately survives [`Slot::reset`]: a reset
+    /// does not touch the C++ voice, so it cannot clear the delay line this
+    /// mirrors.
+    trigger_level_high: bool,
     /// A note-off is waiting to be rendered, so the next block can carry the
     /// falling edge Peaks' gate processor needs.
     gate_release_pending: bool,
@@ -1280,7 +1308,25 @@ impl MiSlot {
             // (`voice.cc:97`-`:150`). Holding it high for the note is
             // therefore all it takes: the edge still fires once, on the first
             // block where the delayed value crosses 0.3.
-            self.modulations.trigger = if self.gate_open { 1.0 } else { 0.0 };
+            //
+            // A retrigger needs the hole first. One block of zero is enough:
+            // `trigger_delay_` is a single tap, not a filter or a running
+            // maximum, so the zero reads back intact `kTriggerDelay` blocks
+            // later and re-arms the input. The gate is still open, so the
+            // next block raises the level again with no further bookkeeping.
+            // The cost is 24 samples of silence — and the edge that follows
+            // still lands after the same 5-block delay a first hit waits, so
+            // a retrigger has first-hit latency, not worse.
+            let level = if self.retrigger_gap_pending {
+                self.retrigger_gap_pending = false;
+                0.0
+            } else if self.gate_open {
+                1.0
+            } else {
+                0.0
+            };
+            self.trigger_level_high = level > 0.0;
+            self.modulations.trigger = level;
             self.plaits.render_f32(
                 &self.patch,
                 &self.modulations,
@@ -1388,6 +1434,8 @@ impl Slot<NUM_PARAMS> for MiSlot {
                 level_patched: 0,
             },
             trigger_pending: false,
+            retrigger_gap_pending: false,
+            trigger_level_high: false,
             gate_open: false,
             gate_release_pending: false,
             active: false,
@@ -1523,6 +1571,8 @@ impl Slot<NUM_PARAMS> for MiSlot {
                 level_patched: 0,
             });
             core::ptr::addr_of_mut!((*ptr).trigger_pending).write(false);
+            core::ptr::addr_of_mut!((*ptr).retrigger_gap_pending).write(false);
+            core::ptr::addr_of_mut!((*ptr).trigger_level_high).write(false);
             core::ptr::addr_of_mut!((*ptr).gate_open).write(false);
             core::ptr::addr_of_mut!((*ptr).gate_release_pending).write(false);
             core::ptr::addr_of_mut!((*ptr).active).write(false);
@@ -1662,6 +1712,13 @@ impl Slot<NUM_PARAMS> for MiSlot {
     }
 
     fn trigger(&mut self, _velocity: f32) {
+        // A note-on that finds Plaits' trigger input still armed gets no
+        // edge: ask for the gap before raising the level again. Peaks is
+        // excluded — its rising edge is spelled out per sample below and a
+        // hole would only cut the strike it carries.
+        if self.trigger_level_high && !self.is_peaks {
+            self.retrigger_gap_pending = true;
+        }
         self.trigger_pending = true;
         self.env_trigger_pending = true;
         // Open the gate and (re)arm the watchdog. Velocity is intentionally
@@ -1713,6 +1770,10 @@ impl Slot<NUM_PARAMS> for MiSlot {
         self.env2.reset();
         self.osc_env = 0.0;
         self.trigger_pending = false;
+        // `trigger_level_high` is not cleared here on purpose: a reset leaves
+        // the C++ voice standing, so its trigger delay line still holds
+        // whatever was last written and the next note still owes it a gap.
+        self.retrigger_gap_pending = false;
         self.gate_open = false;
         self.gate_release_pending = false;
         self.gate_watchdog = 0;
@@ -3625,6 +3686,166 @@ mod tests {
             assert!(
                 peak > 1.0e-3,
                 "{id:?} is silent — the gate is a pulse again (peak {peak})"
+            );
+        }
+    }
+
+    /// A second note-on while the first is still gated has to strike again.
+    ///
+    /// Plaits' trigger input is a Schmitt trigger — armed above 0.3, re-armed
+    /// only below 0.1 (`voice.cc:103`-`:116`) — so a level held at 1.0 for the
+    /// note produced exactly one edge and then ignored every note after it.
+    /// What is lost with the edge is `lpg_envelope_.Trigger()`, the internal
+    /// decay, and `TRIGGER_RISING_EDGE`, which on the resonator models *is*
+    /// the strike.
+    ///
+    /// Measured against the same note with no second hit, rather than against
+    /// a threshold: the complaint was a second hit that made no difference,
+    /// and the difference is the thing to assert. Before the gap the two runs
+    /// were the same note apart from the strip's own AD envelopes, which do
+    /// retrigger and would mask a bare level test.
+    ///
+    /// The engines here are the ones that strike rather than sustain. The
+    /// sustaining ones are deliberately not in the list: their LPG is already
+    /// wide open under a held gate, so a correct retrigger is inaudible on
+    /// them and there is nothing to assert. `String` is out for a different
+    /// reason — it is excited by noise, `stmlib::Random` is one LCG shared by
+    /// the whole process, and the two runs below therefore draw from
+    /// different states when other tests are running beside them. It
+    /// retriggers by 6x in isolation and by 1.8x in a loaded test run, which
+    /// is a measurement of the seed, not of the gap.
+    ///
+    /// The bar is 1.75x against a broken ratio of 1.0: with no edge the two
+    /// runs differ only by the strip's AD envelopes, which measured 0.999x to
+    /// 1.004x on these engines.
+    #[test]
+    fn a_note_on_during_an_open_gate_retriggers_the_voice() {
+        /// Peak over a window late in a held note, with or without a second
+        /// note-on at the start of that window.
+        fn run(id: MiMachineId, second_hit: bool) -> f32 {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.trigger(0, 1.0);
+            let _ = peak_from(&mut e, blocks_for(0.13), 1);
+            assert!(e.is_active(), "{id:?} went idle before the second hit");
+            if second_hit {
+                e.trigger(0, 1.0);
+            }
+            peak_from(&mut e, 0, blocks_for(0.04))
+        }
+
+        for &id in &[
+            MiMachineId::BassDrum,
+            MiMachineId::SnareDrum,
+            MiMachineId::HiHat,
+            MiMachineId::Modal,
+        ] {
+            let held = run(id, false);
+            let struck = run(id, true);
+
+            assert!(
+                struck > INAUDIBLE,
+                "{id:?} made no sound on the second hit: {struck}"
+            );
+            assert!(
+                struck > held * 1.75,
+                "{id:?} did not retrigger — the second note-on landed on an open \
+                 gate and Plaits never saw an edge ({struck} against {held} for the \
+                 same note left alone)"
+            );
+        }
+    }
+
+    /// The other half of the same bug, and the one that costs a whole kit.
+    ///
+    /// A drum grid sends note-ons and no note-offs, so a one-shot ends itself:
+    /// the output falls under the silence floor, the gate closes and `active`
+    /// goes false in the same block. After that the slot renders nothing, so
+    /// the low trigger level that would re-arm Plaits is never written — the
+    /// voice sits armed from its first hit onwards and every note after it is
+    /// silent. Gating the gap on [`MiSlot::gate_open`] alone does not catch
+    /// this, because by the time the second note-on arrives the gate is shut.
+    ///
+    /// `BassDrum` and `SixOp2` are the witnesses because both come to rest on
+    /// their own within a second, with no note-off anywhere.
+    #[test]
+    fn a_second_hit_lands_after_a_one_shot_has_come_to_rest() {
+        for &id in &[MiMachineId::BassDrum, MiMachineId::SixOp2] {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+
+            e.trigger(0, 1.0);
+            let first = peak_from(&mut e, 0, blocks_for(0.04));
+            assert!(first > INAUDIBLE, "{id:?} was silent on the first hit");
+
+            // No note-off: the voice has to end the note itself.
+            let _ = peak_from(&mut e, blocks_for(2.5), 1);
+            assert!(
+                !e.is_active(),
+                "{id:?} never came to rest — the test is no longer testing anything"
+            );
+
+            e.trigger(0, 1.0);
+            let second = peak_from(&mut e, 0, blocks_for(0.04));
+            assert!(
+                second > first * 0.5,
+                "{id:?} is deaf after its first hit — the trigger level was left \
+                 armed when the slot stopped rendering ({second} against {first})"
+            );
+        }
+    }
+
+    /// The gap is for a note-on that lands mid-note, and must not disturb the
+    /// path that already worked: note-off, then a new note. That one re-arms
+    /// through the level falling to zero on its own.
+    #[test]
+    fn a_note_after_a_note_off_is_unaffected() {
+        for &id in &[
+            MiMachineId::BassDrum,
+            MiMachineId::Modal,
+            MiMachineId::VirtualAnalog,
+        ] {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+
+            e.trigger(0, 1.0);
+            let first = peak_from(&mut e, 0, blocks_for(0.04));
+            e.release(0);
+            // Long enough for the release to finish and the level to have been
+            // written low for far more than `kTriggerDelay` blocks.
+            let _ = peak_from(&mut e, blocks_for(1.0), 1);
+
+            e.trigger(0, 1.0);
+            let second = peak_from(&mut e, 0, blocks_for(0.04));
+
+            assert!(
+                second > first * 0.5,
+                "{id:?} lost its second hit after a note-off: {second} against {first}"
+            );
+        }
+    }
+
+    /// Peaks retriggers mid-note too, and does it by a different route: an
+    /// explicit `GATE_RISING` on one sample, not a hole in a level. It never
+    /// had this bug, so this is a guard that the Plaits gap stays on the
+    /// Plaits side — a 24-sample hole punched into a Peaks gate would cut the
+    /// strike it is supposed to carry.
+    #[test]
+    fn peaks_retriggers_on_an_open_gate_without_a_gap() {
+        for &id in &MiMachineId::PEAKS {
+            let mut e = engine_box();
+            e.tracks_mut()[0].load_machine(id);
+            e.trigger(0, 1.0);
+            let first = peak_from(&mut e, 0, blocks_for(0.04));
+
+            // Still inside the note: Peaks models are short, so this is early
+            // enough that the gate has not closed itself on silence.
+            e.trigger(0, 1.0);
+            let second = peak_from(&mut e, 0, blocks_for(0.04));
+
+            assert!(
+                second > first * 0.5,
+                "{id:?} did not strike on the second hit: {second} against {first}"
             );
         }
     }
