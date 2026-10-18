@@ -273,7 +273,25 @@ and a control logged as `(not decoded)` have completely different fixes.
 Then logs the engine events the surface produced, or why it produced
 none.
 
-**3. Is it the surface mode?**
+**3. Is something other than the controller playing the engine?**
+
+`render lcxl3` opens a virtual CoreMIDI input named "Drumkit Engine" so a
+DAW can sequence the engine while you play the surface. That port is open
+to the whole system, and **whatever arrives on it reaches the engine
+without the control-surface driver ever seeing it** — so a surface-only
+trace makes it look like the engine is inventing notes.
+
+With `--trace` the virtual port is logged too, prefixed `virt`. To remove
+it from the picture entirely:
+
+```bash
+cargo run -p render --features live -- lcxl3 --no-virtual-port --trace
+```
+
+If a symptom disappears with the port closed, nothing in the driver or
+the engine was ever wrong: something else on the machine was sending.
+
+**4. Is it the surface mode?**
 
 `--surface-mode mixer` selects DAW Mixer instead of DAW Control. The
 reference names both and says nothing about what differs; on a Launch
@@ -374,6 +392,14 @@ session:
   though that was **not** what was keeping the faders quiet; see below.
 
 ## Open, as of 2026-10-18
+
+**Some track buttons produce two sounds** — the track's own, plus a kick.
+One `NoteOn` is emitted per press, confirmed by trace, and the engine
+triggers exactly one track per `trigger_channel`, confirmed on both
+devices by walking every track and listing which become active. So the
+second sound is a trigger neither the surface nor the engine originates,
+which is what the `virt` trace lines and `--no-virtual-port` exist to
+settle.
 
 **The faders do nothing**, and turning pickup off did not fix it. So the
 cause is upstream of the driver's fader handling, which is itself proven

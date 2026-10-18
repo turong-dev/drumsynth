@@ -127,20 +127,44 @@ where
 
     // Virtual MIDI input: appears system-wide as an input port any app can
     // route to. The callback runs on a CoreMIDI thread; parse and queue.
+    // Tracing the *engine's* port, not just the surface's, closes a real
+    // blind spot: this port is open to the whole system, so a DAW, a
+    // utility, or the controller's own non-DAW interface routed here by
+    // something else reaches the engine without the control-surface
+    // driver ever seeing it. A trace that covers only the surface makes
+    // that look like the engine inventing notes.
+    let trace_engine_port = surface.as_ref().is_some_and(|c| c.trace);
+    let open_virtual = !surface.as_ref().is_some_and(|c| c.no_virtual_port);
     let mut midi_in = MidiInput::new("Drumkit Engine")?;
     midi_in.ignore(Ignore::None);
-    let _midi_conn = midi_in.create_virtual(
-        port,
-        |_, bytes, data: &mut (MidiParser, Producer<MidiEvent>)| {
-            let (parser, producer) = data;
-            for &b in bytes {
-                if let Some(ev) = parser.push(b) {
-                    let _ = producer.push(ev);
+    let _midi_conn = open_virtual.then(|| {
+        midi_in.create_virtual(
+            port,
+            move |_, bytes, data: &mut (MidiParser, Producer<MidiEvent>)| {
+                let (parser, producer) = data;
+                if trace_engine_port {
+                    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+                    println!("virt {}", hex.join(" "));
                 }
-            }
-        },
-        (MidiParser::new(), producer),
-    )?;
+                for &b in bytes {
+                    if let Some(ev) = parser.push(b) {
+                        if trace_engine_port {
+                            println!("     -> {ev:?}  (from the virtual port, not the surface)");
+                        }
+                        let _ = producer.push(ev);
+                    }
+                }
+            },
+            (MidiParser::new(), producer),
+        )
+    });
+    let _midi_conn = match _midi_conn {
+        Some(conn) => Some(conn?),
+        None => {
+            println!("virtual MIDI input port not opened (--no-virtual-port)");
+            None
+        }
+    };
 
     let (err_tx, err_rx) = std::sync::mpsc::channel();
 

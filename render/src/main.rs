@@ -499,6 +499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fader_pickup,
             trace,
             surface_mode,
+            no_virtual_port,
         } => {
             let mode = match surface_mode.as_str() {
                 "control" => lcxl3::wire::MODE_DAW_CONTROL,
@@ -515,6 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fader_pickup,
                 trace,
                 mode,
+                no_virtual_port,
             };
             match device.as_str() {
                 "drum" => device::run_with_surface(

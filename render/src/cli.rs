@@ -434,6 +434,15 @@ pub(crate) enum Command {
         /// device sends something this build does not expect).
         #[arg(long)]
         trace: bool,
+        /// Do not open the engine's virtual MIDI input port.
+        ///
+        /// That port is open to the whole system, so any application can
+        /// play the engine through it without the control surface seeing
+        /// anything. Closing it makes the controller the only thing that
+        /// can, which is how you tell "the surface is sending twice"
+        /// apart from "something else is sending too".
+        #[arg(long)]
+        no_virtual_port: bool,
         /// Surface mode to select on entry: `control` or `mixer`.
         ///
         /// The reference names both and does not say what differs. On a

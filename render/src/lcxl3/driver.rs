@@ -130,6 +130,14 @@ pub struct Config {
     /// appears dead is immediately one of: the device sends nothing, the
     /// device sends something unexpected, or the surface declined it.
     pub trace: bool,
+    /// Do not open the engine's virtual CoreMIDI input port.
+    ///
+    /// That port is open to the whole system: any application can send to
+    /// it, and whatever arrives reaches the engine without the control
+    /// surface ever seeing it. Closing it makes the controller the only
+    /// thing that can play the engine, which turns "something else is
+    /// sending notes" from a theory into a yes-or-no answer.
+    pub no_virtual_port: bool,
     /// Which surface mode to select on entry.
     ///
     /// `DAW Control` by default. The reference lists `DAW Mixer` as the
@@ -844,10 +852,15 @@ mod tests {
             fader_pickup: false,
             trace: false,
             mode: wire::MODE_DAW_CONTROL,
+            no_virtual_port: false,
         };
         assert!(!config.fader_pickup);
         assert!(!config.trace);
         assert_eq!(config.mode, 2);
+        assert!(
+            !config.no_virtual_port,
+            "a DAW must still be able to sequence the engine by default"
+        );
     }
 
     #[test]
