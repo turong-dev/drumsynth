@@ -32,6 +32,7 @@
 //! firmware's main loop relocated to macOS — with the surface attached.
 
 pub mod driver;
+pub mod probe;
 pub mod surface;
 pub mod wire;
 

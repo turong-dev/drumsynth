@@ -92,6 +92,10 @@ const SCREEN_BRIGHTNESS: u8 = 100;
 /// question 1, which phase 0 settles.
 const ENCODER_CURVE: u8 = 1;
 
+/// Display arrangement 4 — "2 lines: Parameter Name and Numeric Parameter
+/// Value", the per-control default and the right shape for one control.
+const ARRANGEMENT_NAME_AND_VALUE: u8 = 4;
+
 /// Fields of display arrangement 3: a title and eight names.
 const TITLE_FIELD: u8 = 0;
 const NAME_FIELDS: usize = COLUMNS;
@@ -310,9 +314,13 @@ impl<const N: usize> Driver<N> {
         };
         // Arrangement 4 — "Parameter Name and Numeric Parameter Value" — is
         // the per-control default and the right shape for one control.
-        let _ = self.out.send(&wire::display_config(target, 4));
+        let _ = self
+            .out
+            .send(&wire::display_config(target, ARRANGEMENT_NAME_AND_VALUE));
         send_text(&mut self.out, target, 0, readout.name);
         send_text(&mut self.out, target, 1, &value);
+        // Configured and filled is not the same as shown.
+        let _ = self.out.send(&wire::display_trigger(target));
     }
 
     /// The physical control an address is currently under, if any — needed
@@ -345,6 +353,9 @@ impl<const N: usize> Driver<N> {
         self.last_render = Instant::now();
 
         let mut budget = MAX_SENDS_PER_RENDER;
+        // Set when any text field changes, so the display is brought up
+        // once at the end of the pass rather than once per field.
+        let mut text_changed = false;
         let encoder_leds = self.surface.encoder_leds();
         let track_leds = self.surface.track_leds();
         let group_leds = self.surface.group_leds();
@@ -356,12 +367,14 @@ impl<const N: usize> Driver<N> {
         if title != self.painted.title && budget > 0 {
             send_text(&mut self.out, wire::TARGET_STATIONARY, TITLE_FIELD, &title);
             self.painted.title = title;
+            text_changed = true;
             budget -= 1;
         }
 
         let base = self.row as usize * COLUMNS;
         for i in 0..NAME_FIELDS {
             if budget == 0 {
+                self.trigger_screen(text_changed);
                 self.pending = true;
                 return;
             }
@@ -376,9 +389,15 @@ impl<const N: usize> Driver<N> {
                 text,
             );
             self.painted.names[i] = text.to_string();
+            text_changed = true;
             budget -= 1;
         }
         self.painted.row = self.row;
+        // Filling a display's text fields does not put it on the screen.
+        // The arrangement field is overloaded: 1-30 configures, 31
+        // triggers. Without this the surface is a MIDI mapping with a
+        // blank OLED, which is exactly what #13 says is not good enough.
+        self.trigger_screen(text_changed);
 
         let mut leds: [(u8, Rgb, usize); ENCODERS + 2 * COLUMNS] =
             [(0, Rgb::DARK, 0); ENCODERS + 2 * COLUMNS];
@@ -427,6 +446,20 @@ impl<const N: usize> Driver<N> {
         }
 
         self.pending = false;
+    }
+}
+
+impl<const N: usize> Driver<N> {
+    /// Bring the stationary display up, if this pass wrote any text.
+    ///
+    /// Costs one message and is skipped when nothing changed, so an idle
+    /// surface sends nothing at all.
+    fn trigger_screen(&mut self, changed: bool) {
+        if changed {
+            let _ = self
+                .out
+                .send(&wire::display_trigger(wire::TARGET_STATIONARY));
+        }
     }
 }
 

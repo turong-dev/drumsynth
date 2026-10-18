@@ -171,6 +171,21 @@ pub const TARGET_OVERLAY: u8 = 0x36;
 /// resting display of whichever screen is up.
 pub const ARRANGEMENT_TITLE_AND_8: u8 = 3;
 
+/// Arrangement field value that cancels a display.
+pub const ARRANGEMENT_CANCEL: u8 = 0;
+
+/// Arrangement field value that *triggers* a display — brings it up with
+/// whatever text it currently holds.
+///
+/// This is the step that is easy to miss. Configuring a target with an
+/// arrangement and then filling its text fields does not put it on the
+/// screen: the reference says "once a display is configured for a given
+/// target, it can be triggered", and bits 0–4 carry 0 to cancel, 1–30 for
+/// an arrangement, and 31 to trigger. `7Fh` is the documented shorthand —
+/// trigger with both automatic-display bits set — and [`display_trigger`]
+/// uses 31 instead so the automatic bits stay as they were configured.
+pub const ARRANGEMENT_TRIGGER: u8 = 31;
+
 /// Config bit: let the controller raise a temporary display by itself when a
 /// control changes. Default set; we clear it, because an automatic display
 /// shows the raw CC and value and we are about to send better text.
@@ -246,6 +261,21 @@ pub fn display_config(target: u8, config: u8) -> [u8; 10] {
     m[8] = config & 0x7F;
     m[9] = 0xF7;
     m
+}
+
+/// Bring a configured display up with its current contents.
+///
+/// Separate from [`display_config`] because it is a different operation
+/// wearing the same message: the arrangement field is overloaded, and
+/// naming the two apart is what stops "I configured it" being mistaken for
+/// "it is on screen".
+pub fn display_trigger(target: u8) -> [u8; 10] {
+    display_config(target, ARRANGEMENT_TRIGGER)
+}
+
+/// Cancel a display, returning the screen to whatever is beneath it.
+pub fn display_cancel(target: u8) -> [u8; 10] {
+    display_config(target, ARRANGEMENT_CANCEL)
 }
 
 /// Longest text the device is asked to render in one field.
@@ -675,6 +705,37 @@ mod tests {
             display_config(TARGET_STATIONARY, ARRANGEMENT_TITLE_AND_8),
             [0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x04, 0x35, 3, 0xF7]
         );
+    }
+
+    /// Configuring a display and filling its text does not show it. The
+    /// arrangement field is overloaded — 0 cancels, 1-30 configure, 31
+    /// triggers — and missing that is why the OLED stayed blank with
+    /// every other part of the integration working.
+    #[test]
+    fn a_trigger_is_a_configure_with_arrangement_31() {
+        assert_eq!(
+            display_trigger(TARGET_STATIONARY),
+            [0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x04, 0x35, 31, 0xF7]
+        );
+        assert_eq!(
+            display_cancel(TARGET_STATIONARY),
+            [0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x04, 0x35, 0, 0xF7]
+        );
+    }
+
+    /// The trigger and cancel values must stay outside the arrangement
+    /// range, or configuring an arrangement would silently do one of them.
+    #[test]
+    fn trigger_and_cancel_are_not_arrangements() {
+        assert!(ARRANGEMENT_TITLE_AND_8 > ARRANGEMENT_CANCEL);
+        assert!(ARRANGEMENT_TITLE_AND_8 < ARRANGEMENT_TRIGGER);
+        // Both fit the 5-bit arrangement field.
+        assert_eq!(ARRANGEMENT_TRIGGER & 0x1F, ARRANGEMENT_TRIGGER);
+        // And 7Fh, the documented shorthand, is a trigger with both
+        // automatic-display bits set.
+        assert_eq!(0x7F & 0x1F, ARRANGEMENT_TRIGGER);
+        assert_eq!(0x7F & CFG_AUTO_ON_CHANGE, CFG_AUTO_ON_CHANGE);
+        assert_eq!(0x7F & CFG_AUTO_ON_TOUCH, CFG_AUTO_ON_TOUCH);
     }
 
     #[test]

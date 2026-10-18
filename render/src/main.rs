@@ -487,6 +487,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => monitor::run(&port, channel, list, hex, realtime, daw)?,
 
         #[cfg(feature = "live")]
+        Command::ScreenProbe { port } => lcxl3::probe::run(&port)?,
+
+        #[cfg(feature = "live")]
         Command::Lcxl3 {
             device,
             out,

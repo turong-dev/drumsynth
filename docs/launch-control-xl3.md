@@ -86,6 +86,18 @@ contents; otherwise bit 6 is "auto temporary display on change", bit 5 is
 The driver clears both auto bits: the controller's own temporary display
 shows the raw CC and a number out of 127, and we are about to send better.
 
+**Configuring a display and filling its text does not show it.** The
+arrangement field is overloaded: 0 cancels, 1–30 select an arrangement, and
+**31 triggers** — brings the display up with whatever text it currently
+holds. `7Fh` is the documented shorthand for "trigger with both automatic
+bits set".
+
+This is the one that cost an evening. Every other part of the integration
+worked — DAW mode on, relative encoders reporting, parameters moving — and
+the OLED stayed blank, because the driver configured the arrangement and
+wrote the fields and never triggered. `render screen-probe` exists to
+settle it empirically rather than by re-reading the paragraph.
+
 Arrangements used here:
 
 - **3** — "1 line + 2×4: Title and 8 names", 9 fields. Field 0 is the
@@ -224,6 +236,25 @@ is not DAW Control, which needs the report observed rather than assumed.
 arrangement is ignored for targets only setting names (`22h`(34) –
 `28h`(40))". Those two ranges overlap at 34–36, which are encoders 22–24.
 One of the two statements is wrong. Set text on target 36 and see which.
+
+The target numbering is stated twice in the document with *different
+numbers*: configure-and-text calls the stationary display `35h` and the
+overlay `36h`, while the bitmap command calls them `20h` and `21h`.
+`render screen-probe` tries all four.
+
+### `render screen-probe`
+
+```bash
+cargo run -p render --features live -- screen-probe
+```
+
+Walks the candidates one step at a time, printing the exact bytes and
+waiting for you between them. Each step writes its own number to the
+screen, so the lowest-numbered step that shows `STEP n` is the answer.
+
+Step 0 lights two encoder LEDs first — one through RGB SysEx, one through
+a palette CC — so "nothing is reaching the device" is distinguishable from
+"the screen wants something else" before any display message is sent.
 
 ## Not yet confirmed
 

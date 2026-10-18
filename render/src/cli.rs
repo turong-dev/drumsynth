@@ -369,6 +369,25 @@ pub(crate) enum Command {
         daw: bool,
     },
 
+    /// Find out what actually drives the Launch Control XL 3's OLED.
+    ///
+    /// Phase 0 of #13, narrowed to the screen. The reference numbers the
+    /// display targets twice with different numbers, overloads the
+    /// arrangement field so 0 cancels / 1-30 configure / 31 triggers, and
+    /// does not say whether the stationary display needs triggering at
+    /// all. This sends each candidate in turn with its step number on the
+    /// screen; the lowest-numbered step that shows its text is the answer.
+    ///
+    /// Step 0 lights two encoder LEDs first, so "nothing reaches the
+    /// device" is distinguishable from "the screen needs something else".
+    /// Every step prints the exact bytes it sent.
+    #[cfg(feature = "live")]
+    ScreenProbe {
+        /// Substring matched against the controller's MIDI port names.
+        #[arg(long)]
+        port: Option<String>,
+    },
+
     /// Drive the engine from a Novation Launch Control XL 3 (#13).
     ///
     /// `render device` with the controller attached as a front panel: the
