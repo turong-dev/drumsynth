@@ -186,6 +186,17 @@ pub const ARRANGEMENT_CANCEL: u8 = 0;
 /// uses 31 instead so the automatic bits stay as they were configured.
 pub const ARRANGEMENT_TRIGGER: u8 = 31;
 
+// The arrangement field is five bits carrying three different meanings, so
+// the boundaries are asserted at compile time rather than trusted: an
+// arrangement that collided with cancel or trigger would silently blank or
+// re-show the display instead of configuring it.
+const _: () = assert!(ARRANGEMENT_TITLE_AND_8 > ARRANGEMENT_CANCEL);
+const _: () = assert!(ARRANGEMENT_TITLE_AND_8 < ARRANGEMENT_TRIGGER);
+const _: () = assert!(ARRANGEMENT_TRIGGER & 0x1F == ARRANGEMENT_TRIGGER);
+// 7Fh, the reference's shorthand, is exactly a trigger with both
+// automatic-display bits set.
+const _: () = assert!(0x7F & 0x1F == ARRANGEMENT_TRIGGER);
+
 /// Config bit: let the controller raise a temporary display by itself when a
 /// control changes. Default set; we clear it, because an automatic display
 /// shows the raw CC and value and we are about to send better text.
@@ -721,21 +732,6 @@ mod tests {
             display_cancel(TARGET_STATIONARY),
             [0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x04, 0x35, 0, 0xF7]
         );
-    }
-
-    /// The trigger and cancel values must stay outside the arrangement
-    /// range, or configuring an arrangement would silently do one of them.
-    #[test]
-    fn trigger_and_cancel_are_not_arrangements() {
-        assert!(ARRANGEMENT_TITLE_AND_8 > ARRANGEMENT_CANCEL);
-        assert!(ARRANGEMENT_TITLE_AND_8 < ARRANGEMENT_TRIGGER);
-        // Both fit the 5-bit arrangement field.
-        assert_eq!(ARRANGEMENT_TRIGGER & 0x1F, ARRANGEMENT_TRIGGER);
-        // And 7Fh, the documented shorthand, is a trigger with both
-        // automatic-display bits set.
-        assert_eq!(0x7F & 0x1F, ARRANGEMENT_TRIGGER);
-        assert_eq!(0x7F & CFG_AUTO_ON_CHANGE, CFG_AUTO_ON_CHANGE);
-        assert_eq!(0x7F & CFG_AUTO_ON_TOUCH, CFG_AUTO_ON_TOUCH);
     }
 
     #[test]

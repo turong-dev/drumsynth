@@ -425,6 +425,22 @@ pub(crate) enum Command {
         /// faders look broken. Here to measure against, not to use.
         #[arg(long)]
         fader_pickup: bool,
+        /// Print every message the controller sends, what it decoded to,
+        /// and what the surface did with it.
+        ///
+        /// Including the messages that decode to nothing, which is the
+        /// point: a control that appears dead is either missing from the
+        /// log (the device sends nothing) or present and undecoded (the
+        /// device sends something this build does not expect).
+        #[arg(long)]
+        trace: bool,
+        /// Surface mode to select on entry: `control` or `mixer`.
+        ///
+        /// The reference names both and does not say what differs. On a
+        /// Launch Control XL the mixer is what the faders *are*, so if
+        /// they report nothing in one mode, try the other.
+        #[arg(long, default_value = "control")]
+        surface_mode: String,
     },
 }
 

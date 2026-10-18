@@ -222,6 +222,43 @@ the way it does for encoders. If it does, the driver can send the current
 levels at startup and after every machine change, and pickup becomes
 usable. Until then it is a setting that only breaks things.
 
+## When a control appears dead
+
+In order, because each step rules out the one before it.
+
+**1. Does the device send anything?**
+
+```bash
+cargo run -p render --features live -- monitor --daw --hex
+```
+
+No surface logic at all — it prints every message that arrives. Move the
+control. A fader should show `Ch 16 CC 5..12`, an encoder `Ch 16 CC
+77..100`, a button `Ch 1 CC 37..52`.
+
+Nothing at all means the device is not sending it: wrong surface mode,
+a feature control not enabled, or the control index is not what the
+diagram said.
+
+**2. Does the driver recognise it?**
+
+```bash
+cargo run -p render --features live -- lcxl3 --trace
+```
+
+Logs every message with its raw bytes *and the ones it fails to decode*,
+which is the half that matters — a control missing from the log entirely
+and a control logged as `(not decoded)` have completely different fixes.
+Then logs the engine events the surface produced, or why it produced
+none.
+
+**3. Is it the surface mode?**
+
+`--surface-mode mixer` selects DAW Mixer instead of DAW Control. The
+reference names both and says nothing about what differs; on a Launch
+Control XL the mixer is what the faders *are*, so it is worth trying
+before concluding anything about the wire format.
+
 ## Phase 0: what to capture, and what each capture decides
 
 `render monitor --daw --hex` puts the controller into DAW mode with
@@ -304,7 +341,31 @@ session:
   output. Parameters move from the encoders.
 - The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
 - Faders are silent while fader pickup is on, because nothing sends the
-  device the positions it would pick up against. Pickup is now off.
+  device the positions it would pick up against. Pickup is now off —
+  though that was **not** what was keeping the faders quiet; see below.
+
+## Open, as of 2026-10-18
+
+**The faders do nothing**, and turning pickup off did not fix it. So the
+cause is upstream of the driver's fader handling, which is itself proven
+end-to-end by `a_fader_cc_moves_that_tracks_level` — raw CC bytes through
+decode, the surface and `handle_midi` to the engine's level. Work the
+checklist above; step 1 decides whether this is a device question or a
+decode question.
+
+Candidates not yet ruled out, in the order worth trying:
+
+1. **Surface mode.** DAW Control was chosen arbitrarily; DAW Mixer is the
+   other, and on this hardware family the mixer is the faders.
+2. **The fader control indices.** 5–12 comes from the display-target
+   paragraph, which says the targets are "the same as CC indices". That
+   is one sentence of corroboration, not two, and unlike the encoder
+   block it has no arithmetic cross-check behind it.
+3. **Message framing.** The driver drops anything shorter than three
+   bytes. A device using running status for a fader sweep would send
+   two-byte messages after the first, and only the first would land.
+   `--trace` shows this immediately: one message on the first move, then
+   silence.
 
 ## Not yet confirmed
 

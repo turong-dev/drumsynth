@@ -160,7 +160,7 @@ where
     let mut driver = Driver::start(surface, config)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let _input = driver::open_input(config.port.as_deref(), move |msg| {
+    let _input = driver::open_input(config.port.as_deref(), config.trace, move |msg| {
         let _ = tx.send(msg);
     })?;
 

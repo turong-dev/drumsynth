@@ -497,10 +497,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             multi_out,
             fader_pickup,
+            trace,
+            surface_mode,
         } => {
+            let mode = match surface_mode.as_str() {
+                "control" => lcxl3::wire::MODE_DAW_CONTROL,
+                "mixer" => lcxl3::wire::MODE_DAW_MIXER,
+                other => {
+                    return Err(format!(
+                        "unknown --surface-mode '{other}'. available: control, mixer"
+                    )
+                    .into())
+                }
+            };
             let config = lcxl3::Config {
                 port: surface_port,
                 fader_pickup,
+                trace,
+                mode,
             };
             match device.as_str() {
                 "drum" => device::run_with_surface(

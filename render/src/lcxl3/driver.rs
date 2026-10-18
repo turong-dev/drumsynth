@@ -120,6 +120,23 @@ pub struct Config {
     /// hardware once the position-feedback question is settled; see
     /// `docs/launch-control-xl3.md`.
     pub fader_pickup: bool,
+    /// Print every message the controller sends, what it decoded to, and
+    /// what the surface did with it.
+    ///
+    /// The driver drops two kinds of message silently — anything shorter
+    /// than three bytes, and anything [`wire::decode`] does not
+    /// recognise — which is exactly the blind spot that makes "the
+    /// faders do nothing" unanswerable. With this on, a control that
+    /// appears dead is immediately one of: the device sends nothing, the
+    /// device sends something unexpected, or the surface declined it.
+    pub trace: bool,
+    /// Which surface mode to select on entry.
+    ///
+    /// `DAW Control` by default. The reference lists `DAW Mixer` as the
+    /// other, and does not say what differs between them — on a Launch
+    /// Control XL the mixer is what the faders *are*, so this is worth
+    /// being able to change without a rebuild.
+    pub mode: u8,
 }
 
 /// The driver's own copy of what the controller is currently showing, so a
@@ -163,6 +180,10 @@ pub struct Driver<const N: usize> {
     out: MidiOutputConnection,
     /// Whether the controller's fader pickup was asked for.
     fader_pickup: bool,
+    /// Surface mode selected on entry.
+    mode: u8,
+    /// Print every decoded message and the events it produced.
+    trace: bool,
     surface: Surface<N>,
     painted: Painted,
     /// Encoder row the screen's names are drawn from — the last row
@@ -180,6 +201,8 @@ impl<const N: usize> Driver<N> {
         let mut driver = Driver {
             out,
             fader_pickup: config.fader_pickup,
+            mode: config.mode,
+            trace: config.trace,
             surface,
             painted: Painted::unknown(),
             row: 0,
@@ -204,9 +227,7 @@ impl<const N: usize> Driver<N> {
     /// has been showing something else and nothing we remember is true.
     fn enter_daw_mode(&mut self) {
         let _ = self.out.send(&wire::daw_mode(true));
-        let _ = self
-            .out
-            .send(&wire::feature(wire::FEAT_MODE, wire::MODE_DAW_CONTROL));
+        let _ = self.out.send(&wire::feature(wire::FEAT_MODE, self.mode));
 
         // Relative output per encoder row. This is what makes the wire's
         // 7 bits stop bounding precision: a detent becomes a delta, and the
@@ -299,13 +320,30 @@ impl<const N: usize> Driver<N> {
         }
 
         let Some(input) = to_input(msg) else {
+            if self.trace {
+                println!("    -> dropped: the surface has no use for it");
+            }
             return ok;
         };
         let outcome = self.surface.handle(input, now);
+        let mut emitted = 0;
         for ev in outcome.events() {
+            if self.trace {
+                println!("    -> {ev:?}");
+            }
+            emitted += 1;
             if events.push(ev).is_err() {
                 ok = false;
+                if self.trace {
+                    println!("    -> QUEUE FULL, event dropped");
+                }
             }
+        }
+        if self.trace && emitted == 0 {
+            // The surface took it and produced nothing: an address that
+            // does not resolve on the loaded machine, a column with no
+            // track behind it, or a button that only changes state.
+            println!("    -> no engine event (unreachable address, or state only)");
         }
         if outcome.repaint {
             self.pending = true;
@@ -578,6 +616,7 @@ pub fn open_output_port(filter: Option<&str>) -> Result<MidiOutputConnection, Bo
 /// `on_message`.
 pub fn open_input<F>(
     filter: Option<&str>,
+    trace: bool,
     mut on_message: F,
 ) -> Result<MidiInputConnection<()>, Box<dyn Error>>
 where
@@ -608,10 +647,25 @@ where
         &ports[i],
         "lcxl3-in",
         move |_, bytes, _| {
-            if bytes.len() >= 3 {
-                if let Some(msg) = wire::decode(bytes[0], bytes[1], bytes[2]) {
-                    on_message(msg);
+            let decoded = if bytes.len() >= 3 {
+                wire::decode(bytes[0], bytes[1], bytes[2])
+            } else {
+                None
+            };
+            if trace {
+                let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
+                match &decoded {
+                    Some(msg) => println!("in  {:<14} {msg:?}", hex.join(" ")),
+                    // The important half. A control that looks dead is
+                    // either absent from this log entirely (the device
+                    // sends nothing) or present and undecoded (the
+                    // device sends something this build does not expect),
+                    // and those have completely different fixes.
+                    None => println!("in  {:<14} (not decoded)", hex.join(" ")),
                 }
+            }
+            if let Some(msg) = decoded {
+                on_message(msg);
             }
         },
         (),
@@ -775,15 +829,20 @@ mod tests {
         }
     }
 
-    /// Pickup is off unless explicitly asked for, because nothing sends
-    /// the device the values it would pick up against.
+    /// The defaults a plain `render lcxl3` runs with: pickup off (nothing
+    /// sends the device the values it would pick up against), tracing
+    /// off, DAW Control mode.
     #[test]
-    fn fader_pickup_is_off_by_default() {
+    fn the_default_config_is_the_one_that_works() {
         let config = Config {
             port: None,
             fader_pickup: false,
+            trace: false,
+            mode: wire::MODE_DAW_CONTROL,
         };
         assert!(!config.fader_pickup);
+        assert!(!config.trace);
+        assert_eq!(config.mode, 2);
     }
 
     #[test]
