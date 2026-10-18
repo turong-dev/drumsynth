@@ -74,7 +74,7 @@ const WAVE_CAP_SECONDS: f32 = 0.1;
 /// routing, not the machine voice itself), and reserved slots.
 pub fn knob_slots(id: MachineId) -> impl Iterator<Item = (usize, &'static str)> {
     id.params()
-        .into_iter()
+        .iter()
         .enumerate()
         .filter(|(_, m)| {
             m.name != "RESV"

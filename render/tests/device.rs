@@ -4,7 +4,10 @@
 //! 2. A sender that connects to it the way a DAW or controller would.
 //! 3. The parse → ring → router chain the device's audio thread drains.
 //!
-//! No audio hardware is touched, so this runs anywhere with CoreMIDI.
+//! No audio hardware is touched, so this runs anywhere with a MIDI backend:
+//! CoreMIDI on macOS, the ALSA sequencer on Linux. A headless CI runner has
+//! neither guaranteed, so the port-driven tests check for one first — see
+//! `require_midi!`.
 
 use drum_engine::midi::{handle_midi, MidiEvent, MidiParser};
 use drum_engine::{DrumEngine, MachineId};
@@ -14,6 +17,33 @@ use midir::{Ignore, MidiInput, MidiOutput};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+
+/// Can this machine open a virtual MIDI port at all?
+///
+/// macOS always can: CoreMIDI is part of the OS. A headless Linux CI runner
+/// often cannot — `midir` goes through the ALSA sequencer there, and without
+/// `/dev/snd/seq` (no `snd-seq` module loaded) creating a port fails. The
+/// three tests below drive real ports, so they say so and return rather than
+/// failing the build over a missing kernel module. `both_devices_are_send` is
+/// a compile-time assertion and runs regardless, which is the half that
+/// catches the `Send` regression this file exists for.
+fn midi_backend_available() -> bool {
+    let Ok(probe) = MidiInput::new("drumkit-engine-probe") else {
+        return false;
+    };
+    probe
+        .create_virtual("drumkit-engine-probe", |_, _, _: &mut ()| {}, ())
+        .is_ok()
+}
+
+macro_rules! require_midi {
+    () => {
+        if !midi_backend_available() {
+            eprintln!("skipping: no MIDI backend on this host (no ALSA sequencer?)");
+            return;
+        }
+    };
+}
 
 /// The reason `render device mi-drum` runs at all.
 ///
@@ -49,6 +79,7 @@ fn mi_engine_box() -> Box<MiDrumEngine> {
 
 #[test]
 fn daw_note_on_triggers_the_mi_drum_engine() {
+    require_midi!();
     let port_name = port_name("mi-note");
     let (_in_conn, mut consumer) = spawn_device_input(&port_name);
 
@@ -145,6 +176,7 @@ fn pop_timeout(consumer: &mut Consumer<MidiEvent>, timeout: Duration) -> Option<
 
 #[test]
 fn daw_note_on_triggers_the_engine() {
+    require_midi!();
     let port_name = port_name("note");
     let (_in_conn, mut consumer) = spawn_device_input(&port_name);
 
@@ -191,6 +223,7 @@ fn daw_note_on_triggers_the_engine() {
 
 #[test]
 fn daw_nrpn_reaches_the_track_params() {
+    require_midi!();
     use drum_engine::machines::ParamGroup;
     use drum_engine::midi::NRPN_MAX;
 

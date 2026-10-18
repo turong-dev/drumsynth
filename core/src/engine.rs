@@ -396,8 +396,8 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
         let mut segment_ends = [BLOCK; crate::MAX_TIMED_EVENTS + 1];
         let mut n_segments = 0;
         let mut last_end = 0;
-        for k in 0..n_timed {
-            let offset = timed[k].expect("drained entries are Some").offset;
+        for ev in timed.iter().take(n_timed) {
+            let offset = ev.expect("drained entries are Some").offset;
             if offset > last_end && offset <= BLOCK {
                 segment_ends[n_segments] = offset;
                 n_segments += 1;
@@ -411,9 +411,7 @@ impl<S: Slot<N>, const N: usize, const T: usize> Engine<S, N, T> {
 
         let mut k = 0;
         let mut start = 0;
-        for seg in 0..n_segments {
-            let end = segment_ends[seg];
-
+        for &end in segment_ends.iter().take(n_segments) {
             // Process every timed event at this segment boundary.
             while k < n_timed {
                 let ev = timed[k].expect("drained entries are Some");

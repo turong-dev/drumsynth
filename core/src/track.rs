@@ -1033,6 +1033,10 @@ where
     /// into the block. The strip (amp env, drive, filter, level, pan, sends,
     /// choke, de-click) is applied sample-wise. This is the segment-based
     /// equivalent of calling [`tick`](Self::tick) `n` times.
+    // The output and send buses are passed as separate `&mut` arrays rather
+    // than bundled into a struct: this is the per-segment audio path, and a
+    // flat argument list is what keeps the buses in registers on Cortex-M.
+    #[allow(clippy::too_many_arguments)]
     pub fn process_segment(
         &mut self,
         start: usize,

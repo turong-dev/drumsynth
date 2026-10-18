@@ -1091,7 +1091,7 @@ mod tests {
     fn default_params_round_trip() {
         let m = MachineId::BdClassic;
         let d = m.default_params();
-        for (i, info) in m.params().into_iter().enumerate() {
+        for (i, info) in m.params().iter().enumerate() {
             assert_eq!(d[i], info.default, "param {i} defaulted wrong");
         }
     }
