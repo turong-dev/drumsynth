@@ -812,7 +812,15 @@ mod mi_drum_baseline {
     // it were 1.0. That is the point of the change rather than a side
     // effect of it: the kit now sounds the way its own parameter values
     // say it should.
-    const BASELINE_DIGEST: u64 = 0x3e92_0f26_1a35_6ec1;
+    //
+    // Re-pinned for #41 in the same breath, because this value is the merge
+    // of the two: a note-on that landed while Plaits' trigger input was
+    // still armed produced no edge, so the voice never restruck. The
+    // baseline pattern hits tracks faster than they end, so every Plaits
+    // section with a second hit in it moves — the fix being visible, not
+    // collateral. The Peaks sections only move by `LEVEL`: their edge was
+    // always an explicit per-sample flag.
+    const BASELINE_DIGEST: u64 = 0xa3d6_50d2_b3a5_1fcd;
 
     /// One test, one render, deliberately.
     ///
