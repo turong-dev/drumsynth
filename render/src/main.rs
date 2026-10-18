@@ -47,6 +47,8 @@ mod device;
 /// The MIDI input monitor. Also behind the `live` feature because it needs
 /// `midir` for port enumeration and connection.
 #[cfg(feature = "live")]
+mod lcxl3;
+#[cfg(feature = "live")]
 mod monitor;
 #[cfg(feature = "live")]
 mod slack;
@@ -481,7 +483,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             list,
             hex,
             realtime,
-        } => monitor::run(&port, channel, list, hex, realtime)?,
+            daw,
+        } => monitor::run(&port, channel, list, hex, realtime, daw)?,
+
+        #[cfg(feature = "live")]
+        Command::ScreenProbe { port } => lcxl3::probe::run(&port)?,
+
+        #[cfg(feature = "live")]
+        Command::Lcxl3 {
+            device,
+            out,
+            surface_port,
+            port,
+            multi_out,
+            fader_pickup,
+            trace,
+            surface_mode,
+            no_virtual_port,
+            detent_lsb,
+        } => {
+            let mode = match surface_mode.as_str() {
+                "control" => lcxl3::wire::MODE_DAW_CONTROL,
+                "mixer" => lcxl3::wire::MODE_DAW_MIXER,
+                other => {
+                    return Err(format!(
+                        "unknown --surface-mode '{other}'. available: control, mixer"
+                    )
+                    .into())
+                }
+            };
+            let config = lcxl3::Config {
+                port: surface_port,
+                fader_pickup,
+                trace,
+                mode,
+                no_virtual_port,
+                detent_lsb,
+            };
+            match device.as_str() {
+                "drum" => device::run_with_surface(
+                    Box::new(DrumEngine::new()),
+                    &out,
+                    &port,
+                    false,
+                    multi_out,
+                    Some(config),
+                )?,
+                "mi-drum" => {
+                    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+                    device::run_with_surface(
+                        render::mi_drum_in_place(),
+                        &out,
+                        &port,
+                        false,
+                        multi_out,
+                        Some(config),
+                    )?
+                }
+                other => {
+                    return Err(
+                        format!("unknown device '{other}'. available: drum, mi-drum").into(),
+                    )
+                }
+            }
+        }
 
         #[cfg(feature = "live")]
         Command::Slack {
