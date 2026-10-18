@@ -431,6 +431,71 @@ pub const fn relative_delta(value: u8) -> i8 {
     (value as i8).wrapping_sub(RELATIVE_PIVOT as i8)
 }
 
+/// Split a received buffer into channel-voice messages, in order.
+///
+/// A MIDI callback does not hand over one message. CoreMIDI packets carry
+/// as many as fit, and a controller streaming a fader sweep or a
+/// press-and-release pair will put several in one buffer — so reading
+/// `bytes[0..3]` and stopping, as this driver did, silently discards
+/// everything after the first. The symptom is not a dead control but an
+/// erratic one: some presses land, some vanish, and which is which
+/// depends on how the device happened to pack the bus.
+///
+/// Running status is handled for the same reason. A device may send the
+/// status byte once and then bare data pairs, which under the old
+/// three-byte read decoded as nothing at all.
+///
+/// System-exclusive is skipped rather than parsed: nothing the surface
+/// needs arrives that way, and a SysEx body contains bytes that would
+/// otherwise be mistaken for data.
+pub fn for_each_message<F: FnMut(u8, u8, u8)>(bytes: &[u8], mut f: F) {
+    let mut status = 0u8;
+    let mut data = [0u8; 2];
+    let mut have = 0usize;
+    let mut in_sysex = false;
+    for &b in bytes {
+        if b >= 0xF8 {
+            // Real-time bytes may appear anywhere, even inside a running
+            // message, and never disturb it.
+            continue;
+        }
+        if b == 0xF7 {
+            in_sysex = false;
+            continue;
+        }
+        if b == 0xF0 {
+            in_sysex = true;
+            status = 0;
+            have = 0;
+            continue;
+        }
+        if in_sysex {
+            continue;
+        }
+        if b >= 0x80 {
+            // Any other system-common message cancels running status and
+            // is not something the surface uses.
+            status = if b < 0xF0 { b } else { 0 };
+            have = 0;
+            continue;
+        }
+        if status == 0 {
+            continue;
+        }
+        data[have] = b;
+        have += 1;
+        let needed = match status & 0xF0 {
+            0xC0 | 0xD0 => 1,
+            _ => 2,
+        };
+        if have < needed {
+            continue;
+        }
+        have = 0;
+        f(status, data[0], if needed == 2 { data[1] } else { 0 });
+    }
+}
+
 /// Decode one channel-voice message into something the surface understands.
 ///
 /// Takes a parsed `(status, data1, data2)` rather than a byte stream: the
@@ -732,6 +797,65 @@ mod tests {
             display_cancel(TARGET_STATIONARY),
             [0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x04, 0x35, 0, 0xF7]
         );
+    }
+
+    fn messages(bytes: &[u8]) -> Vec<(u8, u8, u8)> {
+        let mut out = Vec::new();
+        for_each_message(bytes, |s, a, b| out.push((s, a, b)));
+        out
+    }
+
+    /// A callback buffer can hold more than one message. Reading only the
+    /// first three bytes discards the rest, which shows up not as a dead
+    /// control but as an erratic one.
+    #[test]
+    fn every_message_in_a_packet_is_seen() {
+        let got = messages(&[0xB0, 37, 127, 0xB0, 37, 0, 0xB0, 38, 127]);
+        assert_eq!(got, vec![(0xB0, 37, 127), (0xB0, 37, 0), (0xB0, 38, 127)]);
+    }
+
+    /// Running status: the status byte once, then bare data pairs. Under
+    /// a three-byte read these decoded as nothing at all.
+    #[test]
+    fn running_status_is_expanded() {
+        let got = messages(&[0xBF, 5, 10, 5, 20, 5, 30]);
+        assert_eq!(
+            got,
+            vec![(0xBF, 5, 10), (0xBF, 5, 20), (0xBF, 5, 30)],
+            "a fader sweep under running status must not collapse to one move"
+        );
+    }
+
+    /// Real-time bytes are allowed to interleave anywhere, including
+    /// between the data bytes of a message, and must not disturb it.
+    #[test]
+    fn real_time_bytes_do_not_break_a_message() {
+        let got = messages(&[0xB0, 0xF8, 37, 0xFE, 127]);
+        assert_eq!(got, vec![(0xB0, 37, 127)]);
+    }
+
+    /// A SysEx body contains bytes that would otherwise look like data.
+    #[test]
+    fn sysex_is_skipped_whole() {
+        let got = messages(&[
+            0xF0, 0x00, 0x20, 0x29, 0x02, 0x15, 0x09, 0x7F, 0xF7, 0xB0, 40, 127,
+        ]);
+        assert_eq!(got, vec![(0xB0, 40, 127)]);
+    }
+
+    /// Two-byte channel messages must not consume a third byte and eat
+    /// whatever follows them.
+    #[test]
+    fn two_byte_messages_are_not_over_read() {
+        let got = messages(&[0xC0, 7, 0xB0, 37, 127]);
+        assert_eq!(got, vec![(0xC0, 7, 0), (0xB0, 37, 127)]);
+    }
+
+    /// Data with no status yet (a buffer starting mid-message) is
+    /// dropped rather than attributed to a stale status.
+    #[test]
+    fn leading_data_without_status_is_dropped() {
+        assert_eq!(messages(&[40, 127, 0xB0, 37, 1]), vec![(0xB0, 37, 1)]);
     }
 
     #[test]

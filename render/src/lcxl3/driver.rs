@@ -647,26 +647,31 @@ where
         &ports[i],
         "lcxl3-in",
         move |_, bytes, _| {
-            let decoded = if bytes.len() >= 3 {
-                wire::decode(bytes[0], bytes[1], bytes[2])
-            } else {
-                None
-            };
             if trace {
                 let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02X}")).collect();
-                match &decoded {
-                    Some(msg) => println!("in  {:<14} {msg:?}", hex.join(" ")),
-                    // The important half. A control that looks dead is
-                    // either absent from this log entirely (the device
-                    // sends nothing) or present and undecoded (the
-                    // device sends something this build does not expect),
-                    // and those have completely different fixes.
-                    None => println!("in  {:<14} (not decoded)", hex.join(" ")),
+                println!("in  {}", hex.join(" "));
+            }
+            // Every message in the buffer, not just the first: a packet
+            // can carry several, and a controller streaming a sweep or a
+            // press-and-release pair routinely does.
+            wire::for_each_message(bytes, |status, d1, d2| match wire::decode(status, d1, d2) {
+                Some(msg) => {
+                    if trace {
+                        println!("    {status:02X} {d1:02X} {d2:02X}  {msg:?}");
+                    }
+                    on_message(msg);
                 }
-            }
-            if let Some(msg) = decoded {
-                on_message(msg);
-            }
+                None => {
+                    // A control that looks dead is either absent from
+                    // this log entirely (the device sends nothing) or
+                    // present and undecoded (it sends something this
+                    // build does not expect). Those have completely
+                    // different fixes, so both are printed.
+                    if trace {
+                        println!("    {status:02X} {d1:02X} {d2:02X}  (not decoded)");
+                    }
+                }
+            });
         },
         (),
     )?)
