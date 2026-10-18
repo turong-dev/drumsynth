@@ -121,6 +121,30 @@ appears on every surface, in the cheat-sheet, and at its NRPN address,
 with no UI change. The Monome grid was the first surface built this way;
 it has been removed, but the property is the one any replacement keeps.
 
+### A machine change replaces the voice, not the track
+
+`MACH` is a parameter, `(TRACK, 0)`, so a machine can be swapped mid-pattern
+and p-locked per step. That only works if the swap is narrow: it resets the
+voice's parameters to the new machine's defaults and leaves every track-routed
+row exactly where it was — level, output routing, pan, the sends, and on the
+drum device the core strip and the modulation bus. A track does not lose its
+place in a kit mix because someone auditioned a different voice on it.
+
+The line is drawn by `route`, not by flat index, which is what makes it mean
+the right thing on both devices. mi-drum runs its own strip and shaper inside
+the voice, so those rows are `Slot` and *do* reset there — correctly, because
+on that device they are part of the machine. The drum device's same positions
+are `Strip`/`Lfo` and survive.
+
+Nothing is re-applied after the swap and nothing needs to be: the live strip
+and LFO state is already what the preserved values describe, and `set_strip`
+mirrors the other direction. The earlier behaviour — reset everything — broke
+that pairing, because it rewrote the parameter array without re-deriving the
+strip coefficients or `strip.out` from it (#43).
+
+A `Sound` load is the opposite and stays so: `load_sound` is a total
+replacement of slot, params and strip together.
+
 ### Enum dispatch, not trait objects
 
 `enum MachineSlot { BdClassic(..), BdFm(..), SdNatural(..), ... }`, matched in

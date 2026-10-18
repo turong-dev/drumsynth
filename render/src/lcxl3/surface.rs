@@ -857,10 +857,13 @@ impl<const N: usize> Surface<N> {
     /// reverse channel").
     ///
     /// What the engine does on a swap is not simply "load the defaults":
-    /// pan and the sends are track-level and survive, and `MACH` itself is
-    /// rewritten to mirror the machine that was actually loaded rather
-    /// than keeping the value that was written. Both are reproduced here
-    /// by *route*, not by flat index, so this stays device-agnostic.
+    /// every track-routed row survives — level, output, pan, the sends, the
+    /// core strip, the modulation bus — and `MACH` itself is rewritten to
+    /// mirror the machine that was actually loaded rather than keeping the
+    /// value that was written. Both are reproduced here by *route*, not by
+    /// flat index, so this stays device-agnostic, and the test
+    /// `machine_change_keeps_what_the_engine_keeps` holds the two sides
+    /// together.
     fn load_machine(&mut self, track: usize, written: f32) {
         let count = self.catalogue.count;
         if count <= 1 {
@@ -876,11 +879,12 @@ impl<const N: usize> Surface<N> {
         let previous = self.values[track];
         let old_table = self.table(track);
         let mut next = loaded_params(&self.catalogue, i);
-        // Pan and the sends are track-level and survive the swap. Matched
-        // by route rather than by flat index, so this stays device-
-        // agnostic.
+        // Everything that is not the voice's survives the swap. Matched by
+        // route rather than by flat index, so this stays device-agnostic.
+        // `Machine` is excluded because `loaded_params` has already pointed
+        // it at the machine being loaded.
         for (flat, row) in old_table.iter().enumerate() {
-            if matches!(row.route, ParamRoute::Pan | ParamRoute::Send(_)) {
+            if !matches!(row.route, ParamRoute::Slot | ParamRoute::Machine) {
                 next[flat] = previous[flat];
             }
         }
@@ -1125,7 +1129,10 @@ fn nrpn_value(info: &ParamInfo, raw: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drum_engine::machines::{MachineId, NUM_PARAMS, SLOT_LEVEL, SLOT_MACHINE};
+    use drum_engine::machines::{
+        MachineId, NUM_PARAMS, SLOT_LEVEL, SLOT_LFO1_DEPTH, SLOT_MACHINE, SLOT_OUT, SLOT_PAN,
+        SLOT_SEND_DELAY, SLOT_STRIP_CUT,
+    };
     use drum_engine::midi::handle_midi;
     use drum_engine::{DeviceEngine, DeviceModel, DrumEngine, SlotId};
 
@@ -1563,10 +1570,10 @@ mod tests {
     // -- machine changes ----------------------------------------------------
 
     /// `MACH` is a parameter, so the surface sees a machine change go past
-    /// and reloads the new machine's table and defaults. This is the one
-    /// case where state would otherwise move underneath the shadow.
+    /// and reloads the new machine's table and voice defaults. This is the
+    /// one case where state would otherwise move underneath the shadow.
     #[test]
-    fn a_machine_change_reloads_the_table_and_the_defaults() {
+    fn a_machine_change_reloads_the_table_and_the_voice_defaults() {
         let (mut s, _) = surface();
         let before = s.machine(0);
         // MACH is (TRACK, 0), reachable by holding the TRACK group — not
@@ -1584,10 +1591,85 @@ mod tests {
         assert!(out.repaint);
         let expected = MachineId::from_index(before + 1).unwrap();
         assert_eq!(s.table(0).as_ptr(), expected.param_table().as_ptr());
-        assert_eq!(
-            s.value(0, SLOT_LEVEL),
-            expected.default_params()[SLOT_LEVEL]
+        // A voice row takes the new machine's default. Pick one that
+        // actually differs between the two machines, so the assertion is
+        // not satisfied by both tables happening to agree.
+        let incoming = MachineId::from_index(before).unwrap().default_params();
+        let defaults = expected.default_params();
+        let voice = expected
+            .param_table()
+            .iter()
+            .enumerate()
+            .find(|(flat, row)| row.route == ParamRoute::Slot && incoming[*flat] != defaults[*flat])
+            .map(|(flat, _)| flat)
+            .expect("two adjacent machines differ on some voice row");
+        assert_eq!(s.value(0, voice), defaults[voice]);
+    }
+
+    /// The shadow keeps exactly what the engine keeps across a machine
+    /// change (#43), driven through the same NRPN writes.
+    ///
+    /// The shadow exists because the surface has no reverse channel: if it
+    /// and the engine disagree about what a swap preserves, the controller
+    /// shows one thing and the device does another, and the next relative
+    /// step turns that gap into a jump. Comparing the two directly is the
+    /// only thing that keeps the rule in `Track::load_machine` and the one
+    /// in `Surface::load_machine` from drifting apart.
+    #[test]
+    fn machine_change_keeps_what_the_engine_keeps() {
+        let (mut s, mut engine) = surface();
+
+        // Write the same value to both sides, through the address an NRPN
+        // message would carry, so the two see an identical float.
+        let write = |s: &mut Surface<PARAMS>, engine: &mut DrumEngine, flat: usize, v: f32| {
+            let table = s.table(0);
+            let info = table[flat];
+            let id = address_of(table, flat).expect("addressable row");
+            let raw = (v * NRPN_MAX as f32 + 0.5) as u16;
+            s.apply_absolute(Addr { track: 0, id }, raw);
+            engine.tracks[0].set_param(flat, nrpn_value(&info, raw));
+        };
+
+        for (flat, v) in [
+            (SLOT_LEVEL, 0.2),
+            (SLOT_OUT, 1.0),
+            (SLOT_PAN, 0.25),
+            (SLOT_SEND_DELAY, 0.4),
+            (SLOT_STRIP_CUT, 0.3),
+            (SLOT_LFO1_DEPTH, 0.5),
+        ] {
+            write(&mut s, &mut engine, flat, v);
+        }
+        assert_eq!(s.values[0], engine.tracks[0].base_params, "setup diverged");
+
+        // Swap to machine 7 on both sides.
+        let target = 7;
+        let v = target as f32 / (MachineId::count() - 1) as f32;
+        let raw = (v * NRPN_MAX as f32 + 0.5) as u16;
+        let info = s.table(0)[SLOT_MACHINE];
+        s.apply_absolute(
+            Addr {
+                track: 0,
+                id: ParamId {
+                    group: ParamGroup::Track,
+                    index: 0,
+                },
+            },
+            raw,
         );
+        engine.tracks[0].set_param(SLOT_MACHINE, nrpn_value(&info, raw));
+
+        assert_eq!(s.machine(0), target);
+        assert_eq!(engine.tracks[0].id().index(), target);
+        for (flat, row) in s.table(0).iter().enumerate() {
+            assert_eq!(
+                s.value(0, flat),
+                engine.tracks[0].base_params[flat],
+                "slot {flat} ({}, {:?}) diverged across the swap",
+                row.name,
+                row.route
+            );
+        }
     }
 
     /// Switching to a machine without the group on screen cannot strand

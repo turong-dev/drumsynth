@@ -2438,6 +2438,71 @@ mod tests {
         );
     }
 
+    /// A machine change keeps the track and resets the voice (#43) — and on
+    /// this device that line falls in a different place.
+    ///
+    /// `Track::load_machine` preserves by [`ParamRoute`], not by flat index.
+    /// mi-drum runs its own strip, shaper and modulation inside the voice,
+    /// so those rows route to `Slot` and *do* reset, which is right: here
+    /// they are part of the machine, not of the channel. What survives is
+    /// exactly the TRACK bank — level, output, pan, the sends.
+    #[test]
+    fn machine_change_keeps_the_track_bank_and_resets_the_rest() {
+        let mut e = engine_box();
+        let t = &mut e.tracks_mut()[0];
+        let outgoing = t.id();
+
+        t.set_param(SLOT_LEVEL, 0.2);
+        t.set_param(SLOT_OUT, 1.0);
+        t.set_param(SLOT_PAN, 0.25);
+        t.set_param(SLOT_SEND_DELAY, 0.4);
+        t.set_param(SLOT_SEND_REVERB, 0.6);
+
+        let before = t.base_params;
+        let incoming = MiMachineId::SixOp1;
+        assert_ne!(outgoing, incoming);
+        for &idx in &[
+            SLOT_LEVEL,
+            SLOT_OUT,
+            SLOT_PAN,
+            SLOT_SEND_DELAY,
+            SLOT_SEND_REVERB,
+        ] {
+            assert_ne!(
+                before[idx],
+                incoming.default_params()[idx],
+                "slot {idx} was left at the incoming machine's default"
+            );
+        }
+
+        t.load_machine(incoming);
+
+        let defaults = incoming.default_params();
+        let table = incoming.params();
+        let mut voice_rows = 0;
+        for (idx, row) in table.iter().enumerate() {
+            match row.route {
+                ParamRoute::Machine => {}
+                ParamRoute::Slot => {
+                    voice_rows += 1;
+                    assert_eq!(
+                        t.base_params[idx], defaults[idx],
+                        "voice slot {idx} ({}) did not reset",
+                        row.name
+                    );
+                }
+                _ => assert_eq!(
+                    t.base_params[idx], before[idx],
+                    "track slot {idx} ({}) was reset by the swap",
+                    row.name
+                ),
+            }
+        }
+        // The strip and shaper rows are in that voice count on this device.
+        assert!(voice_rows > 5, "only {voice_rows} rows route to the voice");
+        assert_eq!(t.strip.out, device_core::OutPair::Aux3);
+    }
+
     /// NRPN end-to-end: wire bytes in, resolve through the track's own
     /// machine table, land on a scattered SHAPER row. This is the whole
     /// reason the address is `(group, index)` rather than a flat bank.
