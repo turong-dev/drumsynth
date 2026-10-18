@@ -47,6 +47,8 @@ mod device;
 /// The MIDI input monitor. Also behind the `live` feature because it needs
 /// `midir` for port enumeration and connection.
 #[cfg(feature = "live")]
+mod lcxl3;
+#[cfg(feature = "live")]
 mod monitor;
 #[cfg(feature = "live")]
 mod slack;
@@ -481,7 +483,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             list,
             hex,
             realtime,
-        } => monitor::run(&port, channel, list, hex, realtime)?,
+            daw,
+        } => monitor::run(&port, channel, list, hex, realtime, daw)?,
+
+        #[cfg(feature = "live")]
+        Command::ScreenProbe { port } => lcxl3::probe::run(&port)?,
+
+        #[cfg(feature = "live")]
+        Command::Lcxl3 {
+            device,
+            out,
+            surface_port,
+            port,
+            multi_out,
+            fader_pickup,
+            trace,
+            surface_mode,
+            no_virtual_port,
+            detent_lsb,
+        } => {
+            let mode = match surface_mode.as_str() {
+                "control" => lcxl3::wire::MODE_DAW_CONTROL,
+                "mixer" => lcxl3::wire::MODE_DAW_MIXER,
+                other => {
+                    return Err(format!(
+                        "unknown --surface-mode '{other}'. available: control, mixer"
+                    )
+                    .into())
+                }
+            };
+            let config = lcxl3::Config {
+                port: surface_port,
+                fader_pickup,
+                trace,
+                mode,
+                no_virtual_port,
+                detent_lsb,
+            };
+            match device.as_str() {
+                "drum" => device::run_with_surface(
+                    Box::new(DrumEngine::new()),
+                    &out,
+                    &port,
+                    false,
+                    multi_out,
+                    Some(config),
+                )?,
+                "mi-drum" => {
+                    mi_drum_engine::seed_random(mi_drum_engine::DEFAULT_RANDOM_SEED);
+                    device::run_with_surface(
+                        render::mi_drum_in_place(),
+                        &out,
+                        &port,
+                        false,
+                        multi_out,
+                        Some(config),
+                    )?
+                }
+                other => {
+                    return Err(
+                        format!("unknown device '{other}'. available: drum, mi-drum").into(),
+                    )
+                }
+            }
+        }
 
         #[cfg(feature = "live")]
         Command::Slack {
@@ -734,13 +799,28 @@ mod mi_drum_baseline {
     // the machine-sweep section moves: `mi-wavetable` is not in
     // `DEFAULT_KIT`, so the kit sections are untouched.
     //
-    // Re-pinned for #41: a note-on that landed while Plaits' trigger input
-    // was still armed produced no edge, so the voice never restruck. The
-    // baseline pattern hits tracks faster than they end, so this moves every
-    // Plaits section that has a second hit in it — which is the fix being
-    // visible, not collateral. The Peaks sections are untouched: their edge
-    // was always an explicit per-sample flag.
-    const BASELINE_DIGEST: u64 = 0xba95_93e8_ac74_9b8d;
+    // Re-pinned again because `LEVEL` now does something. mi-drum declared
+    // `SLOT_LEVEL` as `ParamRoute::Level` — "the voice reads it from the
+    // param array" — and never read it, so the parameter was addressable
+    // over NRPN, smoothed by the track, printed by the cheat-sheet, and
+    // completely inert: output was bit-identical at level 1.0, 0.1 and
+    // 0.0. It is applied now, at the end of the voice's chain, which is
+    // where every drum machine applies its own.
+    //
+    // The whole baseline moves and gets quieter, because the factory
+    // default is 0.85 and every track was previously rendering as though
+    // it were 1.0. That is the point of the change rather than a side
+    // effect of it: the kit now sounds the way its own parameter values
+    // say it should.
+    //
+    // Re-pinned for #41 in the same breath, because this value is the merge
+    // of the two: a note-on that landed while Plaits' trigger input was
+    // still armed produced no edge, so the voice never restruck. The
+    // baseline pattern hits tracks faster than they end, so every Plaits
+    // section with a second hit in it moves — the fix being visible, not
+    // collateral. The Peaks sections only move by `LEVEL`: their edge was
+    // always an explicit per-sample flag.
+    const BASELINE_DIGEST: u64 = 0xa3d6_50d2_b3a5_1fcd;
 
     /// One test, one render, deliberately.
     ///

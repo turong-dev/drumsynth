@@ -18,13 +18,25 @@ use drum_engine::midi::{
 };
 use midir::{Ignore, MidiInput};
 
+use crate::lcxl3::{driver, wire};
+
 /// Run the monitor until ctrl-c.
+///
+/// With `daw` set, a Launch Control XL 3 is put into DAW mode first and
+/// taken back out at the end. That is phase 0 of #13: the programmer's
+/// reference is v1.0, the relative-encoder encoding is described loosely
+/// across Novation's sources, and the control-index map is a rendered
+/// diagram rather than text — so what the surface actually sends has to be
+/// captured before a driver is written against it. See
+/// `docs/launch-control-xl3.md` for what to capture and what each capture
+/// decides.
 pub fn run(
     port: &Option<String>,
     channel: Option<u8>,
     list: bool,
     hex: bool,
     realtime: bool,
+    daw: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut midi_in = MidiInput::new("Drumkit MIDI Monitor")?;
     midi_in.ignore(Ignore::None);
@@ -96,6 +108,15 @@ pub fn run(
     }
     println!("press ctrl-c to stop\n");
 
+    // Hold the output connection for the whole session: dropping it would
+    // close the port and the device would keep whatever mode it was left
+    // in. `_daw_out` is also what takes it back out of DAW mode at the end.
+    let mut daw_out = if daw {
+        Some(enter_daw_mode(port.as_deref())?)
+    } else {
+        None
+    };
+
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
@@ -120,8 +141,40 @@ pub fn run(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    if let Some(out) = daw_out.as_mut() {
+        let _ = out.send(&wire::daw_mode(false));
+        println!("left DAW mode");
+    }
+
     println!("\n{} message(s) seen", count.load(Ordering::Relaxed));
     Ok(())
+}
+
+/// Put a Launch Control XL 3 into DAW mode with everything #13 needs
+/// reporting, and return the connection so the caller can undo it.
+///
+/// The order matters: DAW mode first, because the relative-row and touch
+/// feature controls are only fully listening once it is on.
+fn enter_daw_mode(port: Option<&str>) -> Result<midir::MidiOutputConnection, Box<dyn Error>> {
+    let mut out = driver::open_output_port(port)?;
+    out.send(&wire::daw_mode(true))?;
+    out.send(&wire::feature(wire::FEAT_MODE, wire::MODE_DAW_CONTROL))?;
+    for row in [
+        wire::FEAT_RELATIVE_ROW1,
+        wire::FEAT_RELATIVE_ROW2,
+        wire::FEAT_RELATIVE_ROW3,
+    ] {
+        out.send(&wire::feature(row, 0x7F))?;
+    }
+    out.send(&wire::feature(wire::FEAT_TOUCH, 0x7F))?;
+    // Pickup is turned *off* here, deliberately. It suppresses fader
+    // output until the fader crosses the value the device holds, which is
+    // exactly the output a monitor exists to show — leaving it on would
+    // make a working fader look like a dead one.
+    out.send(&wire::feature(wire::FEAT_FADER_PICKUP, 0x00))?;
+    println!("DAW mode on: relative encoder rows 1-3, touch events, fader pickup OFF");
+    println!("turn an encoder slowly, then fast — the data byte is what phase 0 needs");
+    Ok(out)
 }
 
 /// Tiny stateful MIDI parser that prints human-readable channel messages.

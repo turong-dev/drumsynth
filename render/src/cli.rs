@@ -352,6 +352,114 @@ pub(crate) enum Command {
         /// Show real-time messages (clock, start, stop, continue).
         #[arg(long)]
         realtime: bool,
+        /// Put a Launch Control XL 3 into DAW mode before monitoring, with
+        /// relative encoders and touch events on.
+        ///
+        /// Phase 0 of #13: the programmer's reference is v1.0 and the
+        /// relative encoding in particular is documented loosely across
+        /// Novation's sources, so what the surface *actually* sends has to
+        /// be captured before a driver is written against it. `monitor`
+        /// only opens an input, and these messages have to be sent to the
+        /// device first — hence a flag here rather than a new mode.
+        ///
+        /// Opens an output port alongside the input (same `--port` match),
+        /// sends the enables, and takes the device back out of DAW mode on
+        /// exit. Pair it with `--hex`.
+        #[arg(long)]
+        daw: bool,
+    },
+
+    /// Find out what actually drives the Launch Control XL 3's OLED.
+    ///
+    /// Phase 0 of #13, narrowed to the screen. The reference numbers the
+    /// display targets twice with different numbers, overloads the
+    /// arrangement field so 0 cancels / 1-30 configure / 31 triggers, and
+    /// does not say whether the stationary display needs triggering at
+    /// all. This sends each candidate in turn with its step number on the
+    /// screen; the lowest-numbered step that shows its text is the answer.
+    ///
+    /// Step 0 lights two encoder LEDs first, so "nothing reaches the
+    /// device" is distinguishable from "the screen needs something else".
+    /// Every step prints the exact bytes it sent.
+    #[cfg(feature = "live")]
+    ScreenProbe {
+        /// Substring matched against the controller's MIDI port names.
+        #[arg(long)]
+        port: Option<String>,
+    },
+
+    /// Drive the engine from a Novation Launch Control XL 3 (#13).
+    ///
+    /// `render device` with the controller attached as a front panel: the
+    /// same engine, the same audio output, the same `handle_midi` router,
+    /// plus 24 encoders and 8 faders editing the selected track with the
+    /// parameter's name and value on the controller's screen.
+    ///
+    /// The controller must be on its DAW In/Out USB port; the driver finds
+    /// it by name and puts it into DAW mode on start, then returns it to
+    /// standalone mode on exit.
+    #[cfg(feature = "live")]
+    Lcxl3 {
+        /// Device to run. `drum` (the default) or `mi-drum`.
+        #[arg(value_name = "DEVICE", default_value = "drum")]
+        device: String,
+        /// Substring to match against output device names.
+        #[arg(short, long)]
+        out: Option<String>,
+        /// Substring matched against the controller's MIDI port names.
+        /// Defaults to the Launch Control XL 3's own name.
+        #[arg(long)]
+        surface_port: Option<String>,
+        /// Name of the virtual MIDI input port other apps see, so a DAW can
+        /// sequence the engine while you play the surface.
+        #[arg(long, default_value = "Drumkit Engine")]
+        port: String,
+        /// Per-track multi-out: 18 channels. See `device --multi-out`.
+        #[arg(long)]
+        multi_out: bool,
+        /// Enable the controller's fader pickup (feature CC 70).
+        ///
+        /// Off by default. Pickup keeps a fader silent until it passes
+        /// through the value the *device* holds for it, and nothing sends
+        /// the device those values yet — so turning it on makes the
+        /// faders look broken. Here to measure against, not to use.
+        #[arg(long)]
+        fader_pickup: bool,
+        /// Print every message the controller sends, what it decoded to,
+        /// and what the surface did with it.
+        ///
+        /// Including the messages that decode to nothing, which is the
+        /// point: a control that appears dead is either missing from the
+        /// log (the device sends nothing) or present and undecoded (the
+        /// device sends something this build does not expect).
+        #[arg(long)]
+        trace: bool,
+        /// What one detent of a slow encoder turn is worth, in 14-bit
+        /// NRPN LSBs (full range is 16383).
+        ///
+        /// The controller's own acceleration is small — ±1, ±2, ±4 — so
+        /// the driver decides what those are worth. The step is the
+        /// square of the controller's magnitude times this, so the
+        /// default of 32 gives 0.2% of travel on a slow detent and 3.1%
+        /// on a fast one. Raise it for coarser, faster knobs.
+        #[arg(long, default_value_t = 32)]
+        detent_lsb: i32,
+        /// Do not open the engine's virtual MIDI input port.
+        ///
+        /// That port is open to the whole system, so any application can
+        /// play the engine through it without the control surface seeing
+        /// anything. Closing it makes the controller the only thing that
+        /// can, which is how you tell "the surface is sending twice"
+        /// apart from "something else is sending too".
+        #[arg(long)]
+        no_virtual_port: bool,
+        /// Surface mode to select on entry: `control` or `mixer`.
+        ///
+        /// The reference names both and does not say what differs. On a
+        /// Launch Control XL the mixer is what the faders *are*, so if
+        /// they report nothing in one mode, try the other.
+        #[arg(long, default_value = "control")]
+        surface_mode: String,
     },
 }
 

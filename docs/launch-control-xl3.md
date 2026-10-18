@@ -1,0 +1,476 @@
+# Launch Control XL 3 — DAW mode
+
+What the controller puts on the wire, what we send it, and what is still
+unconfirmed. Background and the UX this serves: issue #13.
+
+Everything below is on the **DAW In/Out** USB port. DAW mode sends nothing
+on the DIN outputs and nothing on the main MIDI In/Out interface.
+
+Source: [programmer's reference guide v1.0][ref], plus Novation's
+[DAW mode][daw], [SysEx format][sysex], [feature controls][feat] and
+[relative encoders][rel] articles.
+
+[ref]: https://fael-downloads-prod.focusrite.com/customer/prod/downloads/launch_control_xl_3_programmer_s_reference_guide-pdf_en.pdf
+[daw]: https://userguides.novationmusic.com/hc/en-gb/articles/27840466544402-Launch-Control-XL-3-programmer-s-DAW-mode
+[sysex]: https://userguides.novationmusic.com/hc/en-gb/articles/27840466455314-SysEx-message-format-used-by-Launch-Control-XL-3
+[feat]: https://userguides.novationmusic.com/hc/en-gb/articles/27840466607890-Launch-Control-XL-3-feature-Controls
+[rel]: https://support.novationmusic.com/hc/en-gb/articles/38440851693458-Using-Relative-Encoders
+
+## Reading the reference
+
+Two things about the source document are worth knowing before trusting
+anything transcribed from it.
+
+The prose is extractable text. **The control map is not** — pages 9 and 10
+are rendered 3D images of the panel with the CC number printed under each
+control, and the colour palette on page 12 is an image too. Every control
+index in this document was read off those renders at 4× zoom, in both the
+decimal and hexadecimal versions, and the two agreed.
+
+That is still OCR-of-a-perspective-render, so it gets one independent
+check: the reference *does* state the relative-mode encoder CCs in prose
+(row 1 = 77–84, row 2 = 85–92, row 3 = 93–100) and says they are the
+absolute indices plus 64. 77 − 64 = 13 and 100 − 64 = 36, which is exactly
+the encoder block read off the diagram. `relative_rows_are_the_absolute_
+indices_plus_64` in `render/src/lcxl3/wire.rs` holds that check in the test
+suite.
+
+The palette table got no such check and so is not used: LED colour goes out
+as explicit RGB SysEx instead. See *Colour*, below.
+
+## Control map
+
+| Control | Channel | CC / index |
+|---|---|---|
+| Faders, left to right | 16 | 5–12 |
+| Encoders, reading order | 16 | 13–36 (row 1: 13–20, row 2: 21–28, row 3: 29–36) |
+| Encoders in relative mode | 16 | absolute + 64 → 77–84, 85–92, 93–100 |
+| Upper button row ("Solo/Arm") | 1 | 37–44 |
+| Lower button row ("Mute/Select") | 1 | 45–52 |
+| Page ▲ / ▼ | 1 | 106 / 107 |
+| Track ◀ / ▶ ("Settings") | 1 | 101 / 102 |
+| Play / Record | 1 | 116 / 118 |
+| Shift | 7 | 63 |
+| Touch events | 15 | the control's **absolute** index, 127 = on, 0 = off |
+| Mode report and select | 7 | 30 |
+
+One numbering does three jobs: the CC a control reports on, the index an
+LED colour message addresses, and the per-control display target. Encoder
+LEDs keep using the *absolute* index even when the encoder is in relative
+mode.
+
+#13 uses the upper row for track select and the lower row for the eight
+`ParamGroup::ADDRESSABLE` entries — eight buttons, eight groups, which is
+not a coincidence.
+
+## Messages we send
+
+All SysEx starts `F0 00 20 29 02 15`.
+
+| Purpose | Bytes |
+|---|---|
+| Enter DAW mode | `F0 00 20 29 02 15 02 7F F7` (or note `9F 0C 7F`) |
+| Leave DAW mode | `F0 00 20 29 02 15 02 00 F7` (or note `9F 0C 00`) |
+| LED colour, RGB | `F0 00 20 29 02 15 01 53 <idx> <R> <G> <B> F7` |
+| LED colour, palette | `B0 <idx> <palette>` |
+| Configure a display | `F0 00 20 29 02 15 04 <target> <config> F7` |
+| Set display text | `F0 00 20 29 02 15 06 <target> <field> <text…> F7` |
+
+Display targets: `05h`–`24h` are the per-control temporary displays (same
+numbering as the controls), `35h` the stationary display, `36h` the global
+overlay.
+
+The config byte is `0` to cancel and `7Fh` to trigger with current
+contents; otherwise bit 6 is "auto temporary display on change", bit 5 is
+"auto on touch" (both default **set**), and bits 0–4 are the arrangement.
+The driver clears both auto bits: the controller's own temporary display
+shows the raw CC and a number out of 127, and we are about to send better.
+
+**Configuring a display and filling its text does not show it.** The
+arrangement field is overloaded: 0 cancels, 1–30 select an arrangement, and
+**31 triggers** — brings the display up with whatever text it currently
+holds. `7Fh` is the documented shorthand for "trigger with both automatic
+bits set".
+
+**Confirmed on hardware, 2026-10-18** (`screen-probe` step 2): target
+`35h`, config `03h`, text fields 0–8, then config `1Fh`. The screen showed
+the title on its top line and the eight names below it. Step 1 — the same
+sequence without the trigger — showed nothing, which is what the bug was.
+
+Every other part of the integration worked while the OLED stayed blank:
+DAW mode on, relative encoders reporting, parameters moving. The driver
+configured the arrangement, wrote the fields, and never triggered. The
+reference does say so, as "once a display is configured for a given
+target, it can be triggered" — which reads as a capability rather than a
+required step.
+
+The arrangement table has a **`Numeric`** column, and it decides whether
+the value on screen is yours to send or the device's to render. It is easy
+to read past and it is the difference between a readout and a permanent
+`0`.
+
+Arrangements used here:
+
+- **3** — "1 line + 2×4: Title and 8 names". `Numeric: No`, 9 fields:
+  field 0 is the title, 1–8 the names under one row of eight encoders.
+  This is the stationary display.
+- **1** — "Parameter Name and **Text** Parameter Value". `Numeric: No`,
+  2 fields: name and value. This is the per-control display a turn
+  raises.
+
+Not **4**, which is the per-control *default* and the obvious-looking
+choice. It is the table's only `Numeric: Yes`, carries **one** text field
+(the name), and renders the value itself from the control's raw MIDI
+value. Relative encoders have no raw value, so it shows `0` regardless of
+what is sent to field 1 — that field does not exist.
+
+Text is ASCII `20h`–`7Eh`, plus four reassigned control codes (`1Bh` empty
+box, `1Ch` filled box, `1Dh` flat, `1Eh` heart) that nothing here uses.
+
+### Feature controls (channel 7)
+
+Sent to channel 7; the device answers on channel 7 and accepts queries on
+channel 8.
+
+| CC | Feature | Values |
+|---|---|---|
+| 30 | Surface mode | 1 = DAW Mixer, 2 = DAW Control, 6–9 / 18–29 = custom modes |
+| 63 | Shift | on/off |
+| 69 / 72 / 73 | Relative output, encoder rows 1 / 2 / 3 | on/off |
+| 70 | Fader pickup | on/off |
+| 71 | Touch events | on/off |
+| 100 | Global MIDI channel | 0–15 |
+| 111 | LED brightness | 0–127 |
+| 112 | Screen brightness | 0–127 |
+| 113 | Temporary display timeout | 0–99, tenths of a second, 0 means 1 s |
+| 120 | Out2 MIDI thru | on/off |
+| 121 | Encoder curve | 0 slow, 1 medium, 2 fast |
+
+## Colour
+
+LED colour can go out as a palette index in three bytes (`B0 <idx>
+<palette>`) or as explicit RGB in thirteen. The driver uses RGB.
+
+The reason is not bandwidth, it is that the palette table in the reference
+is a rendered image and the version of it we could extract is the index
+numbers *without* their swatches. A palette index in the source would be a
+number we could not justify. RGB says what it means, and the group colours
+then live in `GROUP_COLOURS` in `render/src/lcxl3/surface.rs` as readable
+values. Components are 7-bit, as every SysEx data byte must be.
+
+If a capture later shows the repaint burst is too wide, the palette is
+where to save three quarters of it — but measure first, and get the
+swatches first.
+
+## Running it
+
+```bash
+# mi-drum, through the speakers, with the controller as the front panel
+cargo run -p render --features live -- lcxl3 mi-drum --out "MacBook Air Speakers"
+
+# the drum device instead
+cargo run -p render --features live -- lcxl3 --out "MacBook Air Speakers"
+```
+
+Two flags are worth knowing before the first run.
+
+**`--out` defaults to BlackHole when one is installed**, which is right for
+recording and silent for auditioning. Pass a real output device — `render
+device --list` prints them — or you will turn knobs and hear nothing.
+
+**`--surface-port` overrides the port match.** The default tries `lcxl3`,
+`launch control xl` and `launchcontrol`, preferring a port whose name also
+contains `daw`, because only the DAW In/Out interface speaks DAW mode.
+If the match fails, the error lists every port it saw; pass a substring of
+the right one. `render monitor --list` prints the inputs.
+
+The port check runs before the audio device opens, so a controller that is
+not there fails immediately rather than after the engine's banner.
+
+### What you should see
+
+On start: the controller's screen shows `MACRO R1`, the eight faders are
+track levels, and the three encoder rows are the first three `TRACK`
+parameters of each column's track. Macros (#14) are not landed, so the
+resting screen falls back to the `TRACK` group as #13 anticipates.
+
+The top button row selects a track and auditions it — hold Shift to select
+silently. The bottom row is the eight addressable groups:
+
+- **Hold** one for a quick edit; releasing gives back the screen *and the
+  page* you were on.
+- **Tap** one to latch it.
+- **Tap the latched one again** to return to the macro screen. #13
+  describes a tap as latching "until another is chosen" and does not say
+  how to leave; with all sixteen buttons spoken for there is no spare one,
+  so the latched group toggles.
+
+Buttons for groups the loaded machine has no parameters in are dark.
+
+On mi-drum specifically: there are six tracks, so **columns 7 and 8 are
+dark** and do nothing, and the `AMP` button is dark on every machine
+because mi-drum runs its envelope inside the voice and has no `AMP` rows.
+Both are correct, and both are covered by tests.
+
+## Fader pickup is off, and that reverses what #13 asked for
+
+#13 says "fader pickup on (feature CC 70), so a fader physically out of
+position does not jump the level on first touch". That is the right
+instinct and the wrong setting, for a reason the issue could not have
+known: **pickup makes a fader silent until it passes through the value the
+device holds for it, and nothing tells the device what that value is.**
+
+The reference describes the feedback channel only for encoders — "if the
+DAW sends them position information, they automatically pick that up" —
+and says nothing about faders. With pickup on and no positions sent, the
+pickup reference is whatever the device defaulted to, so the faders are
+dead until they happen to cross it. Which is what they did.
+
+So the driver now *explicitly disables* pickup rather than leaving it
+alone, because some feature controls are non-volatile and a device
+carrying the setting from an earlier session would have dead faders for a
+reason nothing in this run had set. `--fader-pickup` turns it back on for
+measurement.
+
+`monitor --daw` disables it too, and must: pickup suppresses exactly the
+output a monitor exists to show, so leaving it on makes a working fader
+look like a dead one.
+
+**To get #13's intent back**, phase 0 needs to answer whether sending
+`BFh <5..12> <value>` to the device sets a fader's stored pickup position
+the way it does for encoders. If it does, the driver can send the current
+levels at startup and after every machine change, and pickup becomes
+usable. Until then it is a setting that only breaks things.
+
+## The resting screen does not carry the machine selector
+
+#13 says the resting screen falls back to the `TRACK` group until macros
+(#14) land. Taken literally that puts `MACH` — `(TRACK, 0)` — under the
+top-left encoder of every column, and one detent is one machine: the
+voice reloads and every parameter on the track resets to the new
+machine's defaults.
+
+That is the most destructive control on the device, sitting on the screen
+the surface rests in when nobody is doing anything, under a knob you
+reach past to get to the buttons. It presented as tracks changing their
+sound between button presses, which is exactly what it is.
+
+The resting screen therefore offers `TRACK` *minus* the machine selector.
+The selector is still reachable by holding the `TRACK` group button,
+which is a deliberate act rather than an accident.
+
+When #14 lands and the resting screen carries real macros, this stops
+mattering — but the rule it establishes is worth keeping: a resting state
+has to be safe to brush against.
+
+## When a control appears dead
+
+In order, because each step rules out the one before it.
+
+**1. Does the device send anything?**
+
+```bash
+cargo run -p render --features live -- monitor --daw --hex
+```
+
+No surface logic at all — it prints every message that arrives. Move the
+control. A fader should show `Ch 16 CC 5..12`, an encoder `Ch 16 CC
+77..100`, a button `Ch 1 CC 37..52`.
+
+Nothing at all means the device is not sending it: wrong surface mode,
+a feature control not enabled, or the control index is not what the
+diagram said.
+
+**2. Does the driver recognise it?**
+
+```bash
+cargo run -p render --features live -- lcxl3 --trace
+```
+
+Logs every message with its raw bytes *and the ones it fails to decode*,
+which is the half that matters — a control missing from the log entirely
+and a control logged as `(not decoded)` have completely different fixes.
+Then logs the engine events the surface produced, or why it produced
+none.
+
+**3. Is a second copy of the engine still running?**
+
+This one cost an evening. A `render lcxl3` left running in another shell
+is indistinguishable from an engine bug: both instances read the
+controller, both render audio, and each keeps its own parameter state —
+so one press makes two sounds, and only one of them responds to the
+knobs. A trace shows nothing wrong, because each process is behaving
+correctly.
+
+The engine now warns at startup if a MIDI destination with its port name
+already exists, which is what a running instance looks like from outside.
+
+**4. Is something other than the controller playing the engine?**
+
+`render lcxl3` opens a virtual CoreMIDI input named "Drumkit Engine" so a
+DAW can sequence the engine while you play the surface. That port is open
+to the whole system, and **whatever arrives on it reaches the engine
+without the control-surface driver ever seeing it** — so a surface-only
+trace makes it look like the engine is inventing notes.
+
+With `--trace` the virtual port is logged too, prefixed `virt`. To remove
+it from the picture entirely:
+
+```bash
+cargo run -p render --features live -- lcxl3 --no-virtual-port --trace
+```
+
+If a symptom disappears with the port closed, nothing in the driver or
+the engine was ever wrong: something else on the machine was sending.
+
+**5. Is it the surface mode?**
+
+`--surface-mode mixer` selects DAW Mixer instead of DAW Control. The
+reference names both and says nothing about what differs; on a Launch
+Control XL the mixer is what the faders *are*, so it is worth trying
+before concluding anything about the wire format.
+
+## Phase 0: what to capture, and what each capture decides
+
+`render monitor --daw --hex` puts the controller into DAW mode with
+relative rows, touch events and fader pickup on, then prints everything
+that arrives. It takes the device back out of DAW mode on exit.
+
+```bash
+cargo run -p render --features live -- monitor --daw --hex --port LCXL3
+```
+
+Five things to settle, in rough order of how much depends on them.
+
+**1. ~~What a fast turn of a relative encoder sends.~~**
+**Settled on hardware, 2026-10-18.** Binary offset, and the magnitude does
+grow with speed: the data byte carries ±1, ±2, ±4 around the pivot at the
+medium curve. `wire::relative_delta` was right.
+
+That measurement also settled the half the question did not ask. ±4 is
+nowhere near enough to cross a 14-bit range, so handing the delta to the
+engine unscaled makes one detent worth 1/16383 of a parameter — a full
+sweep of about four thousand detents, and nothing audible. The encoders
+work and the sound does not change, which is exactly how it presented.
+
+So the driver converts, which is what #13 asked for: "the driver decides
+what a detent is worth in 14-bit LSBs". `step_lsbs` squares the
+controller's magnitude and scales by `--detent-lsb` (default 32), giving
+0.2% of travel on a slow detent and 3.1% on a fast one — roughly 500
+detents for a careful full sweep, 32 for a quick one. Squared rather than
+linear because the same three magnitudes have to be both fine enough for a
+resonant filter and fast enough to cross the range; linear can be one or
+the other.
+
+`DESIGN.md` still holds. The engine applies whatever magnitude arrives and
+keeps no per-parameter timing state, and the controller still supplies the
+acceleration curve. What a detent is worth in a 14-bit space is a unit
+conversion, and only the driver knows both ends of it.
+
+Still to capture: what the slow and fast curve settings (feature CC 121 =
+0 and 2) report. Only the medium curve has been measured.
+
+**2. Hold threshold.** `surface::HOLD_MS` is 300 ms, inherited from the
+removed grid surface, where it was the threshold for a *pad*. A button
+under a finger that is already reaching for an encoder may want less. Tune
+it by feel against the hardware.
+
+**3. Repaint rate.** Phase 2 of #13 asks for a measured limit, and
+`driver::RENDER_INTERVAL_MS` (10 ms) and `driver::MAX_SENDS_PER_RENDER`
+(12) are guesses. A worst-case transition is a title, eight names and up to
+forty LED writes. Drive it hard — hold a group button and sweep an encoder
+while paging — and watch for the screen falling behind or messages being
+dropped. The grid's `RENDER_INTERVAL_MS` / `MAX_SENDS_PER_RENDER` pacing is
+the pattern being copied; its `REFRESH_MS` full-resync burst is the one
+deliberately *not* copied.
+
+**4. What leaving DAW mode by hand looks like.** Press Mode on the device
+and confirm the ch 7 CC 30 report arrives, and with what value. The driver
+re-enters DAW mode and repaints from scratch whenever it sees a mode that
+is not DAW Control, which needs the report observed rather than assumed.
+
+**5. The display-target overlap.** Partly settled. `35h` is confirmed as
+the stationary display for configure-and-text, so the `20h`/`21h`
+numbering in the bitmap section applies to that command alone rather than
+contradicting this one. Steps 6 and 7 of the probe were not needed.
+
+What is still open is narrower: the reference says targets `05h`–`24h`
+(5–36) are the per-control temporary displays, and separately that "the
+arrangement is ignored for targets only setting names (`22h`(34) –
+`28h`(40))". Those ranges overlap at 34–36, which are encoders 22–24. Set
+text on target 36 and see which statement holds. Nothing depends on it
+today: the driver aims per-control displays at the encoder being turned,
+and only reaches 34–36 for the three right-hand encoders of the bottom
+row.
+
+### `render screen-probe`
+
+```bash
+cargo run -p render --features live -- screen-probe
+```
+
+Walks the candidates one step at a time, printing the exact bytes and
+waiting for you between them. Each step writes its own number to the
+screen, so the lowest-numbered step that shows `STEP n` is the answer.
+
+Step 0 lights two encoder LEDs first — one through RGB SysEx, one through
+a palette CC — so "nothing is reaching the device" is distinguishable from
+"the screen wants something else" before any display message is sent.
+
+## Confirmed on hardware
+
+As of 2026-10-18, by `render screen-probe` and a live `render lcxl3`
+session:
+
+- DAW mode entry, the feature-control enables, and relative encoder
+  output. Parameters move from the encoders.
+- The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
+- Relative encoder deltas: **±1, ±2, ±4** around the pivot at the medium
+  curve, and the driver has to scale them — see open question 1.
+- The per-control readout needs arrangement **1**, not the default 4:
+  4 is `Numeric: Yes` and renders the value itself, which for a relative
+  encoder is always 0.
+- The upper button row starts at **CC 37** on channel 1, as the diagram
+  said: button 1 sends `B0 25 7F` on press and `B0 25 00` on release. The
+  rest of the row is still inferred from the diagram rather than seen.
+- The device **echoes SysEx back** on its DAW out port — the DAW-mode
+  enable arrives again as input immediately after being sent. Harmless,
+  but it means `wire::for_each_message` skipping SysEx bodies is doing
+  real work rather than being defensive: LED and display writes come back
+  too, and their data bytes would otherwise be read as messages.
+- Faders are silent while fader pickup is on, because nothing sends the
+  device the positions it would pick up against. Pickup is now off —
+  though that was **not** what was keeping the faders quiet; see below.
+
+## Open, as of 2026-10-18
+
+**The faders do nothing**, and turning pickup off did not fix it. So the
+cause is upstream of the driver's fader handling, which is itself proven
+end-to-end by `a_fader_cc_moves_that_tracks_level` — raw CC bytes through
+decode, the surface and `handle_midi` to the engine's level. Work the
+checklist above; step 1 decides whether this is a device question or a
+decode question.
+
+Candidates not yet ruled out, in the order worth trying:
+
+1. **Surface mode.** DAW Control was chosen arbitrarily; DAW Mixer is the
+   other, and on this hardware family the mixer is the faders.
+2. **The fader control indices.** 5–12 comes from the display-target
+   paragraph, which says the targets are "the same as CC indices". That
+   is one sentence of corroboration, not two, and unlike the encoder
+   block it has no arithmetic cross-check behind it.
+3. ~~**Message framing.**~~ Confirmed and fixed: the driver read only the
+   first three bytes of a callback buffer, so every message after the
+   first in a packet was discarded, and running status decoded as
+   nothing. `wire::for_each_message` handles both now.
+
+## Not yet confirmed
+
+- Everything else in *Phase 0*, above — above all what a fast turn sends.
+- The upper/lower button rows are **assumed** to be 37–44 and 45–52
+  respectively, read off the diagram. If they turn out to be swapped, the
+  fix is two constants in `wire.rs`; nothing above them changes.
+- `Control::from_index` deliberately does not decode absolute-mode encoder
+  messages (13–36). The driver puts every row into relative mode at
+  startup, so an absolute message means the mode change did not take —
+  which should show up as a dead encoder rather than be silently handled.
