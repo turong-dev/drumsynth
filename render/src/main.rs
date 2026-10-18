@@ -733,7 +733,21 @@ mod mi_drum_baseline {
     // carrier, which is the degenerate case `SHAPE.IN` exists to avoid. Only
     // the machine-sweep section moves: `mi-wavetable` is not in
     // `DEFAULT_KIT`, so the kit sections are untouched.
-    const BASELINE_DIGEST: u64 = 0x5035_ea1d_f5c5_7a55;
+    //
+    // Re-pinned again because `LEVEL` now does something. mi-drum declared
+    // `SLOT_LEVEL` as `ParamRoute::Level` — "the voice reads it from the
+    // param array" — and never read it, so the parameter was addressable
+    // over NRPN, smoothed by the track, printed by the cheat-sheet, and
+    // completely inert: output was bit-identical at level 1.0, 0.1 and
+    // 0.0. It is applied now, at the end of the voice's chain, which is
+    // where every drum machine applies its own.
+    //
+    // The whole baseline moves and gets quieter, because the factory
+    // default is 0.85 and every track was previously rendering as though
+    // it were 1.0. That is the point of the change rather than a side
+    // effect of it: the kit now sounds the way its own parameter values
+    // say it should.
+    const BASELINE_DIGEST: u64 = 0x3e92_0f26_1a35_6ec1;
 
     /// One test, one render, deliberately.
     ///

@@ -1035,6 +1035,16 @@ pub struct MiSlot {
     ripples_fm: f32,
     /// `SHAPE.MIX`: 0 = dry voice, 1 = Warps alone.
     shaper_mix: f32,
+    /// `LEVEL`: track output level, applied at the end of the voice's own
+    /// chain.
+    ///
+    /// The row has always been there, grouped `TRACK` and routed
+    /// [`ParamRoute::Level`] — "stored and forwarded, the voice reads it
+    /// from the param array" — and the voice did not read it. The
+    /// parameter was addressable over NRPN, smoothed by the track, shown
+    /// by the cheat-sheet, and inert: output was bit-identical at level
+    /// 1.0, 0.1 and 0.0.
+    level: f32,
     /// `SHAPE.IN`: which signal feeds Warps' modulator input.
     shaper_mod_src: ModSource,
     /// `SHAPE.OUT`: crossfade between Warps' main (0) and aux (1) outputs.
@@ -1418,6 +1428,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             ripples_reso_q: 0.707,
             ripples_fm: 0.0,
             shaper_mix: 1.0,
+            level: 1.0,
             shaper_mod_src: ModSource::Self_,
             shaper_out_tap: 0.0,
             voice_aux: 0.0,
@@ -1553,6 +1564,7 @@ impl Slot<NUM_PARAMS> for MiSlot {
             core::ptr::addr_of_mut!((*ptr).ripples_reso_q).write(0.707);
             core::ptr::addr_of_mut!((*ptr).ripples_fm).write(0.0);
             core::ptr::addr_of_mut!((*ptr).shaper_mix).write(1.0);
+            core::ptr::addr_of_mut!((*ptr).level).write(1.0);
             core::ptr::addr_of_mut!((*ptr).shaper_mod_src).write(ModSource::Self_);
             core::ptr::addr_of_mut!((*ptr).shaper_out_tap).write(0.0);
             core::ptr::addr_of_mut!((*ptr).voice_aux).write(0.0);
@@ -1634,6 +1646,9 @@ impl Slot<NUM_PARAMS> for MiSlot {
             .recalc(self.ripples_cutoff_hz, self.ripples_reso_q, SAMPLE_RATE);
         self.ripples_fm = params[SLOT_RIPPLES_FM];
         self.shaper_mix = params[SLOT_SHAPER_MIX].clamp(0.0, 1.0);
+        // Outside the Peaks/Plaits split: a track's output level is a
+        // track property, not a property of what is generating the sound.
+        self.level = params[SLOT_LEVEL].clamp(0.0, 1.0);
         self.shaper_mod_src = Self::mod_src_from_param(params[SLOT_SHAPER_MOD_SRC]);
         self.shaper_out_tap = params[SLOT_SHAPER_OUT_TAP].clamp(0.0, 1.0);
 
@@ -1934,6 +1949,20 @@ impl Slot<NUM_PARAMS> for MiSlot {
                 self.ripples.set_cutoff(cutoff, SAMPLE_RATE);
                 buf[i] = self.ripples.tick(buf[i]);
             }
+        }
+
+        // Track output level, last — after the shaper and the filter, so
+        // it scales the finished voice rather than driving a stage
+        // harder. This is where every drum machine applies its own
+        // `SLOT_LEVEL` (see `BdClassic::tick`), and mi-drum is the device
+        // that never did.
+        //
+        // Unconditional rather than guarded on `level != 1.0`: the
+        // factory default is 0.85, so the guard would almost never fire,
+        // and a predictable cost is easier to bench than a branch whose
+        // behaviour depends on the kit.
+        for s in buf.iter_mut().take(n) {
+            *s *= self.level;
         }
 
         // The segment is done with; the next one refills from zero.
@@ -2539,6 +2568,46 @@ mod tests {
             }
         }
         peak
+    }
+
+    /// `LEVEL` scales the track's output.
+    ///
+    /// Regression gate for a parameter that existed, was addressable over
+    /// NRPN, was smoothed by the track and did nothing: mi-drum declared
+    /// `SLOT_LEVEL` as [`ParamRoute::Level`] and never read it in
+    /// `set_params`, so output was bit-identical at 1.0, 0.1 and 0.0. It
+    /// surfaced when a control surface put the faders on it (#13) and
+    /// they moved nothing.
+    #[test]
+    fn level_scales_the_output() {
+        let full = {
+            let mut e = engine_box();
+            e.tracks_mut()[0].set_param(SLOT_LEVEL, 1.0);
+            render_peak(&mut e, 0, 8)
+        };
+        let half = {
+            let mut e = engine_box();
+            e.tracks_mut()[0].set_param(SLOT_LEVEL, 0.5);
+            render_peak(&mut e, 0, 8)
+        };
+        let silent = {
+            let mut e = engine_box();
+            e.tracks_mut()[0].set_param(SLOT_LEVEL, 0.0);
+            render_peak(&mut e, 0, 8)
+        };
+
+        assert!(full > 0.1, "the track should be audible at all: {full}");
+        // Not an exact ratio: the level is smoothed over blocks and the
+        // peak may land before the ramp finishes. Half must be clearly
+        // quieter than full and clearly louder than silence.
+        assert!(
+            half < full * 0.75,
+            "LEVEL 0.5 must be audibly quieter than 1.0: {half} vs {full}"
+        );
+        assert!(
+            silent < full * 0.02,
+            "LEVEL 0.0 must be effectively silent: {silent} vs {full}"
+        );
     }
 
     #[test]
