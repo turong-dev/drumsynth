@@ -434,39 +434,45 @@ mod tests {
         );
     }
 
+    /// Zero crossings in the first ~30 ms of a track-7 (SyTone, middle C)
+    /// hit, where the FM sidebands are still busy but the carrier dominates.
+    ///
+    /// A free function, not a closure in the test, and it builds its own
+    /// engine: `DrumEngine` is close to 300 KB (`engine_size_fits_ocram_budget`
+    /// caps it there), and a debug build reserves a slot per `new()` call site
+    /// for the whole frame -- scopes do not change that. Three call sites in
+    /// one function overflowed the test thread's stack on Linux. One call
+    /// site, in a frame that pops between phases, is what keeps this test
+    /// inside the same budget as every other single-engine test here.
+    fn retune_crossings(setup: impl FnOnce(&mut DrumEngine)) -> u32 {
+        let mut e = DrumEngine::new();
+        setup(&mut e);
+
+        let mut l = [0.0f32; BLOCK];
+        let mut r = [0.0f32; BLOCK];
+        e.trigger(7, 1.0);
+        let mut prev = 0.0f32;
+        let mut count = 0u32;
+        let window = (0.03 * SAMPLE_RATE) as usize;
+        let mut done = 0;
+        while done < window {
+            let n = window.min(done + BLOCK);
+            e.process(&mut l, &mut r);
+            for &s in l.iter().take(n - done) {
+                if (prev < 0.0) != (s < 0.0) {
+                    count += 1;
+                }
+                prev = s;
+            }
+            done = n;
+        }
+        count
+    }
+
     #[test]
     fn track_retune_transposes_and_survives_param_recompute() {
-        // Track 7 is SyTone (Middle C). Pitch measured by zero crossings in
-        // the first ~30 ms of a hit, where the FM sidebands are still busy
-        // but the carrier dominates.
-        let crossings = |e: &mut DrumEngine| {
-            let mut l = [0.0f32; BLOCK];
-            let mut r = [0.0f32; BLOCK];
-            e.trigger(7, 1.0);
-            let mut prev = 0.0f32;
-            let mut count = 0u32;
-            let window = (0.03 * SAMPLE_RATE) as usize;
-            let mut done = 0;
-            while done < window {
-                let n = window.min(done + BLOCK);
-                e.process(&mut l, &mut r);
-                for &s in l.iter().take(n - done) {
-                    if (prev < 0.0) != (s < 0.0) {
-                        count += 1;
-                    }
-                    prev = s;
-                }
-                done = n;
-            }
-            count
-        };
-
-        let mut e = DrumEngine::new();
-        let base = crossings(&mut e);
-
-        let mut e = DrumEngine::new();
-        e.tracks[7].retune(12.0);
-        let octave = crossings(&mut e);
+        let base = retune_crossings(|_| {});
+        let octave = retune_crossings(|e| e.tracks[7].retune(12.0));
 
         assert!(
             octave > base * 3 / 2 && octave < base * 4,
@@ -474,10 +480,10 @@ mod tests {
         );
 
         // A param recompute (e.g. from a CC) must not drop the transpose.
-        let mut e = DrumEngine::new();
-        e.tracks[7].retune(12.0);
-        e.tracks[7].set_param(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
-        let after_recompute = crossings(&mut e);
+        let after_recompute = retune_crossings(|e| {
+            e.tracks[7].retune(12.0);
+            e.tracks[7].set_param(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
+        });
         assert!(
             (after_recompute as i64 - octave as i64).abs() <= 2,
             "param recompute dropped the retune: {octave} vs {after_recompute}"

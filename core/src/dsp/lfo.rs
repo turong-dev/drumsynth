@@ -364,7 +364,7 @@ mod tests {
         lfo.tick_block();
         let first = lfo.value();
         // Advance past the half-way point.
-        let half_cycle = (SAMPLE_RATE as f32 / BLOCK as f32 / 2.0) as usize + 1;
+        let half_cycle = (SAMPLE_RATE / BLOCK as f32 / 2.0) as usize + 1;
         for _ in 0..half_cycle {
             lfo.tick_block();
         }
@@ -428,7 +428,7 @@ mod tests {
             0.0,
         );
         lfo.trigger();
-        let blocks_per_cycle = (SAMPLE_RATE as f32 / BLOCK as f32 / 100.0) as usize + 1;
+        let blocks_per_cycle = (SAMPLE_RATE / BLOCK as f32 / 100.0) as usize + 1;
         for _ in 0..blocks_per_cycle {
             lfo.tick_block();
         }

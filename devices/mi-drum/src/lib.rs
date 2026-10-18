@@ -1903,6 +1903,10 @@ impl Slot<NUM_PARAMS> for MiSlot {
                 *s = self.ripples.tick(*s);
             }
         } else {
+            // `i` indexes three buses here (`lfo1_out`, `env1_out`, `buf`), so
+            // the index form is the clear one, and this is the hottest loop in
+            // the engine — leave its codegen alone.
+            #[allow(clippy::needless_range_loop)]
             for i in 0..n {
                 // `exp2_approx`, not `libm::powf(2.0, x)`.
                 //
@@ -2190,27 +2194,27 @@ impl MiDrumEngine {
     }
 }
 
-/// No default note map, and that is deliberate.
-///
-/// This device used to preload a GM-percussion map — note 36 to the kick, 38 to
-/// the snare, and so on — inherited from the drum machine when the two devices
-/// were split in Phase 13. It was wrong here, and worse, it hid a capability
-/// that already worked: live MIDI routes NoteOn through
-/// [`DeviceEngine::trigger_channel`](device_core::engine::DeviceEngine::trigger_channel),
-/// which never consults `note_map` at all.
-///
-/// The device is a channel-per-track voice, so the conventions are:
-///
-/// - **MIDI channel selects the track** (`channel < TRACKS`).
-/// - **The note selects pitch.** `TUNE` sets the pitch the voice plays at
-///   middle C; every semitone away transposes the whole voice via
-///   [`Track::retune`](device_core::track::Track::retune). That is
-///   `core`'s existing chromatic convention, and it is what
-///   `chromatic_play_transposes_by_octave` pins.
-/// - `note_map` stays empty, so the programmatic [`trigger_note`](DeviceEngine::trigger_note)
-///   path is silent unless a host assigns notes with `set_note`. A host that
-///   wants a fixed note-to-track layout can build one; the device does not
-///   impose a GM kit on a player who wants six instruments.
+// No default note map, and that is deliberate.
+//
+// This device used to preload a GM-percussion map — note 36 to the kick, 38 to
+// the snare, and so on — inherited from the drum machine when the two devices
+// were split in Phase 13. It was wrong here, and worse, it hid a capability
+// that already worked: live MIDI routes NoteOn through
+// [`DeviceEngine::trigger_channel`](device_core::engine::DeviceEngine::trigger_channel),
+// which never consults `note_map` at all.
+//
+// The device is a channel-per-track voice, so the conventions are:
+//
+// - **MIDI channel selects the track** (`channel < TRACKS`).
+// - **The note selects pitch.** `TUNE` sets the pitch the voice plays at
+//   middle C; every semitone away transposes the whole voice via
+//   [`Track::retune`](device_core::track::Track::retune). That is
+//   `core`'s existing chromatic convention, and it is what
+//   `chromatic_play_transposes_by_octave` pins.
+// - `note_map` stays empty, so the programmatic [`trigger_note`](DeviceEngine::trigger_note)
+//   path is silent unless a host assigns notes with `set_note`. A host that
+//   wants a fixed note-to-track layout can build one; the device does not
+//   impose a GM kit on a player who wants six instruments.
 
 #[cfg(test)]
 mod tests {

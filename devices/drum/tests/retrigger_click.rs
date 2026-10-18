@@ -31,8 +31,7 @@ fn max_step(machine: MachineId, retrigger_every: Option<usize>) -> f32 {
             }
         }
         engine.process(&mut l, &mut r);
-        for i in 0..BLOCK {
-            let s = l[i];
+        for &s in l.iter() {
             if let Some(p) = prev {
                 let d = (s - p).abs();
                 if d > worst {
@@ -66,10 +65,9 @@ fn oh_worst_step(start: usize, len: usize, choke_at: Option<usize>) -> f32 {
             }
         }
         engine.process(&mut l, &mut r);
-        for i in 0..BLOCK {
+        for (i, &s) in l.iter().enumerate() {
             let sample = block_start + i;
             if sample >= start && sample < start + len {
-                let s = l[i];
                 if let Some(p) = prev {
                     let d = (s - p).abs();
                     if d > worst {

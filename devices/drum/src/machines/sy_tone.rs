@@ -232,8 +232,8 @@ mod tests {
             let mut s = SyTone::new(params);
             s.trigger(1.0);
             let mut buf = [0.0f32; 256];
-            for i in 0..256 {
-                buf[i] = s.tick();
+            for sample in buf.iter_mut() {
+                *sample = s.tick();
             }
             buf
         };

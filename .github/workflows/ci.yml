@@ -1,7 +1,10 @@
 name: ci
 
+# PRs, and the trunk they land on. `push:` with no filter also fired on every
+# branch push, so a PR branch ran the whole matrix twice for one commit.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
@@ -11,11 +14,22 @@ jobs:
   # The engine's tests run on the host at host speed. This is the loop you
   # live in.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # render's `live` feature (on via --all-features) pulls cpal and midir,
+      # and on Linux both bind ALSA through alsa-sys, whose build script wants
+      # `alsa.pc` from pkg-config. The runner image does not ship it. This
+      # never reproduces on macOS, where those crates bind CoreAudio/CoreMIDI.
+      - name: ALSA headers for cpal/midir
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # midir's Linux backend is the ALSA sequencer, which render's device
+      # tests open a virtual port on. If this kernel has the module, they run
+      # for real; if not, they report themselves skipped rather than fail.
+      - name: ALSA sequencer, if this kernel has it
+        run: sudo modprobe snd-seq || true
       # mi-drum-engine is excluded here and run serially below: mi-dsp's
       # Plaits scratch pool is 8 buffers behind a `static mut` bitmap,
       # documented as single-threaded. Six parallel tests building six voices
@@ -34,9 +48,9 @@ jobs:
   #
   # Costs about thirty seconds. Worth it every time.
   cross-compile:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
@@ -45,16 +59,22 @@ jobs:
         run: cargo build -p device-core -p drum-engine --target thumbv7em-none-eabihf --release
 
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
           targets: thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+      # render's `live` feature (on via --all-features) pulls cpal and midir,
+      # and on Linux both bind ALSA through alsa-sys, whose build script wants
+      # `alsa.pc` from pkg-config. The runner image does not ship it. This
+      # never reproduces on macOS, where those crates bind CoreAudio/CoreMIDI.
+      - name: ALSA headers for cpal/midir
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: clippy on the target
         run: cargo clippy -p device-core -p drum-engine --target thumbv7em-none-eabihf -- -D warnings
 
@@ -63,9 +83,9 @@ jobs:
   # `cargo tree | grep imxrt-hal` shows 0.6 or later.
   #
   # firmware:
-  #   runs-on: ubuntu-latest
+  #   runs-on: ubuntu-24.04
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v5
   #     - uses: dtolnay/rust-toolchain@stable
   #       with:
   #         targets: thumbv7em-none-eabihf
