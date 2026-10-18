@@ -340,6 +340,14 @@ session:
 - DAW mode entry, the feature-control enables, and relative encoder
   output. Parameters move from the encoders.
 - The stationary display: target `35h`, arrangement 3, **trigger `1Fh`**.
+- The upper button row starts at **CC 37** on channel 1, as the diagram
+  said: button 1 sends `B0 25 7F` on press and `B0 25 00` on release. The
+  rest of the row is still inferred from the diagram rather than seen.
+- The device **echoes SysEx back** on its DAW out port — the DAW-mode
+  enable arrives again as input immediately after being sent. Harmless,
+  but it means `wire::for_each_message` skipping SysEx bodies is doing
+  real work rather than being defensive: LED and display writes come back
+  too, and their data bytes would otherwise be read as messages.
 - Faders are silent while fader pickup is on, because nothing sends the
   device the positions it would pick up against. Pickup is now off —
   though that was **not** what was keeping the faders quiet; see below.
@@ -361,11 +369,10 @@ Candidates not yet ruled out, in the order worth trying:
    paragraph, which says the targets are "the same as CC indices". That
    is one sentence of corroboration, not two, and unlike the encoder
    block it has no arithmetic cross-check behind it.
-3. **Message framing.** The driver drops anything shorter than three
-   bytes. A device using running status for a fader sweep would send
-   two-byte messages after the first, and only the first would land.
-   `--trace` shows this immediately: one message on the first move, then
-   silence.
+3. ~~**Message framing.**~~ Confirmed and fixed: the driver read only the
+   first three bytes of a callback buffer, so every message after the
+   first in a packet was discarded, and running status decoded as
+   nothing. `wire::for_each_message` handles both now.
 
 ## Not yet confirmed
 
