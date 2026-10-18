@@ -29,12 +29,18 @@ Two cycle-bench binaries live in `firmware/src/bin/`:
 Both print the same report format and end with `=== BENCH END ===`, then reboot
 themselves into HalfKay via `bkpt #251` when built with `autoboot`.
 
+`mi-bench` has one optional feature, `machine-sweep`, which appends a
+per-machine cost table to the run. Off by default — see
+[The per-machine sweep](#the-per-machine-sweep-24).
+
 ### Scenario naming
 
 - `idle` — loaded kit, every track silent (`is_active` early-out exercised)
 - `N sounding` — every track retriggered every block; worst-case voice cost
 - `N FX idle` — FX tanks advancing on silence
 - `N + FX` — realistic worst case with sends routed
+- `<machine> bare` / `<machine> strip` — one machine alone, voice only and
+  voice + strip (`machine-sweep` only)
 - Extra rows are added per phase/sub-phase to gate new work
 
 ## Closed-loop harness
@@ -324,6 +330,62 @@ the next estimate does not have to re-derive them. Peak cycles, block 32:
 Warps, the Ripples SVF, the Peaks voices and Clouds are **not** in this table —
 no bench has measured them yet. Anything quoting a per-unit figure for those is
 an estimate, not a measurement.
+
+Note what every row above has in common: it is a *delta between two six-track
+scenarios*, divided by six. That is the only shape a knob-based decomposition
+can take, and it is why the Peaks voices are missing — there is no knob that
+removes a voice. The per-machine sweep below exists to fill that gap.
+
+### The per-machine sweep (#24)
+
+`mi-bench --features machine-sweep` measures every one of the 28 machines on
+one track with nothing else sounding, twice: `bare` (the voice alone) and
+`strip` (the voice plus mi-drum's strip).
+
+```bash
+tools/benchloop.py --bin mi-bench --label mi-machine-sweep \
+    --features mi-drum,autoboot,machine-sweep
+```
+
+It does not go through `engine.process()`. It cannot: no parameter bypasses
+Ripples or the four modulation generators, so a knob-based scenario cannot
+separate voice from strip. Instead it drives one `MiSlot` directly, which is
+where the line already is — `Slot::tick` is "one sample of output, pre-strip"
+and `Slot::process_audio_strip` is the strip. Nothing in the engine changed
+for it, so the baseline digest is untouched.
+
+What the two columns give you:
+
+- **`bare`** — the first honest per-voice figure for the Peaks models, which
+  have only ever been measured with the strip attached. This is the number
+  #25 needs: if a bare `pk-fm` is nowhere near 71.8k, that cost is in the
+  strip or the FFI shim, not in `FmDrum::Process`.
+- **`strip − bare`** — the strip's per-track cost, and the first measurement
+  of the modulation generators at all, since they are inside it and no param
+  gates them.
+
+**Two caveats, and they matter more than the numbers.**
+
+- **One voice alone has the 32 KB D-cache to itself; six do not.** One slot
+  is 33 KB and six are ~200 KB, and this document already measures per-track
+  cost rising 26% from three tracks to six for identical work (see #27). A
+  machine measured alone is the **floor** of what it costs in a kit. Rank
+  machines against each other with these figures; do not add them up and
+  expect `6 sounding`.
+- **`bare` is biased low by roughly 32 stores per block.** `tick` appends to
+  the aux capture while `aux_filled < BLOCK`, and only `process_audio_strip`
+  resets that counter — so with the strip off the capture saturates after the
+  first block. Far under this device's ~4% noise floor, but it is a bias and
+  not noise.
+
+The sweep is off by default because it is 56 extra scenarios and +8 KB of
+ITCM in a binary already at 86.8% of it. It runs after every existing
+scenario and perturbs none of them, so a sweep run still diffs cleanly
+against a baseline captured without it.
+
+> **Not yet run.** The code is in; the numbers are not, because the sweep
+> needs a Teensy. Commit `bench-results/mi-machine-sweep.json` and fold the
+> per-machine figures into the table above when it has been.
 
 ## Things that were measured and rejected
 

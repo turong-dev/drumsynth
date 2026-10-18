@@ -2499,6 +2499,74 @@ mod tests {
         }
     }
 
+    /// Every machine must sound when driven the way `mi-bench`'s per-machine
+    /// sweep drives it (#24).
+    ///
+    /// The sweep does not call `Engine::process`. It cannot: the question it
+    /// answers is what a voice costs *without* the strip, and no parameter
+    /// bypasses Ripples or the modulation generators. So it drives one slot
+    /// directly — `BLOCK` ticks, then optionally `process_audio_strip` — which
+    /// is the sequence `Engine::process` runs per track, minus the other five
+    /// tracks and the mixing.
+    ///
+    /// The failure this guards against is a cost table full of plausible
+    /// numbers that mean nothing. A machine that needs something
+    /// `Engine::process` does and this path omits would render silence, and
+    /// silence is cheap: it would land in the table as a fast machine rather
+    /// than as a broken measurement. Timing it is hardware-only, but whether
+    /// it makes sound is not, so that much is pinned here.
+    ///
+    /// Both variants are checked, because they are not the same path. With
+    /// the strip off nothing resets `aux_filled`, so after the first block
+    /// the aux capture is permanently saturated — harmless, and asserted to
+    /// be harmless rather than assumed.
+    #[test]
+    fn every_machine_sounds_when_driven_as_the_bench_sweep_drives_it() {
+        for &id in &MiMachineId::ALL {
+            for with_strip in [false, true] {
+                let mut engine = engine_box();
+                engine.panic();
+                engine.tracks_mut()[0].load_machine(id);
+
+                let slot = &mut engine.tracks_mut()[0].slot;
+                let mut buf = [0.0f32; BLOCK];
+                let mut peak = 0.0f32;
+
+                // Retriggered every block, as the sweep does: the worst case
+                // is a voice that never gets to decay out.
+                for _ in 0..16 {
+                    slot.trigger(1.0);
+                    for s in buf.iter_mut() {
+                        *s = slot.tick();
+                    }
+                    if with_strip {
+                        slot.process_audio_strip(&mut buf[..], 0);
+                    }
+                    for &s in buf.iter() {
+                        assert!(
+                            s.is_finite(),
+                            "{} ({}): non-finite sample",
+                            id.name(),
+                            if with_strip { "strip" } else { "bare" },
+                        );
+                        peak = peak.max(libm::fabsf(s));
+                    }
+                }
+
+                // Well below any machine's real level -- `pk-hh` is already
+                // 3-8 dB under the rest (#6) and this is not a level test.
+                // It only has to separate "sounding" from "measuring silence".
+                assert!(
+                    peak > 1e-4,
+                    "{} ({}): silent at peak {peak:e} — the sweep would time \
+                     an idle voice and report it as a cheap one",
+                    id.name(),
+                    if with_strip { "strip" } else { "bare" },
+                );
+            }
+        }
+    }
+
     /// Reloading machines must hand the outgoing voice's pool buffer back.
     ///
     /// `PlaitsVoice::new_in_place` cannot free what it overwrites, because it
