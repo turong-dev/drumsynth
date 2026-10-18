@@ -461,12 +461,20 @@ mod tests {
             count
         };
 
-        let mut e = DrumEngine::new();
-        let base = crossings(&mut e);
+        // One engine alive at a time. `DrumEngine` is close to 300 KB
+        // (`engine_size_fits_ocram_budget`), and shadowing `e` does not drop
+        // the previous one -- all three stayed live in this frame, which
+        // overflows a test thread's stack on Linux. Each phase gets a scope.
+        let base = {
+            let mut e = DrumEngine::new();
+            crossings(&mut e)
+        };
 
-        let mut e = DrumEngine::new();
-        e.tracks[7].retune(12.0);
-        let octave = crossings(&mut e);
+        let octave = {
+            let mut e = DrumEngine::new();
+            e.tracks[7].retune(12.0);
+            crossings(&mut e)
+        };
 
         assert!(
             octave > base * 3 / 2 && octave < base * 4,
@@ -474,10 +482,12 @@ mod tests {
         );
 
         // A param recompute (e.g. from a CC) must not drop the transpose.
-        let mut e = DrumEngine::new();
-        e.tracks[7].retune(12.0);
-        e.tracks[7].set_param(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
-        let after_recompute = crossings(&mut e);
+        let after_recompute = {
+            let mut e = DrumEngine::new();
+            e.tracks[7].retune(12.0);
+            e.tracks[7].set_param(crate::machines::SLOT_MACH_5, 0.5); // DEC — recomputes coefficients
+            crossings(&mut e)
+        };
         assert!(
             (after_recompute as i64 - octave as i64).abs() <= 2,
             "param recompute dropped the retune: {octave} vs {after_recompute}"

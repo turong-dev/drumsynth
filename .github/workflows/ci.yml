@@ -1,7 +1,10 @@
 name: ci
 
+# PRs, and the trunk they land on. `push:` with no filter also fired on every
+# branch push, so a PR branch ran the whole matrix twice for one commit.
 on:
   push:
+    branches: [main]
   pull_request:
 
 env:
