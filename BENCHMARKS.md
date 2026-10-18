@@ -29,12 +29,18 @@ Two cycle-bench binaries live in `firmware/src/bin/`:
 Both print the same report format and end with `=== BENCH END ===`, then reboot
 themselves into HalfKay via `bkpt #251` when built with `autoboot`.
 
+`mi-bench` has one optional feature, `machine-sweep`, which appends a
+per-machine cost table to the run. Off by default — see
+[The per-machine sweep](#the-per-machine-sweep-24).
+
 ### Scenario naming
 
 - `idle` — loaded kit, every track silent (`is_active` early-out exercised)
 - `N sounding` — every track retriggered every block; worst-case voice cost
 - `N FX idle` — FX tanks advancing on silence
 - `N + FX` — realistic worst case with sends routed
+- `<machine> bare` / `<machine> strip` — one machine alone, voice only and
+  voice + strip (`machine-sweep` only)
 - Extra rows are added per phase/sub-phase to gate new work
 
 ## Closed-loop harness
@@ -135,6 +141,15 @@ is made of* below, which the per-block distribution finally cracked.
   worst block sits beyond it. A high `max/p99` with a normal `p99/p50` is
   a contaminated block, not a regression. `over budget` is the only
   number that says whether the deadline is actually missed.
+- **Compare contamination as `max − p99` in cycles, not as the `max/p99`
+  ratio**, whenever the rows being compared have different magnitudes. The
+  ratio has the denominator in it and an intrusion is additive, so it
+  flatters big rows and slanders small ones. The per-machine sweep made this
+  concrete: ranked by ratio its single-voice rows look catastrophic
+  (`pk-fm bare` at 5.79) and the six-track scenarios look clean; ranked by
+  cycles it inverts, with 82% of the standard scenarios over 10k excess
+  against 25% of the sweep rows, and the largest single excess in the whole
+  run belonging to `6 sounding`. Both readings are of the same data. See #12.
 - The `phase` column is the spread between the three positions in the
   voice-render cycle. Flat on `idle`; around 10% when six voices sound.
   A jump there means something changed about render scheduling.
@@ -272,9 +287,16 @@ The block deadline is set by the **peak**, and `6 sounding` runs at 1.35x its
 own average while `idle` sits at 1.01x. Partly accounted for:
 
 - **Not uneven track costs.** `1 sounding` shows 1.34x — a single voice on its
-  own has essentially the same ratio as six. The kit's voices do differ a lot
-  (Peaks BD 33.6k, SD 38.1k, HH 24.9k, **FM 71.8k**, Plaits 49.2k each, avg
-  cy/block) but that spread is not what makes the peak.
+  own has essentially the same ratio as six. The kit's voices do differ, but
+  that spread is not what makes the peak.
+
+  > This bullet used to quote "Peaks BD 33.6k, SD 38.1k, HH 24.9k, **FM
+  > 71.8k**, Plaits 49.2k each". **The FM figure was wrong by 4.5x and the
+  > conclusion it was quoted for is unaffected.** Measured directly (#24),
+  > `pk-fm` costs 28,525 cy/block with the strip and **6,330 bare** — the
+  > second cheapest machine of the 28, not twice the dearest. The other three
+  > Peaks figures were roughly right (28.8k / 29.9k / 29.3k measured). See
+  > the per-machine sweep below, and #25, which this retires.
 - **Render alignment: fixed, worth 19%.** Every slot used to start at the same
   phase so all six crossed their 24-sample render boundary together. Spreading
   them took peak from 123.9% to 100.3% with the average unchanged. The spacing
@@ -321,9 +343,138 @@ the next estimate does not have to re-derive them. Peak cycles, block 32:
 | `Resonator` per track | ~32,000 | (`6 + RESON` − `6 sounding`) / 6 |
 | `Resonator` as a single send | ~19,200 | `6 + RES SND` − `6 sounding` |
 
-Warps, the Ripples SVF, the Peaks voices and Clouds are **not** in this table —
-no bench has measured them yet. Anything quoting a per-unit figure for those is
-an estimate, not a measurement.
+Clouds is **not** in this table — no bench has measured it yet, and anything
+quoting a per-unit figure for it is an estimate. The Peaks voices and the
+strip as a whole (Ripples included) *are* measured now, by the per-machine
+sweep below:
+
+| unit | cycles | how it was obtained |
+|---|---|---|
+| one Peaks voice, bare | 6,123–8,624 | `<pk-*> bare`, sweep |
+| one Plaits voice, bare | 8,361–29,170 | `<mi-*> bare`, sweep |
+| the whole strip, per track | ~19,600 | `strip − bare`, averaged over all 28 |
+
+Those are single-voice figures and the two above are six-track ones; the
+caveat under the sweep explains why they do not reconcile by division.
+
+Note what every row above has in common: it is a *delta between two six-track
+scenarios*, divided by six. That is the only shape a knob-based decomposition
+can take, and it is why the Peaks voices are missing — there is no knob that
+removes a voice. The per-machine sweep below exists to fill that gap.
+
+### The per-machine sweep (#24)
+
+`mi-bench --features machine-sweep` measures every one of the 28 machines on
+one track with nothing else sounding, twice: `bare` (the voice alone) and
+`strip` (the voice plus mi-drum's strip).
+
+```bash
+tools/benchloop.py --bin mi-bench --label mi-machine-sweep \
+    --features mi-drum,autoboot,machine-sweep
+```
+
+It does not go through `engine.process()`. It cannot: no parameter bypasses
+Ripples or the four modulation generators, so a knob-based scenario cannot
+separate voice from strip. Instead it drives one `MiSlot` directly, which is
+where the line already is — `Slot::tick` is "one sample of output, pre-strip"
+and `Slot::process_audio_strip` is the strip. Nothing in the engine changed
+for it, so the baseline digest is untouched.
+
+What the two columns give you:
+
+- **`bare`** — the first honest per-voice figure for the Peaks models, which
+  have only ever been measured with the strip attached. This is the number
+  #25 needs: if a bare `pk-fm` is nowhere near 71.8k, that cost is in the
+  strip or the FFI shim, not in `FmDrum::Process`.
+- **`strip − bare`** — the strip's per-track cost, and the first measurement
+  of the modulation generators at all, since they are inside it and no param
+  gates them.
+
+**Two caveats, and they matter more than the numbers.**
+
+- **One voice alone has the 32 KB D-cache to itself; six do not.** One slot
+  is 33 KB and six are ~200 KB, and this document already measures per-track
+  cost rising 26% from three tracks to six for identical work (see #27). A
+  machine measured alone is the **floor** of what it costs in a kit. Rank
+  machines against each other with these figures; do not add them up and
+  expect `6 sounding`.
+- **`bare` is biased low by roughly 32 stores per block.** `tick` appends to
+  the aux capture while `aux_filled < BLOCK`, and only `process_audio_strip`
+  resets that counter — so with the strip off the capture saturates after the
+  first block. Far under this device's ~4% noise floor, but it is a bias and
+  not noise.
+
+The sweep is off by default because it is 56 extra scenarios and +8 KB of
+ITCM in a binary already at 86.8% of it. It runs after every existing
+scenario and perturbs none of them, so a sweep run still diffs cleanly
+against a baseline captured without it.
+
+#### Results
+
+`bench-results/mi-machine-sweep.json`, 2026-10-18. **avg** cycles per block,
+which is the right statistic here — see the warning about `p50` below.
+
+| machine | bare | strip | strip − bare |
+|---|---|---|---|
+| `pk-bd` | 6,123 | 28,813 | 22,690 |
+| `pk-fm` | 6,330 | 28,525 | 22,195 |
+| `mi-speech` | 8,361 | 29,169 | 20,808 |
+| `pk-hh` | 8,497 | 29,281 | 20,784 |
+| `pk-sd` | 8,624 | 29,911 | 21,287 |
+| `mi-chiptune` | 11,302 | 31,362 | 20,060 |
+| `mi-sixop-3` | 15,070 | 36,134 | 21,064 |
+| `mi-sixop-2` | 15,159 | 36,113 | 20,954 |
+| `mi-sixop-1` | 15,455 | 37,011 | 21,556 |
+| `mi-waveshape` | 16,598 | 35,048 | 18,450 |
+| `mi-sd` | 20,087 | 38,269 | 18,182 |
+| `mi-noise` | 20,287 | 38,911 | 18,624 |
+| `mi-hh` | 20,624 | 38,981 | 18,357 |
+| `mi-fm` | 21,017 | 39,707 | 18,690 |
+| `mi-va` | 21,694 | 40,303 | 18,609 |
+| `mi-bd` | 21,860 | 40,440 | 18,580 |
+| `mi-string-mach` | 22,118 | 40,275 | 18,157 |
+| `mi-terrain` | 22,249 | 40,879 | 18,630 |
+| `mi-wavetable` | 22,323 | 42,730 | 20,407 |
+| `mi-chord` | 22,595 | 41,272 | 18,677 |
+| `mi-swarm` | 22,892 | 41,244 | 18,352 |
+| `mi-string` | 23,738 | 42,273 | 18,535 |
+| `mi-va-vcf` | 24,855 | 44,737 | 19,882 |
+| `mi-additive` | 25,803 | 44,052 | 18,249 |
+| `mi-grain` | 25,850 | 44,343 | 18,493 |
+| `mi-phase` | 26,167 | 44,994 | 18,827 |
+| `mi-particle` | 26,658 | 47,884 | 21,226 |
+| `mi-modal` | 29,170 | 47,885 | 18,715 |
+
+**The strip costs 18,157–22,690 cycles per track and barely cares which
+machine it is wrapped around.** Mean 19,608, total spread 25%, against a 4.8x
+spread in the voices underneath it. On the four Peaks models it is 71–79% of
+the track's whole cost: the voice is the cheap part.
+
+**Peaks voices are the cheapest things in the catalogue, not the dearest.**
+All four sit between 6,123 and 8,624 bare. `mi-modal`, the most expensive
+machine, is 4.8x `pk-bd`.
+
+**The method checks out against the engine.** `pk-bd strip` (28,813) plus
+`idle` (30,029) is 58,842, or 92.5% of the `1 sounding` scenario's 63,609 —
+and `1 sounding` *is* a Peaks bass drum, track 0 of `DEFAULT_KIT`, measured
+the ordinary way through `engine.process()`. The missing 7.5% is the
+track-level mixing and per-track engine scaffolding the sweep omits by
+design. Two independent paths to the same voice agree.
+
+**Read `avg`, not `p50`, on these rows.** One voice renders 24 samples into
+32-sample blocks, so over three blocks it renders four times — two renders in
+one block, one in each of the others. `p50` is therefore a one-render block
+and understates the real per-block mean by ~25%, which is exactly what the
+~90% `phase` spread on every `bare` row is reporting. In a six-voice kit the
+staggering smooths this to ~9% and the distinction stops mattering; alone it
+does not.
+
+**Unexplained, do not quote yet: the three `mi-sixop` rows.** They are the
+only machines where `avg` falls *below* `p50` (15,455 against 18,264 on
+`mi-sixop-1`) and the only ones with a `phase` spread near 290% rather than
+~90%. Something about their render is not the 2/1/1 pattern every other
+machine shows. The ranking is probably fine — all three agree with each other
+to 2.5% — but the shape of their distribution has not been accounted for.
 
 ## Things that were measured and rejected
 

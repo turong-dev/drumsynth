@@ -5,6 +5,21 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Teensy 4.1 target for drum-engine."
 
+# Its own workspace root, explicitly.
+#
+# The repo root's `exclude = ["firmware"]` is enough in a normal checkout, but
+# cargo resolves a workspace by walking *up* and does not stop at a root that
+# excludes the package -- it keeps going. In a git worktree under
+# `.claude/worktrees/<name>/`, the next root up is the main checkout's
+# `Cargo.toml`, whose `exclude` is the relative path `firmware` and so does
+# not match `.claude/worktrees/<name>/firmware`. The firmware then "believes
+# it's in a workspace when it's not" and will not build at all.
+#
+# An empty table makes this package a root in its own right, so the walk stops
+# here wherever the checkout lives. No effect in the main checkout, where the
+# exclude already did the job.
+[workspace]
+
 [features]
 default = ["cache"]
 
@@ -19,6 +34,20 @@ mi-drum = ["dep:mi-drum-engine"]
 # then `bkpt #251` into HalfKay so `tools/benchloop.py` can reflash without a
 # button press. Off by default so `./flash.sh bench` still free-runs.
 autoboot = []
+
+# Per-machine cost sweep in `mi-bench`: every `MiMachineId`, measured on one
+# track on its own, bare (voice only) and with the mi-drum strip.
+#
+# Off by default because it is 56 extra scenarios that no baseline diff wants
+# and that would treble the length of a routine `mi-baseline` run. Turn it on
+# deliberately when a cost table is the question:
+#
+#     tools/benchloop.py --bin mi-bench --label mi-machine-sweep \
+#         --features mi-drum,autoboot,machine-sweep
+#
+# The sweep runs after every existing scenario, so a run with it on is still a
+# valid diff against a baseline captured without it.
+machine-sweep = []
 
 # Self-triggering load generator, for measuring headroom without needing a
 # host to play the device.

@@ -53,18 +53,41 @@
 //!                a Peaks voice has no aux and pins the param to 0
 //! ```
 //!
-//! **What is still not reachable from here.** The four Stages generators
-//! (2 LFO + 2 AD) run unconditionally in `MiSlot`, every block, every track,
-//! whatever the route depths are — see `lib.rs`'s
-//! `process_free_running`/`process` calls. No param gates them, so no
-//! scenario here can subtract them, and their cost stays folded into
-//! `6 sounding`.
+//! **What no *parameter* can reach.** The four Stages generators (2 LFO +
+//! 2 AD) run unconditionally in `MiSlot`, every block, every track, whatever
+//! the route depths are — see `lib.rs`'s `process_free_running`/`process`
+//! calls. No param gates them, so no scenario built out of knobs can
+//! subtract them, and their cost stays folded into `6 sounding`.
 //!
 //! That is worth more than a measurement gap. Every route depth defaults to
 //! 0, so a stock kit already runs four segment generators per track and
 //! multiplies all four outputs by zero. An early-out when every depth is
 //! zero would be both the missing instrumentation and a real saving, but it
 //! is an engine change rather than a bench one.
+//!
+//! # The per-machine sweep (`--features machine-sweep`, #24)
+//!
+//! Everything above decomposes the strip by turning knobs, which is why the
+//! modulation bus escapes it. The sweep takes the other route: it drives one
+//! slot directly rather than calling `engine.process()`, so it can stop
+//! after `Slot::tick` — the voice, pre-strip, by that trait's definition —
+//! and run `Slot::process_audio_strip` or not. Two rows per machine, for
+//! every one of the 28:
+//!
+//! ```text
+//! <name> bare    BLOCK ticks: the Plaits or Peaks render and nothing else
+//! <name> strip   the same, plus mi-drum's whole strip on the segment
+//! ```
+//!
+//! So `strip - bare` is the strip's per-track cost *including* the four
+//! generators no param can switch off. It is the first thing here that
+//! measures them at all.
+//!
+//! Off by default: 56 extra scenarios, and +8 KB of ITCM in a binary already
+//! at 86.8% of it. Two caveats on reading the table live on
+//! [`measure_machine`]; the short version is that one voice alone has a
+//! 32 KB cache to itself and six do not, so these rank machines against each
+//! other and do not add up to `6 sounding`.
 //!
 //! One number this harness has already pinned without a new scenario: the
 //! `libm::powf` in the Ripples cutoff loop. It is per sample, per track,
@@ -123,6 +146,8 @@ use mi_drum_engine::{
     SLOT_AD_FILTER_DEPTH, SLOT_AD_SHAPER_DEPTH, SLOT_FILT_0, SLOT_LFO_FILTER_DEPTH,
     SLOT_LFO_SHAPER_DEPTH, SLOT_SHAPER_DRIVE, SLOT_VOICE_AUX, TRACKS,
 };
+#[cfg(feature = "machine-sweep")]
+use mi_drum_engine::{MiMachineId, MiSlot, Slot, DEFAULT_KIT};
 use teensy4_bsp as bsp;
 use teensy4_bsp::board;
 
@@ -384,6 +409,45 @@ fn main() -> ! {
         // the honest worst case for the kit that ships.
         let aux_carrier = measure_aux_carrier(engine, &mut left, &mut right);
         report("6 + AUX   ", aux_carrier, &mut poller, &mut pit);
+
+        // --- Bare per-machine cost sweep (#24) ---
+        //
+        // Last, and behind a feature, so every row above keeps its position
+        // and a baseline captured without the sweep still diffs cleanly.
+        #[cfg(feature = "machine-sweep")]
+        {
+            log::info!("");
+            log::info!(
+                "per-machine sweep — one track alone, {} machines, bare and with the strip",
+                MiMachineId::COUNT
+            );
+            delay_blocking(&mut poller, &mut pit, 50);
+
+            for &id in &MiMachineId::ALL {
+                let bare = measure_machine(engine, id, false);
+                report_fmt(
+                    format_args!("{:<14} bare ", id.name()),
+                    bare,
+                    &mut poller,
+                    &mut pit,
+                );
+
+                let strip = measure_machine(engine, id, true);
+                report_fmt(
+                    format_args!("{:<14} strip", id.name()),
+                    strip,
+                    &mut poller,
+                    &mut pit,
+                );
+            }
+
+            // Put the kit back. With `autoboot` this is the only pass, but
+            // without it the loop runs again, and track 0 would otherwise
+            // still be carrying whatever the sweep last loaded onto it --
+            // the same discipline `measure_with_stage` applies to its param.
+            engine.tracks_mut()[0].load_machine(DEFAULT_KIT[0]);
+            engine.panic();
+        }
 
         log::info!("");
 
@@ -847,7 +911,127 @@ fn measure_fx_only(
     measure(engine, left, right, retrigger_count)
 }
 
+/// One engine block of a single slot: `BLOCK` ticks, then optionally the
+/// device's own audio strip over the collected segment.
+///
+/// This is `Engine::process`'s inner sequence for one track, with the other
+/// five and the track-level mixing removed — see `core/src/engine.rs`, which
+/// fills `source_segment` via [`Slot::tick`] and then calls
+/// [`Slot::process_audio_strip`] on it. Segments are split at event offsets
+/// there; with no events the segment is the whole block, which is what every
+/// scenario in this file measures and what this reproduces.
+#[cfg(feature = "machine-sweep")]
+fn run_voice_block(slot: &mut MiSlot, buf: &mut [f32; BLOCK], with_strip: bool) {
+    for s in buf.iter_mut() {
+        *s = slot.tick();
+    }
+    if with_strip {
+        slot.process_audio_strip(&mut buf[..], 0);
+    }
+}
+
+/// Cost of one machine on one track, with nothing else sounding (#24).
+///
+/// # Why this does not go through `engine.process()`
+///
+/// The question is what a *voice* costs, separately from the strip wrapped
+/// around it, and no parameter can answer it: `SHAPE.DRV = 0` bypasses the
+/// shaping stage, but Ripples and the four modulation generators run
+/// unconditionally on every track every block, as the header of this file
+/// has said since 14.3. There is no bypass to reach for, and inventing one
+/// is an engine change (#30), not a bench change.
+///
+/// [`Slot`] already draws the line, though. `tick` is the voice and nothing
+/// else — "one sample of output, pre-strip" — and `process_audio_strip` is
+/// mi-drum's whole strip. Driving a slot directly separates them exactly,
+/// with no new code in the engine and nothing for the digest gate to notice.
+///
+/// # What the two numbers mean
+///
+/// - `bare` — `BLOCK` ticks. Plaits' or Peaks' render, the 24-into-32 block
+///   bookkeeping, and the aux capture. This is the number #25 wants for
+///   `pk-fm`: if a bare Peaks FM voice is nowhere near 71.8k, the cost is in
+///   the strip or the FFI shim and not in `FmDrum::Process`.
+/// - `strip` — the same, plus `process_audio_strip`. The difference is the
+///   strip's per-track cost on that machine, which is mostly but not
+///   entirely machine-independent: the shaper's modulator source depends on
+///   whether the voice has an aux output to offer it.
+///
+/// # Two caveats, both of which make this *not* a sixth of `6 sounding`
+///
+/// **Cache.** One slot is 33 KB against a 32 KB L1 D-cache; six are ~200 KB.
+/// `BENCHMARKS.md` measures per-track cost rising 26% from three tracks to
+/// six for identical work, and that curve is the subject of #27. A machine
+/// measured alone is therefore the *floor* of what it costs in a kit, not
+/// its share of one. Rank machines against each other with these; do not add
+/// them up.
+///
+/// **The aux capture saturates on `bare`.** `tick` appends to `aux_segment`
+/// while `aux_filled < BLOCK`, and it is `process_audio_strip` that resets
+/// the counter. With the strip off nothing resets it, so from the second
+/// block on the capture is a failed compare instead of two stores. That is
+/// ~32 stores per block against totals in the tens of thousands, well under
+/// the ~4% noise floor this device has, and it biases `bare` low by that
+/// much. Reaching it would mean making `aux_filled` public, which is a worse
+/// trade than documenting it.
+#[cfg(feature = "machine-sweep")]
+fn measure_machine(engine: &mut MiDrumEngine, id: MiMachineId, with_strip: bool) -> Stats {
+    // Silence everything, then put the machine under test on track 0.
+    // `load_machine` rebuilds the slot in place and hands back the Plaits
+    // buffer the previous machine held, which is what makes sweeping all 28
+    // in a row safe against the eight-buffer pool.
+    engine.panic();
+    engine.tracks_mut()[0].load_machine(id);
+
+    // Same reseed as `measure`, for the same reason: `stmlib::Random` is one
+    // process-global LCG, so without this a machine's cost would depend on
+    // how many draws the machines before it had made.
+    seed_random(DEFAULT_RANDOM_SEED);
+
+    let mut buf = [0.0f32; BLOCK];
+    let slot = &mut engine.tracks_mut()[0].slot;
+
+    // One untimed pass. Matters more here than anywhere else in this file:
+    // `load_machine` has just rebuilt 33 KB of slot state, and neither it nor
+    // the code path through it is in cache yet.
+    slot.trigger(1.0);
+    run_voice_block(slot, &mut buf, with_strip);
+
+    let mut samples = Samples::new();
+
+    for _ in 0..RUNS {
+        // Retriggered every block, as every other scenario here is: the
+        // worst case is a voice that never gets to decay out.
+        slot.trigger(1.0);
+
+        let start = DWT::cycle_count();
+        run_voice_block(slot, &mut buf, with_strip);
+        let end = DWT::cycle_count();
+
+        samples.push(end.wrapping_sub(start));
+
+        core::hint::black_box(&buf);
+    }
+
+    samples.finish()
+}
+
 fn report(label: &str, s: Stats, poller: &mut imxrt_log::Poller, pit: &mut bsp::hal::pit::Pit) {
+    report_fmt(format_args!("{}", label), s, poller, pit);
+}
+
+/// [`report`] with a composed label.
+///
+/// `core::fmt::Arguments` rather than a `&str` because the machine sweep's
+/// labels are built from a name and a variant and there is no `String` here
+/// to join them with. Every existing call site goes through [`report`] and is
+/// unchanged, so the rows a baseline knows keep their exact text.
+fn report_fmt(
+    label: core::fmt::Arguments,
+    s: Stats,
+    poller: &mut imxrt_log::Poller,
+    pit: &mut bsp::hal::pit::Pit,
+) {
     let pct = s.peak as f32 * 100.0 / BUDGET;
     let per_frame = s.peak / BLOCK as u32;
 
