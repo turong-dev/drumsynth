@@ -222,6 +222,27 @@ the way it does for encoders. If it does, the driver can send the current
 levels at startup and after every machine change, and pickup becomes
 usable. Until then it is a setting that only breaks things.
 
+## The resting screen does not carry the machine selector
+
+#13 says the resting screen falls back to the `TRACK` group until macros
+(#14) land. Taken literally that puts `MACH` — `(TRACK, 0)` — under the
+top-left encoder of every column, and one detent is one machine: the
+voice reloads and every parameter on the track resets to the new
+machine's defaults.
+
+That is the most destructive control on the device, sitting on the screen
+the surface rests in when nobody is doing anything, under a knob you
+reach past to get to the buttons. It presented as tracks changing their
+sound between button presses, which is exactly what it is.
+
+The resting screen therefore offers `TRACK` *minus* the machine selector.
+The selector is still reachable by holding the `TRACK` group button,
+which is a deliberate act rather than an accident.
+
+When #14 lands and the resting screen carries real macros, this stops
+mattering — but the rule it establishes is worth keeping: a resting state
+has to be safe to brush against.
+
 ## When a control appears dead
 
 In order, because each step rules out the one before it.

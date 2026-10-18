@@ -633,8 +633,12 @@ impl<const N: usize> Surface<N> {
                 if column as usize >= self.tracks {
                     return None;
                 }
-                let index = self.page as usize * ROWS + row as usize;
-                (column, ParamGroup::Track, index)
+                let n = self.page as usize * ROWS + row as usize;
+                // Not simply the n-th TRACK row: the machine selector is
+                // TRACK 0, and a resting screen has to be safe to brush
+                // against. See `macro_rows`.
+                let id = macro_row(self.table(column as usize), n)?;
+                return Some(Addr { track: column, id });
             }
             // A group screen is 24 parameters of the selected track, in
             // reading order, with Page for the rest.
@@ -687,10 +691,7 @@ impl<const N: usize> Surface<N> {
     /// Pages the current screen has, at least 1.
     pub fn pages(&self) -> u8 {
         let (len, per_page) = match self.screen {
-            Screen::Macros => (
-                group_len(self.table(self.selected as usize), ParamGroup::Track),
-                ROWS,
-            ),
+            Screen::Macros => (macro_rows(self.table(self.selected as usize)), ROWS),
             Screen::Group(g) => (
                 group_len(
                     self.table(self.selected as usize),
@@ -957,6 +958,50 @@ fn group_len(table: &[ParamInfo], group: ParamGroup) -> usize {
     drum_engine::machines::group_len(table, group)
 }
 
+/// The `n`-th parameter the resting screen offers for a track.
+///
+/// The `TRACK` group, minus the machine selector.
+///
+/// #13 says the resting screen falls back to `TRACK` until macros (#14)
+/// land, and taken literally that puts `MACH` — `(TRACK, 0)` — under the
+/// top-left encoder of every column. One detent is one machine, and
+/// loading a machine resets the track's parameters to that machine's
+/// defaults. So the single most destructive control on the device would
+/// sit on the screen the surface sits in when nobody is doing anything,
+/// under a knob you reach past to get to the buttons.
+///
+/// A resting state has to be safe to brush against. The selector is still
+/// reachable, by holding the `TRACK` group button, which is a deliberate
+/// act rather than an accident.
+fn macro_row(table: &[ParamInfo], n: usize) -> Option<ParamId> {
+    let mut seen = 0usize;
+    let mut index = 0u8;
+    for info in table {
+        if info.group != ParamGroup::Track {
+            continue;
+        }
+        if info.route != ParamRoute::Machine {
+            if seen == n {
+                return Some(ParamId {
+                    group: ParamGroup::Track,
+                    index,
+                });
+            }
+            seen += 1;
+        }
+        index = index.checked_add(1)?;
+    }
+    None
+}
+
+/// How many parameters the resting screen offers for a track.
+fn macro_rows(table: &[ParamInfo]) -> usize {
+    table
+        .iter()
+        .filter(|i| i.group == ParamGroup::Track && i.route != ParamRoute::Machine)
+        .count()
+}
+
 /// The `(group, index)` address of a flat slot — `resolve` run backwards.
 fn address_of(table: &[ParamInfo], flat: usize) -> Option<ParamId> {
     let group = table.get(flat)?.group;
@@ -1055,9 +1100,61 @@ mod tests {
                 let addr = s.encoder_addr(row, column).expect("TRACK row exists");
                 assert_eq!(addr.track, column, "column {column} must be track {column}");
                 assert_eq!(addr.id.group, ParamGroup::Track);
-                assert_eq!(addr.id.index, row);
+                assert_eq!(
+                    addr.id,
+                    macro_row(s.table(column as usize), row as usize).unwrap()
+                );
             }
         }
+    }
+
+    /// The resting screen must be safe to brush against, so the machine
+    /// selector is not on it. One detent of `MACH` reloads the voice and
+    /// resets every parameter on the track to the new machine's defaults;
+    /// that is not something a knob you reach past should do.
+    #[test]
+    fn the_machine_selector_is_not_on_the_resting_screen() {
+        let (s, _) = surface();
+        // The selector's *group ordinal*, which is what an address
+        // carries — not its flat slot, which is elsewhere entirely.
+        let flat = s
+            .table(0)
+            .iter()
+            .position(|i| i.route == ParamRoute::Machine)
+            .expect("every device has a machine selector");
+        let mach = address_of(s.table(0), flat).unwrap();
+        assert_eq!(mach.group, ParamGroup::Track);
+        for column in 0..COLUMNS as u8 {
+            for row in 0..ROWS as u8 {
+                if let Some(addr) = s.encoder_addr(row, column) {
+                    assert_ne!(addr.id, mach, "MACH reachable at row {row} column {column}");
+                }
+            }
+        }
+        // Every page of it, not just the first.
+        let mut s = s;
+        for _ in 0..8 {
+            press(&mut s, Button::PageDown, 0);
+            for column in 0..COLUMNS as u8 {
+                for row in 0..ROWS as u8 {
+                    if let Some(addr) = s.encoder_addr(row, column) {
+                        assert_ne!(addr.id, mach, "MACH reachable on page {}", s.page());
+                    }
+                }
+            }
+        }
+    }
+
+    /// It is still reachable, by holding the TRACK group button — a
+    /// deliberate act rather than an accident.
+    #[test]
+    fn the_machine_selector_is_reachable_from_the_track_group() {
+        let (mut s, _) = surface();
+        press(&mut s, Button::Group(gcol(ParamGroup::Track)), 0);
+        let addr = s.encoder_addr(0, 0).expect("TRACK 0 on the group screen");
+        assert_eq!(addr.id.index, 0);
+        let flat = drum_engine::machines::resolve(s.table(0), addr.id).unwrap();
+        assert_eq!(s.table(0)[flat].route, ParamRoute::Machine);
     }
 
     /// The fader under a column is that column's track level, found by
@@ -1259,8 +1356,9 @@ mod tests {
     #[test]
     fn page_moves_the_window_and_clamps_at_both_ends() {
         let (mut s, _) = surface();
-        // The resting screen shows three TRACK rows at a time.
-        let len = drum_engine::machines::group_len(s.table(0), ParamGroup::Track);
+        // The resting screen shows three TRACK rows at a time, minus the
+        // machine selector.
+        let len = macro_rows(s.table(0));
         let pages = len.div_ceil(ROWS) as u8;
         assert_eq!(s.pages(), pages);
         assert!(
@@ -1273,7 +1371,10 @@ mod tests {
 
         press(&mut s, Button::PageDown, 1);
         assert_eq!(s.page(), 1);
-        assert_eq!(s.encoder_addr(0, 0).unwrap().id.index, ROWS as u8);
+        assert_eq!(
+            s.encoder_addr(0, 0).unwrap().id,
+            macro_row(s.table(0), ROWS).unwrap()
+        );
 
         for i in 0..10 {
             press(&mut s, Button::PageDown, 10 + i);
@@ -1299,8 +1400,9 @@ mod tests {
     fn a_machine_change_reloads_the_table_and_the_defaults() {
         let (mut s, _) = surface();
         let before = s.machine(0);
-        // MACH is (TRACK, 0): the first encoder of column 0 on the resting
-        // screen.
+        // MACH is (TRACK, 0), reachable by holding the TRACK group — not
+        // from the resting screen, which deliberately skips it.
+        press(&mut s, Button::Group(gcol(ParamGroup::Track)), 0);
         let out = s.handle(
             Input::Encoder {
                 row: 0,
@@ -1465,6 +1567,7 @@ mod tests {
     #[test]
     fn encoders_emit_steps_and_faders_emit_values() {
         let (mut s, _) = surface();
+        let expected = macro_row(s.table(2), 1).unwrap();
         let out = s.handle(
             Input::Encoder {
                 row: 1,
@@ -1473,19 +1576,12 @@ mod tests {
             },
             0,
         );
-        let addr = Addr {
-            track: 2,
-            id: ParamId {
-                group: ParamGroup::Track,
-                index: 1,
-            },
-        };
         assert_eq!(
             out.events().collect::<Vec<_>>(),
             vec![MidiEvent::NrpnStep {
-                channel: addr.track,
+                channel: 2,
                 group: ParamGroup::Track as u8,
-                index: 1,
+                index: expected.index,
                 step: -3,
             }]
         );
@@ -1755,6 +1851,7 @@ mod tests {
     fn a_detent_on_a_discrete_parameter_moves_one_option() {
         let (mut s, mut engine) = surface();
         let before = engine.tracks()[0].id().index();
+        press(&mut s, Button::Group(gcol(ParamGroup::Track)), 0);
         for _ in 0..3 {
             let out = s.handle(
                 Input::Encoder {
@@ -2084,6 +2181,13 @@ mod mi_drum_tests {
     fn a_detent_is_one_machine_across_the_whole_catalogue() {
         let (mut s, mut engine) = surface();
         let start = engine.tracks()[0].id().index();
+        s.handle(
+            Input::Button {
+                button: Button::Group(gcol(ParamGroup::Track)),
+                down: true,
+            },
+            0,
+        );
         for step in 1..MiMachineId::count() - start {
             let out = s.handle(
                 Input::Encoder {
