@@ -133,6 +133,32 @@ where
     // something else reaches the engine without the control-surface
     // driver ever seeing it. A trace that covers only the surface makes
     // that look like the engine inventing notes.
+    // A second copy of this binary left running in another shell is
+    // indistinguishable from an engine bug: both instances read the
+    // controller, both render audio, and each has its own parameter
+    // state, so one press makes two sounds and only one of them responds
+    // to the knobs. A trace shows nothing wrong, because each process is
+    // behaving perfectly.
+    //
+    // Our virtual input appears system-wide as a destination, so an
+    // existing destination with this name means an instance is already
+    // up. Warn rather than refuse: nothing stops someone running two on
+    // purpose, and a name collision with an unrelated port is possible.
+    if let Ok(probe) = midir::MidiOutput::new("drumsynth instance check") {
+        let already = probe
+            .ports()
+            .iter()
+            .filter_map(|p| probe.port_name(p).ok())
+            .any(|n| n == port);
+        if already {
+            eprintln!(
+                "warning: a MIDI destination named '{port}' already exists — another \
+                 copy of this engine is probably still running. Two instances both \
+                 play the controller, and one press will make two sounds."
+            );
+        }
+    }
+
     let trace_engine_port = surface.as_ref().is_some_and(|c| c.trace);
     let open_virtual = !surface.as_ref().is_some_and(|c| c.no_virtual_port);
     let mut midi_in = MidiInput::new("Drumkit Engine")?;
