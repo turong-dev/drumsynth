@@ -68,6 +68,48 @@ pub const AUDITION_NOTE: u8 = CHROMATIC_REFERENCE_NOTE;
 /// Velocity a track-select audition uses.
 pub const AUDITION_VELOCITY: f32 = 100.0 / 127.0;
 
+/// What one detent of a slow turn is worth, in 14-bit NRPN LSBs.
+///
+/// **The driver decides this, and it has to.** The controller's own
+/// acceleration is binary-offset and small — measured on the hardware at
+/// ±1, ±2, ±4 — so passing the delta through unscaled makes one detent
+/// worth 1/16383 of a parameter's range, and a full sweep roughly four
+/// thousand detents. The knobs move the numbers and nothing is audible.
+///
+/// `DESIGN.md` says the engine "applies whatever step magnitude arrives
+/// and keeps no per-parameter timing state, because acceleration is the
+/// controller's job". That stays true: the engine is still told a
+/// magnitude in LSBs and still keeps no timing state. What the controller
+/// supplies is the *curve*; what a detent is worth in a 14-bit space is a
+/// unit conversion, and only the driver knows both ends of it.
+///
+/// 32 LSBs is 0.2% of travel — about four times finer than the 7-bit CC
+/// map #1 replaced, which is the point of having 14 bits at all.
+pub const DETENT_LSB: i32 = 32;
+
+/// Ceiling on one message's step, in LSBs.
+///
+/// [`step_lsbs`] squares the controller's delta, so a curve that reports
+/// larger magnitudes than the ±4 measured here would otherwise grow
+/// quadratically into a parameter jumping end to end on one message.
+/// 1024 LSBs is 6% of travel, which is a fast spin rather than a glitch.
+pub const MAX_STEP_LSB: i32 = 1024;
+
+/// Convert a controller detent into a 14-bit step.
+///
+/// Squared, not linear. The controller reports ±1, ±2, ±4, and those have
+/// to serve two jobs at once: a slow turn wants to be fine enough to dial
+/// in a resonant filter, and a fast one wants to cross the range without
+/// a dozen revolutions. Linear scaling can have one or the other. Squaring
+/// the magnitude spreads the same three values over 16×, so at the default
+/// a detent is 0.2% slow and 3.1% fast — roughly 500 detents for a careful
+/// full sweep, or 32 for a quick one.
+pub fn step_lsbs(delta: i8, scale: i32) -> i16 {
+    let magnitude = delta.unsigned_abs() as i32;
+    let step = (magnitude * magnitude * scale).clamp(0, MAX_STEP_LSB);
+    (step * delta.signum() as i32) as i16
+}
+
 /// Most engine events one surface input can produce. A track select
 /// produces two: the selection is internal, the audition is a note.
 const MAX_EVENTS: usize = 2;
@@ -362,6 +404,8 @@ pub struct Surface<const N: usize> {
     page: u8,
     shift: bool,
     held: Option<Held>,
+    /// What one detent of a slow turn is worth, in 14-bit LSBs.
+    detent_lsb: i32,
     /// Per encoder, the address a turn in progress is anchored to.
     anchor: [Option<Addr>; ENCODERS],
     /// Catalogue index of the machine loaded on each track.
@@ -393,6 +437,7 @@ impl<const N: usize> Surface<N> {
         }
         Surface {
             catalogue,
+            detent_lsb: DETENT_LSB,
             tracks,
             screen: Screen::Macros,
             selected: 0,
@@ -403,6 +448,14 @@ impl<const N: usize> Surface<N> {
             machine,
             values,
         }
+    }
+
+    /// Set what one detent of a slow turn is worth, in 14-bit LSBs.
+    ///
+    /// Exposed so it can be tuned by feel against the hardware without a
+    /// rebuild; see `--detent-lsb`.
+    pub fn set_detent_lsb(&mut self, lsbs: i32) {
+        self.detent_lsb = lsbs.max(1);
     }
 
     /// Tracks the device has.
@@ -495,7 +548,7 @@ impl<const N: usize> Surface<N> {
         let Some(addr) = self.anchor[slot].or_else(|| self.encoder_addr(row, column)) else {
             return out;
         };
-        let step = delta as i16;
+        let step = step_lsbs(delta, self.detent_lsb);
         self.apply_step(addr, step);
         out.push(MidiEvent::NrpnStep {
             channel: addr.track,
@@ -1582,7 +1635,7 @@ mod tests {
                 channel: 2,
                 group: ParamGroup::Track as u8,
                 index: expected.index,
-                step: -3,
+                step: step_lsbs(-3, DETENT_LSB),
             }]
         );
 
@@ -1903,14 +1956,17 @@ mod tests {
         assert_ne!(s.value(0, flat), 0.0, "the selector actually moved");
     }
 
-    /// A step is handed to the engine unmodified: acceleration is the
-    /// controller's job, and the engine keeps no per-parameter timing
-    /// state (`DESIGN.md`, "The control surface is NRPN").
+    /// A detent is scaled into a step worth hearing.
+    ///
+    /// The controller reports ±1, ±2, ±4 — measured on the hardware — and
+    /// handing those to the engine as 14-bit LSBs makes one detent 0.006%
+    /// of a parameter's range. The knobs move the numbers and nothing is
+    /// audible, which is exactly how it presented.
     #[test]
-    fn the_step_magnitude_passes_straight_through() {
+    fn a_detent_is_scaled_into_an_audible_step() {
         let (mut s, _) = surface();
         press(&mut s, Button::Group(gcol(ParamGroup::Filter)), 0);
-        for delta in [1i8, 6, -11, 64, -64] {
+        for (delta, expected) in [(1i8, 32i16), (2, 128), (4, 512), (-1, -32), (-4, -512)] {
             let out = s.handle(
                 Input::Encoder {
                     row: 0,
@@ -1922,8 +1978,62 @@ mod tests {
             let MidiEvent::NrpnStep { step, .. } = out.events().next().unwrap() else {
                 panic!("expected a step");
             };
-            assert_eq!(step, delta as i16);
+            assert_eq!(step, expected, "delta {delta}");
         }
+    }
+
+    /// The scaling is signed, squared, and capped.
+    #[test]
+    fn step_scaling_is_squared_and_bounded() {
+        assert_eq!(step_lsbs(0, DETENT_LSB), 0);
+        assert_eq!(step_lsbs(1, DETENT_LSB), 32);
+        assert_eq!(step_lsbs(-1, DETENT_LSB), -32);
+        assert_eq!(step_lsbs(2, DETENT_LSB), 128);
+        assert_eq!(step_lsbs(4, DETENT_LSB), 512);
+        // A curve reporting larger magnitudes than the ±4 measured here
+        // must not grow quadratically into an end-to-end jump.
+        assert_eq!(step_lsbs(64, DETENT_LSB), MAX_STEP_LSB as i16);
+        assert_eq!(step_lsbs(-64, DETENT_LSB), -(MAX_STEP_LSB as i16));
+        // And it never overflows the i16 the event carries.
+        assert!(step_lsbs(127, DETENT_LSB) <= NRPN_MAX as i16);
+    }
+
+    /// A full sweep has to be reachable by hand. Slow is fine, fast is
+    /// quick, and neither is thousands of turns.
+    #[test]
+    fn a_full_sweep_is_a_reasonable_number_of_detents() {
+        let slow = NRPN_MAX as i32 / step_lsbs(1, DETENT_LSB) as i32;
+        let fast = NRPN_MAX as i32 / step_lsbs(4, DETENT_LSB) as i32;
+        assert!(
+            (200..=800).contains(&slow),
+            "a careful sweep is {slow} detents"
+        );
+        assert!((16..=64).contains(&fast), "a quick sweep is {fast} detents");
+    }
+
+    /// A discrete parameter reads only the sign, so scaling must not turn
+    /// one detent into a jump across the catalogue.
+    #[test]
+    fn scaling_does_not_affect_discrete_parameters() {
+        let (mut s, mut engine) = surface();
+        press(&mut s, Button::Group(gcol(ParamGroup::Track)), 0);
+        let before = engine.tracks()[0].id().index();
+        let out = s.handle(
+            Input::Encoder {
+                row: 0,
+                column: 0,
+                delta: 4,
+            },
+            10,
+        );
+        for ev in out.events() {
+            handle_midi(&mut engine, ev);
+        }
+        assert_eq!(
+            engine.tracks()[0].id().index(),
+            before + 1,
+            "one detent is one machine however hard it is turned"
+        );
     }
 }
 

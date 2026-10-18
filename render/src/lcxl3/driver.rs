@@ -130,6 +130,12 @@ pub struct Config {
     /// appears dead is immediately one of: the device sends nothing, the
     /// device sends something unexpected, or the surface declined it.
     pub trace: bool,
+    /// What one detent of a slow turn is worth, in 14-bit NRPN LSBs.
+    ///
+    /// The right value is a feel judgement, so it is a flag rather than a
+    /// constant: see `surface::DETENT_LSB` for why the driver has to
+    /// decide it at all.
+    pub detent_lsb: i32,
     /// Do not open the engine's virtual CoreMIDI input port.
     ///
     /// That port is open to the whole system: any application can send to
@@ -853,6 +859,7 @@ mod tests {
             trace: false,
             mode: wire::MODE_DAW_CONTROL,
             no_virtual_port: false,
+            detent_lsb: crate::lcxl3::surface::DETENT_LSB,
         };
         assert!(!config.fader_pickup);
         assert!(!config.trace);

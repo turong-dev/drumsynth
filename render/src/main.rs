@@ -500,6 +500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             trace,
             surface_mode,
             no_virtual_port,
+            detent_lsb,
         } => {
             let mode = match surface_mode.as_str() {
                 "control" => lcxl3::wire::MODE_DAW_CONTROL,
@@ -517,6 +518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trace,
                 mode,
                 no_virtual_port,
+                detent_lsb,
             };
             match device.as_str() {
                 "drum" => device::run_with_surface(

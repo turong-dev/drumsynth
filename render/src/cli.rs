@@ -434,6 +434,16 @@ pub(crate) enum Command {
         /// device sends something this build does not expect).
         #[arg(long)]
         trace: bool,
+        /// What one detent of a slow encoder turn is worth, in 14-bit
+        /// NRPN LSBs (full range is 16383).
+        ///
+        /// The controller's own acceleration is small — ±1, ±2, ±4 — so
+        /// the driver decides what those are worth. The step is the
+        /// square of the controller's magnitude times this, so the
+        /// default of 32 gives 0.2% of travel on a slow detent and 3.1%
+        /// on a fast one. Raise it for coarser, faster knobs.
+        #[arg(long, default_value_t = 32)]
+        detent_lsb: i32,
         /// Do not open the engine's virtual MIDI input port.
         ///
         /// That port is open to the whole system, so any application can

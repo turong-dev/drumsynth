@@ -156,7 +156,8 @@ where
 {
     use std::sync::atomic::Ordering;
 
-    let surface = Surface::<N>::new(catalogue_for::<Id, N>(), kit);
+    let mut surface = Surface::<N>::new(catalogue_for::<Id, N>(), kit);
+    surface.set_detent_lsb(config.detent_lsb);
     let mut driver = Driver::start(surface, config)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
