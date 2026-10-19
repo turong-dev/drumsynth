@@ -698,7 +698,9 @@ mod tests {
         // COUNT=15).
         e.tracks[0].set_param(SLOT_MACHINE, 0.5);
         assert_eq!(e.tracks[0].id(), MachineId::Cp);
-        // Params reset to the new machine's defaults, MACH slot mirroring it.
+        // The voice's params reset to the new machine's defaults, MACH slot
+        // mirroring it. What the *track* was set to survives — see
+        // `machine_change_keeps_the_track_and_resets_the_voice`.
         assert_eq!(e.tracks[0].base_params[SLOT_MACHINE], 7.0 / 14.0);
 
         // Re-setting the same machine is a no-op (doesn't wipe params).
@@ -712,6 +714,116 @@ mod tests {
         // Top of the range hits the last machine in the catalogue.
         e.tracks[0].set_param(SLOT_MACHINE, 1.0);
         assert_eq!(e.tracks[0].id(), MachineId::SweepFx);
+    }
+
+    /// A machine change changes the machine, and nothing else (#43).
+    ///
+    /// Level, output routing, pan, the sends, the core strip and the
+    /// modulation bus are channel state. A track mixed into a kit must not
+    /// lose its place in that mix because someone auditioned a different
+    /// voice on it, and a sequencer p-lock on `MACH` must not reset every
+    /// step after it.
+    ///
+    /// The param array and the live state it drives are checked together:
+    /// the old code reset the array without re-deriving `strip.out` or the
+    /// filter coefficients from it, so the two silently disagreed until
+    /// something else moved one of those rows.
+    #[test]
+    fn machine_change_keeps_the_track_and_resets_the_voice() {
+        let mut e = DrumEngine::new();
+        let t = &mut e.tracks[0];
+        assert_eq!(t.id(), MachineId::BdClassic);
+
+        t.set_param(SLOT_LEVEL, 0.2);
+        t.set_param(SLOT_OUT, 1.0); // Aux3
+        t.set_param(SLOT_PAN, 0.25);
+        t.set_param(SLOT_SEND_DELAY, 0.4);
+        t.set_param(SLOT_SEND_REVERB, 0.6);
+        t.set_param(SLOT_STRIP_CUT, 0.3);
+        t.set_param(SLOT_STRIP_RESO, 0.7);
+        t.set_param(SLOT_STRIP_DEC, 0.2);
+        t.set_param(SLOT_LFO1_RATE, 0.8);
+        t.set_param(SLOT_LFO1_DEPTH, 0.5);
+        t.set_param(SLOT_LFO1_DEST, 1.0);
+
+        let before = t.base_params;
+        let strip_before = t.strip;
+        let lfo_dest = t.mod_state.lfos[0].dest();
+        assert_ne!(
+            lfo_dest,
+            dsp::ModDest::Param(0),
+            "LFO1.DST is still its default, so preserving it proves nothing"
+        );
+
+        // 0.5 quantises onto Cp (index 7 of 15). Every track row set above
+        // must differ from what Cp would reset it to, or a surviving value
+        // could be a coincidence.
+        let defaults = MachineId::Cp.default_params();
+        let table = MachineId::Cp.params();
+        let track_rows: &[usize] = &[
+            SLOT_LEVEL,
+            SLOT_OUT,
+            SLOT_PAN,
+            SLOT_SEND_DELAY,
+            SLOT_SEND_REVERB,
+            SLOT_STRIP_CUT,
+            SLOT_STRIP_RESO,
+            SLOT_STRIP_DEC,
+            SLOT_LFO1_RATE,
+            SLOT_LFO1_DEPTH,
+            SLOT_LFO1_DEST,
+        ];
+        for &idx in track_rows {
+            assert_ne!(
+                before[idx], defaults[idx],
+                "slot {idx} ({}) was left at the incoming machine's default",
+                table[idx].name
+            );
+        }
+
+        t.set_param(SLOT_MACHINE, 0.5);
+        assert_eq!(t.id(), MachineId::Cp);
+
+        // Every track-routed row keeps its value, not just the ones listed
+        // above: walk the table by route so a row added later is covered.
+        for (idx, row) in table.iter().enumerate() {
+            if !matches!(row.route, ParamRoute::Slot | ParamRoute::Machine) {
+                assert_eq!(
+                    t.base_params[idx], before[idx],
+                    "track slot {idx} ({}) was reset by the swap",
+                    row.name
+                );
+            }
+        }
+
+        // And the live state those rows drive still agrees with them, which
+        // is the half the old code got wrong.
+        assert_eq!(t.strip.out, OutPair::Aux3);
+        assert_eq!(t.strip.f_cutoff_hz, strip_before.f_cutoff_hz);
+        assert_eq!(t.strip.f_reso_q, strip_before.f_reso_q);
+        assert_eq!(t.strip.amp_decay_s, strip_before.amp_decay_s);
+        assert_eq!(t.strip.pan, strip_before.pan);
+        assert_eq!(t.strip.send_delay, 0.4);
+        assert_eq!(t.strip.send_reverb, 0.6);
+        assert_eq!(t.mod_state.lfos[0].dest(), lfo_dest);
+
+        // The voice's own rows are the new machine's, MACH mirroring it.
+        for (idx, row) in table.iter().enumerate() {
+            if row.route == ParamRoute::Slot {
+                assert_eq!(
+                    t.base_params[idx], defaults[idx],
+                    "voice slot {idx} ({}) did not reset",
+                    row.name
+                );
+            }
+        }
+        assert_eq!(t.base_params[SLOT_MACHINE], 7.0 / 14.0);
+
+        // The CC smoother follows the array it was handed, track rows
+        // included: nothing is left ramping toward a value the swap
+        // replaced.
+        assert_eq!(t.param_target(SLOT_LEVEL), before[SLOT_LEVEL]);
+        assert!(!t.is_param_pending(SLOT_LEVEL));
     }
 
     /// Output routing (SLOT_OUT) quantises 0..1 over the 4 `OutPair`

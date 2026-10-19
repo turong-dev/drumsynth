@@ -648,8 +648,8 @@ mod tests {
     }
 
     /// The machine selector is TRACK 0: an NRPN data entry onto it jumps
-    /// instantly, exactly as CC 36 does — and resets params to the new
-    /// machine's defaults.
+    /// instantly, exactly as CC 36 does — and resets the voice's params to
+    /// the new machine's defaults.
     #[test]
     fn nrpn_swaps_the_machine_instantly() {
         use crate::{DrumEngine, MachineId, SLOT_MACHINE};

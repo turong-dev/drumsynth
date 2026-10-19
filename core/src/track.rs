@@ -328,16 +328,44 @@ where
         core::ptr::addr_of_mut!((*ptr).strip_bypass).write(false);
     }
 
-    /// Replace the slot on this track, resetting params to its defaults. Strip
-    /// and modulation are untouched.
+    /// Replace the voice on this track, resetting its params to the new
+    /// machine's defaults. Track state survives.
+    ///
+    /// A machine change changes the machine. What the *track* was set to —
+    /// level, output routing, pan, the sends, the core strip, the modulation
+    /// bus — is channel state that the voice happens to sit inside, and it
+    /// stays put. Resetting it meant a track lost its place in a kit mix the
+    /// moment someone auditioned a different machine on it, and made a
+    /// sequencer p-lock on `MACH` destructive to every step after it (#43).
+    ///
+    /// [`ParamRoute`] already draws the line this needs: a row that does not
+    /// route to the slot is not the slot's to reset. Matching on the route
+    /// rather than on flat indices keeps the rule device-agnostic — mi-drum
+    /// runs its own strip and shaper inside the voice, so those rows route
+    /// to [`ParamRoute::Slot`] and *do* reset there, which is right, because
+    /// on that device they are part of the machine.
+    ///
+    /// Nothing is re-applied afterwards, and nothing needs to be: the live
+    /// strip and LFO state is already what the preserved values describe.
+    /// That is also what fixes the divergence this used to leave behind —
+    /// the old code reset the param array without re-deriving the strip
+    /// coefficients or `strip.out` from it, so a swapped track went on
+    /// filtering and routing the old way while its params claimed defaults.
     #[allow(unsafe_code)]
     pub fn load_machine(&mut self, id: S::Id) {
+        let previous = self.base_params;
+        let outgoing = self.slot.id();
         self.base_params = S::Id::default_params(id);
-        // Sends are track-level, not slot-level: keep the strip's aux levels
-        // and mirror them back into the param slots so the two stay consistent.
+        for (idx, value) in previous.iter().enumerate() {
+            if outgoing.param_route(idx) != ParamRoute::Slot {
+                self.base_params[idx] = *value;
+            }
+        }
+        // Pan and the sends have a second home in the strip, which a direct
+        // `set_strip` can move without going through a param. The strip is
+        // the authority for those two; mirror it back so they cannot drift.
         self.base_params[SLOT_SEND_DELAY] = self.strip.send_delay;
         self.base_params[SLOT_SEND_REVERB] = self.strip.send_reverb;
-        // Pan is track-level too: keep the strip's pan mirrored in the param.
         self.base_params[SLOT_PAN] = self.strip.pan * 0.5 + 0.5;
         // The MACH slot always mirrors the loaded slot (see `load_sound`).
         let divisor = S::Id::count().saturating_sub(1).max(1) as f32;
@@ -356,8 +384,11 @@ where
         // existing storage, and the slot was built by a previous
         // `new_in_place`, so `load_in_place`'s contract holds.
         unsafe { S::load_in_place(id, &self.base_params, &mut self.slot) };
-        // Params reset wholesale: the CC smoother must follow, not ramp from
-        // a value that no longer means anything on the new voice.
+        // The voice's params were replaced wholesale: the CC smoother must
+        // follow, not ramp from a value that no longer means anything on the
+        // new voice. A ramp in flight on a preserved track row is dropped
+        // too — a machine change is an instant jump, so there is no moment
+        // afterwards for it to still be heading somewhere.
         self.sync_param_smoothing();
     }
 
@@ -429,8 +460,9 @@ where
             // Machine selector: quantise 0..1 onto the slot catalogue.
             // Track-routed, so `(TRACK, 0)` swaps engines without a
             // program change.
-            // Loading a different slot resets params to its defaults — the
-            // old voice's param values mean nothing on the new one.
+            // Loading a different slot resets the voice's params to its
+            // defaults — the old voice's param values mean nothing on the
+            // new one — and keeps the track's own (`load_machine`).
             ParamRoute::Machine => {
                 let count = S::Id::count();
                 if count <= 1 {
@@ -547,7 +579,7 @@ where
     /// coefficient recompute per message — `set_param`, the recompute call,
     /// runs at most once per block per moving param. The slot selector jumps
     /// instantly: swapping engines must be immediate, and loading a slot
-    /// resets params to its defaults anyway.
+    /// replaces the voice's params with its defaults anyway.
     ///
     /// Control rate, main loop only — never the audio interrupt.
     pub fn set_param_target(&mut self, idx: usize, value: f32) {

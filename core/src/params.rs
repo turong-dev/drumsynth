@@ -412,7 +412,8 @@ pub enum ParamRoute {
     /// instantly — smoothing a discrete choice would route to a half-pair.
     Out,
     /// Machine selector: quantised onto the device catalogue and swapped in,
-    /// which resets params to the new machine's defaults. Instant.
+    /// which resets the *voice's* params to the new machine's defaults and
+    /// leaves every track-routed row alone. Instant.
     Machine,
 }
 
