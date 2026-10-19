@@ -6,20 +6,50 @@ use mi_drum_engine::MiDrumEngine;
 
 use crate::wav::append_block;
 
-/// Allocate a `MiDrumEngine` on the heap and construct it in-place.
+/// Allocate `T` on the heap and construct it there, never on the stack.
 ///
-/// The engine is too large for the default test thread stack, so this helper
-/// uses `alloc` + `new_in_place` instead of `MiDrumEngine::new()`.
-pub(crate) fn mi_drum_in_place() -> Box<MiDrumEngine> {
-    use std::alloc::{alloc, Layout};
+/// `Engine::new()` builds the whole engine in a local and the value is then
+/// moved out — in a debug build that is several hundred KB copied through a
+/// handful of frames. The main thread can absorb it; a libtest thread gets
+/// 2 MiB on the Linux runners and cannot, and the overflow aborts the whole
+/// test binary rather than failing one test.
+///
+/// `init` is handed uninitialised memory and must leave a fully constructed
+/// `T` behind.
+fn in_place<T>(init: impl FnOnce(*mut T)) -> Box<T> {
+    use std::alloc::{alloc, handle_alloc_error, Layout};
 
+    let layout = Layout::new::<T>();
+    // SAFETY: `ptr` is a fresh allocation for exactly `T`'s layout. `init`
+    // initialises it (both callers delegate to the engine's own
+    // `new_in_place`, which writes every field), so the `Box` below owns a
+    // valid `T` allocated by the global allocator.
     unsafe {
-        let layout = Layout::new::<MiDrumEngine>();
-        let ptr = alloc(layout) as *mut MiDrumEngine;
-        assert!(!ptr.is_null(), "failed to allocate MiDrumEngine");
-        MiDrumEngine::new_in_place(ptr);
+        let ptr = alloc(layout) as *mut T;
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
+        init(ptr);
         Box::from_raw(ptr)
     }
+}
+
+/// Allocate a `MiDrumEngine` on the heap and construct it in place.
+pub(crate) fn mi_drum_in_place() -> Box<MiDrumEngine> {
+    in_place(|ptr| unsafe {
+        MiDrumEngine::new_in_place(ptr);
+    })
+}
+
+/// Allocate a `DrumEngine` on the heap and construct it in place.
+///
+/// Only the tests need this today — the binary's own `DrumEngine::new()`
+/// calls all run on the main thread, which has the stack for them.
+#[cfg(test)]
+pub(crate) fn drum_in_place() -> Box<DrumEngine> {
+    in_place(|ptr| unsafe {
+        DrumEngine::new_in_place(ptr);
+    })
 }
 
 /// Render a single hit with a tail, for auditioning one track.

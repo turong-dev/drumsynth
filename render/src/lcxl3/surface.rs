@@ -1133,9 +1133,15 @@ mod tests {
 
     /// A surface over the drum device, with the kit a fresh `DrumEngine`
     /// loads — so a test can drive both and compare.
-    fn surface() -> (Surface<PARAMS>, DrumEngine) {
-        let engine = DrumEngine::new();
-        let kit = crate::lcxl3::snapshot::<_, PARAMS>(&engine);
+    ///
+    /// Boxed, and built in place: a `DrumEngine` is ~265 KB, and returning
+    /// one by value from here put several copies of it on a libtest thread's
+    /// stack. That fits on macOS and does not on the Linux runner, where it
+    /// aborted the whole `render` test binary rather than failing a test.
+    /// The mi-drum helper below has always done it this way.
+    fn surface() -> (Surface<PARAMS>, Box<DrumEngine>) {
+        let engine = crate::render::drum_in_place();
+        let kit = crate::lcxl3::snapshot::<_, PARAMS>(&*engine);
         let s = Surface::new(crate::lcxl3::catalogue_for::<MachineId, PARAMS>(), &kit);
         (s, engine)
     }
@@ -1987,7 +1993,7 @@ mod tests {
             now += HOLD_MS;
             let out = s.handle(input, now);
             for ev in out.events() {
-                handle_midi(&mut engine, ev);
+                handle_midi(&mut *engine, ev);
             }
         }
 
@@ -2025,7 +2031,7 @@ mod tests {
                 0,
             );
             for ev in out.events() {
-                handle_midi(&mut engine, ev);
+                handle_midi(&mut *engine, ev);
             }
         }
         assert_eq!(engine.tracks()[0].id().index(), before + 3);
@@ -2048,7 +2054,7 @@ mod tests {
         for _ in 0..5 {
             s.apply_step(addr, 1);
             handle_midi(
-                &mut engine,
+                &mut *engine,
                 MidiEvent::NrpnStep {
                     channel: 0,
                     group: id.group as u8,
@@ -2137,7 +2143,7 @@ mod tests {
             10,
         );
         for ev in out.events() {
-            handle_midi(&mut engine, ev);
+            handle_midi(&mut *engine, ev);
         }
         assert_eq!(
             engine.tracks()[0].id().index(),
